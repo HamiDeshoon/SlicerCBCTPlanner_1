@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "disclaimer": "Generic 3D printer geometric tolerance presets for surgical guide simulation. Verify all tolerances on physical calibration prints.",
+  "presets": [
+    {
+      "id": "sla_dlp_standard_50um",
+      "label": "SLA / DLP Dental Resin (50 µm layer)",
+      "guide_thickness_mm": 3.0,
+      "tissue_offset_mm": 0.10,
+      "sleeve_clearance_mm": 0.06,
+      "sleeve_wall_thickness_mm": 1.2,
+      "default_sleeve_height_mm": 5.0,
+      "default_sleeve_offset_above_crest_mm": 4.0
+    },
+    {
+      "id": "lcd_msla_standard_50um",
+      "label": "MSLA / LCD Dental Resin (50 µm layer)",
+      "guide_thickness_mm": 3.2,
+      "tissue_offset_mm": 0.12,
+      "sleeve_clearance_mm": 0.08,
+      "sleeve_wall_thickness_mm": 1.3,
+      "default_sleeve_height_mm": 5.0,
+      "default_sleeve_offset_above_crest_mm": 4.0
+    },
+    {
+      "id": "polyjet_high_precision_25um",
+      "label": "PolyJet High-Precision (25 µm layer)",
+      "guide_thickness_mm": 2.8,
+      "tissue_offset_mm": 0.08,
+      "sleeve_clearance_mm": 0.04,
+      "sleeve_wall_thickness_mm": 1.1,
+      "default_sleeve_height_mm": 5.0,
+      "default_sleeve_offset_above_crest_mm": 4.0
+    }
+  ]
+}

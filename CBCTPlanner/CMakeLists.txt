@@ -4,6 +4,7 @@ set(MODULE_NAME CBCTPlanner)
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
+  cli_batch.py
   ${MODULE_NAME}Lib/__init__.py
   ${MODULE_NAME}Lib/Utils.py
   ${MODULE_NAME}Lib/VRVisualization.py
@@ -12,6 +13,8 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/CanalTracer.py
   ${MODULE_NAME}Lib/ImplantPlanner.py
   ${MODULE_NAME}Lib/AdvancedTools.py
+  ${MODULE_NAME}Lib/CheckpointInference.py
+  ${MODULE_NAME}Lib/Phase7Tools.py
   ${MODULE_NAME}Lib/core/__init__.py
   ${MODULE_NAME}Lib/core/arch_detector.py
   ${MODULE_NAME}Lib/core/labels.py
@@ -24,6 +27,8 @@ set(MODULE_PYTHON_SCRIPTS
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
   Resources/generic_implant_library.json
+  Resources/generic_prosthetic_library.json
+  Resources/printer_presets.json
   )
 
 #-----------------------------------------------------------------------------

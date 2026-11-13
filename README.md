@@ -1,60 +1,65 @@
-# SlicerCBCTPlanner (v2.0.0)
+# SlicerCBCTPlanner
 
-> **CLINICAL DISCLAIMER — NOT FOR DIAGNOSTIC USE / PLANNING AID ONLY**
-> `SlicerCBCTPlanner` is an open-source research and pre-surgical planning aid for 3D Slicer. It is **not** a certified medical device and must **not** be used for primary clinical diagnosis or unverified surgical execution. All CBCT gray-value intensity figures and Misch bone density classifications (`D1–D5`) are **approximate** because Cone-Beam CT voxel gray values are not calibrated Hounsfield Units (HU). Any AI-suggested implant dimensions are labeled as unconfirmed suggestions and require explicit clinician confirmation before entering exported reports.
+**3D Slicer Scripted Extension for Dental CBCT Implant & Orthognathic Planning**
 
----
+> **Not for diagnostic use / planning aid only.** All CBCT gray values are approximate and not calibrated Hounsfield Units (HU). Verify all anatomical structures, nerve proximity, and implant positions clinically.
 
-## Overview & 6-Step Workflow
+## Features
 
-`SlicerCBCTPlanner` is a standalone 3D Slicer scripted loadable extension (`CBCTPlanner`) providing end-to-end dental CBCT visualization, Curved Planar Reformation (CPR) panoramic generation, synchronized multi-slice cross-sectional lightbox navigation, mandibular canal tracing, generic cylinder implant placement, and clinical reporting.
+### 1. Volume, Custom AI Model Checkpoint & 5-Class DentalSegmentator Integration
+- **Place Your Own AI Checkpoint (`CheckpointInference.py`)**:
+  - Load your own trained 3D segmentation checkpoint directly in **Step 1 -> AI Model Checkpoint (Place Your Checkpoint)** or via the headless CLI (`CBCTPlanner/cli_batch.py --checkpoint ...`).
+  - **Supported formats**:
+    - PyTorch `state_dict` / checkpoint dictionaries (`.pth`, `.pt`, `.ckpt`) — automatically unwraps `network_weights`, `state_dict`, `model_state_dict`, or `model`, strips `module.` / `_orig_mod.` prefixes, infers `(in_channels, num_classes, base_filters)`, and uses shape-safe weight loading (`load_state_dict_shape_safe`) so custom layers never crash with size mismatches.
+    - Custom Python architecture scripts (`.py`) + class/builder name (e.g., `ResEncoderUNet`, `CascadingUNet`, `StripPoolUNet`).
+    - TorchScript archives (`.pt`, `.ts`) and ONNX models (`.onnx` via `onnxruntime`).
+    - `nnUNetv2` trained model folders (`dataset.json` + `plans.json` + `fold_0/checkpoint_final.pth`).
+    - Pre-computed 3D labelmaps (`.nii`, `.nii.gz`, `.npy`, `.npz`).
+  - **3D Sliding-Window Inference**: Configurable 3D patch size (e.g. `96,96,96` or `128,128,128`), overlap (`0.5`), 3D Gaussian importance weighting, intensity normalization (`ct_hu`, `zscore`, `minmax`), and automatic mapping to `DentalSegmentator` 5-class (`Maxilla`, `Mandible`, `Upper Teeth`, `Lower Teeth`, `Mandibular Canal`), `ToothFairy` multi-class FDI, or binary segmentation nodes.
+- **5-Class DentalSegmentator Styling & VR Presets**:
+  - Automatic 5-class color and 3D opacity presets (`Maxilla & Upper Skull`, `Mandible`, `Upper Teeth`, `Lower Teeth`, `Mandibular canal`) and `SlicerDentalSegmentator` integration.
+  - Non-destructive 3-point Occlusal Plane alignment (`vtkMRMLLinearTransformNode` applied jointly to volume, segmentation, curves, fiducials, and rulers with one-click reset).
 
-1. **Step 1 — Load CBCT, Segmentation & 3D / VR View**:
-   - Select an input CBCT scalar volume and optional segmentation (`DentalSegmentator` 5-class or `ToothFairy3` FDI labels).
-   - Switch between the **3-Slice Cross-Sectional Lightbox** (`CS-`, `CS0`, `CS+` on bottom; `Pano`, `Axial`, `3D` on top), **Single Cross-Section Dental Layout**, and **Standard MPR**.
-   - Define or auto-fit the **Occlusal Plane** (3-point fiducials or automated SVD fit to segmented tooth cusps/incisal edges, **F6**) and apply a **non-destructive parent transform** (`<Vol>_OcclusalAlignmentTransform`, **B3**) keeping the volume, segmentation, curves, fiducials, and rulers co-registered, with one-click reset.
-   - Apply **DentalSegmentator 3D surface styling** + **2D tooth outlines & `#FDI` overlays** (**F4**), or enable **3D Volume Rendering** with preset re-application (**B8**) and automatic percentile-based transfer functions when voxel values are non-HU (`min > -500` or `max > 10000`).
-2. **Step 2 — Dental Arch Curve (`Right -> Left` in RAS)**:
-   - Choose **Per-Jaw (`Lower` / `Upper`)** or **Shared Occlusal Arch** (**F3**, with automatic migration of legacy per-jaw curves).
-   - Auto-fit a voxel-grid-downsampled principal horseshoe spline (**B20**) to segmented teeth (never falls back to fitting the whole skull), or enter interactive **Markups Place Mode** when unsegmented. Protects user-edited curves (`CBCTPlanner.UserEdited = "1"`) with confirmation before overwriting (**B14**).
-3. **Step 3 — In-Process Panoramic CPR (`Mean` / `MIP` / `MinIP` / `RaySum`)**:
-   - Generates Curved Planar Reformatted (CPR) panoramic radiographs **in-process** using `scipy.ndimage.map_coordinates(..., order=1)` across slab layers (**O1**) with right-handed displacement frames (`det([-N, B, T]) = +1`, **B5**) and fixed `<= 1.5 mm` frame sampling (**B6**).
-   - Configurable slab thickness, height, and buccolingual offset (**F3**), chunked non-blocking `QTimer` progress/cancel, and zoom/pan preservation across preview/release refreshes (**B10**).
-4. **Step 4 — Multi-Slice Cross-Sectional Lightbox & $\pm 30^\circ$ Tilt**:
-   - Draggable cross-section lines on Axial (`Red`) and Panoramic (`Green`) views with sub-sample line-segment curve projection (**B13**) and 30 ms coalesced updates (**O2**).
-   - **$\pm 30^\circ$ Cross-Section Tilt** around the Buccal-Lingual normal $\mathbf{N}$ (`det = +1`) and **Dynamic Lightbox** (`3, 5, 7, ...` slices, **F5**) with explicit **Slab Reconstruction** checkbox and mode (`Mean` default, `MIP`, `MinIP`, **B12**).
-   - Preserves user Axial (`Red`) slice scrolling during cursor moves and syncs Axial Z only on explicit tooth jumps (**B11**).
-   - Slice-view scoped keyboard shortcuts (`Left`/`Right` $\pm 1\text{ mm}$, `PgDn`/`PgUp` $\pm 5\text{ mm}$, `Ctrl+Z`/`Ctrl+Y` Undo/Redo, **B7, F13**).
-5. **Step 5 — Odontogram, Site Morphometry, Implants & Clinical Report**:
-   - **Odontogram** (**B17**): Plain click jumps the cursor to that FDI tooth without altering the plan; `Ctrl+Click` or **Toggle Active Tooth in Plan** adds/removes the tooth; **Lock to Tooth FDI** locks the cursor and releases on manual cursor drag.
-   - **FDI-to-Arc Mapping** (**B2**): Projects segmented tooth centroids onto the arch curve (`source="segmentation"`), interpolates missing teeth between segmented neighbors, or falls back to standard adult mesiodistal crown widths (`source="approximate_width_table"`, flagged `"approximate"`) with support for calibrated tooth markers.
-   - **Arch-Frame Cross-Section Morphometry** (**B4**): Resamples the cross-section plane perpendicular to the arch tangent along $(\mathbf{N}, \mathbf{B})$ in world space (invariant to flipped array axis `K` or oblique volume tilt).
-   - **Honest Manual Rulers** (**B1**): Pre-created template rulers are flagged `CBCTPlanner.UserModified = "0"` and return `None` (`"not measured"`) until the user moves their endpoints or places them interactively.
-   - **Implant Placement & Verification** (**F2, F11, F12, F19**): Extensible generic JSON cylinder library (`Resources/generic_implant_library.json`, zero manufacturer data), cross-section tilt/placement, live clearance to Mandibular Canal and Maxillary Sinus, inter-implant parallelism angles, approximate peri-implant gray-value & NNT concentric shell summary, **Implant-Centric View**, `.stl` + `.json` export, and clinician confirmation gate for AI suggestions.
-   - **Clinical Reports** (**B21, B22, F10**): Exports printable **HTML** and **PDF** reports (with `vtkWindowToImageFilter` renderWindow screenshots, dynamic lightbox step labels, opt-in patient metadata anonymized by default, software version, and disclaimer) plus **CSV** (numeric columns empty `""` when unmeasured with a dedicated `measurement_source` column) and **JSON**.
-6. **Step 6 — Mandibular Canal (IAN), Pharyngeal Airway & TMJ Views**:
-   - **Mandibular Canal & Root-Canal Tracer** (**F1**): Automated centerline + local EDT radius extraction from class 5 / IAN masks, manual trace mode, 2D/3D tube display, configurable `2.0 mm` safety margin, and `OnDemand3D`-style proximity warnings.
-   - **Pharyngeal Airway Analysis** (**F7**): Intensity threshold + 3D connected-component seeded region growing reporting total airway volume ($\text{mm}^3$ / $\text{cm}^3$) and minimum cross-sectional area ($\text{mm}^2$).
-   - **TMJ Views** (**F8**): Bilateral Left and Right mandibular condyle sagittal and coronal slice presets.
+### 2. Dental Arch Curve & Fast In-Process Curved Planar Reformation (CPR)
+- Right-to-Left (descending RAS X) arch curve parameterization (`18..11, 21..28` / `48..41, 31..38`) with smooth cubic B-spline auto-fit (`scipy.interpolate.splprep`) and user-edit protection.
+- Fast in-process vectorized `scipy.ndimage.map_coordinates` panoramic straightening (~50–150 ms) with handedness verification (`det(N, -B, T) == +1`).
 
----
+### 3. Interactive Cross-Section Navigation, 3-Slice Lightbox & +-30 deg Tilt
+- Synchronized **Axial (Red)** perpendicular draggable line, **Panoramic (Green)** vertical cursor line, and **Cross-Section (Yellow)** orthogonal view.
+- **3-Slice Cross-Sectional Lightbox** (`-2 mm, 0 mm, +2 mm` or custom step) and **$\pm 30^\circ$ Cross-Section Tilt** slider.
 
-## Running Tests & Smoke Verification
+### 4. Inferior Alveolar Nerve (IAN) Canal Tracing & Safety Clearance (`F1`)
+- Bilateral Left/Right mandibular canal curves (`CBCT_Canal_L`, `CBCT_Canal_R`), 2.0 mm 3D tube visualization, Yellow slice intersection ring, and 3D clearance warnings (`< 2.0 mm`).
 
-### Standalone Python Unit & Integration Suite (No 3D Slicer Required)
+### 5. Virtual Implant Placement, Prosthetic Library & Surgical Guide Export (`F2, F11, F14, F16, F19`)
+- **Implant Library (`Resources/implant_catalog.json`)**: Generic and manufacturer systems (Straumann, Nobel Biocare, Zimmer Biomet, Megagen) with 1.5 mm radial + 2.0 mm apical safety zone meshes and bone-density (`D1–D4`) assessment along the implant body.
+- **Prosthetic Library (`Resources/generic_prosthetic_library.json`, `F16`)**: Straight / 15° / 25° Ti-base abutments and tooth-group anatomic crown envelopes with restorative emergence angle and crown-to-implant (C/I) ratio evaluation.
+- **Surgical Guide Generator (`Resources/printer_presets.json`, `F14`)**: Tooth- and mucosa-supported surgical guide baseline mesh generation with open cylindrical sleeve drill bores, printer offset presets (`SLA/DLP`, `MSLA/LCD`, `PolyJet`), and watertight `.stl` + `.json` export.
+- **AI-Suggested Implant Plan (`F19`)**: Generates an initial plan marked `"Suggestion (unconfirmed)"` requiring explicit clinician confirmation before export.
+
+### 6. Clinical Tools, 3D Cephalometry, AutomatedDentalTools & DICOM SEG/SR (`F4–F18, F20`)
+- **Bone Density ROI (`F4`)**, **TMJ Bilateral Condyle Views (`F6`)**, **Maxillary Sinus Floor Analysis (`F7`)**, **Airway Pharyngeal Volume & Minimum Cross-Sectional Area (`F8`)**, **Superimposition (`F9`)**, **Endodontic Working-Length & Root-Canal Curvature (`F10`)**, **3D Cephalometry (`SNA, SNB, ANB, FMA, GoGn-SN, U1-L1`, `F17`)**, **AutomatedDentalTools Bridges (`ASO, AMASSS, ALI, AReg, AutoCrop3D, BatchDentalSegmentator, MRI2CBCT`, `F18`)**, **DICOM SEG & Structured Report Export (`F15`)**, and **Headless Batch CLI (`CBCTPlanner/cli_batch.py`, `F20`)**.
+
+## Installation in 3D Slicer
+1. Open **3D Slicer** (5.6 or newer).
+2. Navigate to **Edit -> Application Settings -> Modules**.
+3. Under **Additional module paths**, click **Add** and select the `CBCTPlanner` directory inside this repository (the folder containing `CBCTPlanner.py`).
+4. Click **OK** and restart 3D Slicer.
+5. Open the module from **Modules -> Dental -> CBCT Implant Planner**.
+
+## Running Headless Batch CLI (`F20`)
+```bash
+python3 CBCTPlanner/cli_batch.py \
+  --input /path/to/cbct_volume.nii.gz \
+  --checkpoint /path/to/my_3d_unet_checkpoint.pth \
+  --label-scheme dental_segmentator_5 \
+  --patch-size 96,96,96 \
+  --teeth 36,46 \
+  --output-dir /path/to/output_report
+```
+
+## Running Tests
 ```bash
 python3 -m unittest discover -s tests -v
 python3 tests/smoke.py
 ```
-
-### Live 3D Slicer Headless Smoke Test
-```bash
-Slicer --no-main-window --python-script tests/smoke.py
-```
-
----
-
-## Known Limitations
-1. **Uncalibrated CBCT Gray Values**: Cone-Beam CT voxel intensities vary across scanners, FOVs, kVp/mAs settings, and scatter/beam-hardening artifacts. All reported gray values and Misch bone density classes (`D1–D5`) are explicitly labeled **approximate** and must not be treated as calibrated CT Hounsfield Units.
-2. **Whole-Skull Arch Fallback Removed (B20)**: When a segmentation contains only full-cranium or full-mandible bone labels without segmented teeth, `Auto-Fit Arch` intentionally declines to fit to the whole skull/ramus and switches to interactive Markups curve placement.
-3. **Phase 7 (P3 Features F14–F20)**: Surgical guide sleeve CAD (`F14`), DICOM SEG/SR (`F15`), abutment/crown library (`F16`), 3D cephalometry (`F17`), full `SlicerAutomatedDentalTools` execution wrappers (`F18`), and headless CLI batch runner (`F20`) are scoped for Phase 7 after Phases 1–6 merge.

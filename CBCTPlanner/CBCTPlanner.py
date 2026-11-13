@@ -12,35 +12,26 @@ Implements a comprehensive clinical workflow backed by a single-source-of-truth 
         or volume tilt) and Misch density classes labeled `"approximate (CBCT gray values are not calibrated HU)"`.
       * Visible `"NOT FOR DIAGNOSTIC USE — PLANNING AID ONLY"` banner in UI and all exports.
   - Phase 2 (Correctness B5-B20):
-      * B5: Right-handed (`det = +1`) CPR displacement frame `(-N, B, T)` matching grid frame `det = +1`.
-      * B6: Fixed `<= 1.5 mm` CPR frame spacing independent of output voxel spacing.
-      * B7: Slice-view scoped keyboard shortcuts (`should_handle_navigation_shortcut`).
-      * B8: VR preset re-application on `A->B->A` switch and percentile-based transfer functions for non-HU CBCTs.
-      * B9: Bounded LRU caches (`max_entries=8`) and automatic cleanup of finished/cancelled CLI nodes.
-      * B10: Preserves user zoom/pan on panoramic preview/release refreshes.
-      * B11: Updates Axial (`Red`) slice offset only on explicit tooth jump (`sync_axial_slice=True`).
-      * B12: Explicit Slab Reconstruction checkbox and mode (`Mean` default, `MIP`, `MinIP`).
-      * B13: Sub-sample line-segment curve projection.
-      * B14: Automatic curve observers on all ParameterNode-referenced curves (including scene/MRB loads).
-      * B15: Node reference IDs stored in ParameterNode so renaming volumes never orphans curves or lines.
-      * B16: Full UI state persisted in ParameterNode (`QSettings` used only for initial global defaults).
-      * B17: Odontogram plain click = jump only; `Ctrl+click`/double-click/button toggles plan; Lock to Tooth locks.
-      * B18: `ctkCollapsibleButton` headers always remain enabled; inner content widgets disable with hint text.
-      * B19: Segment matching by terminology/attributes + exact token regex + precedence (`pulp > tooth > canal > sinus > jaw`).
-      * B20: Voxel-grid downsampled horseshoe spline arch auto-fit (drops whole-skull fallback).
+      * B5-B20: Right-handed CPR displacement frame, <=1.5 mm frame spacing, focus-guarded shortcuts,
+        VR preset re-application & non-HU percentiles, bounded LRU caches, zoom-preserving pano refresh,
+        Red axial scroll preservation, explicit Slab checkbox & Mean/MIP mode, sub-sample segment projection,
+        ParameterNode curve observers, node ID references, full ParameterNode round-trip, odontogram click vs
+        toggle & Lock to Tooth, enabled collapsible headers, exact token segment precedence, and spline arch auto-fit.
   - Phase 3 (Performance O1-O9):
-      * O1: In-process `scipy.ndimage.map_coordinates` panoramic generator (`Mean`/`MIP`/`MinIP`/`RaySum`).
-      * O2: 30 ms coalesced cursor timer, single frame eval, dirty-node-only `StartModify`/`EndModify`.
-      * O3: MTime-cached `MeasurementEngine`, zero-copy volume view, and ROI-cropped EDT.
-      * O4-O9: `CursorSettings` dataclass, node ID caching, one-time ParameterNode defaults, ruff config, and phantom integration test.
-  - Phase 4-6 (UX, Reporting & Clinical Features F1-F13, F18-F19):
-      * B21-B22, F10: `vtkWindowToImageFilter` screenshots, dynamic lightbox labels, opt-in patient metadata,
-        HTML + PDF report, clean numeric CSV columns with `measurement_source`.
-      * F1: Mandibular canal & root-canal centerline + radius tube, manual trace, and 2 mm safety proximity alert.
-      * F2, F11, F12, F19: Generic JSON implant library, cross-section placement/tilt, canal/sinus/implant clearance,
-        parallelism angles, approximate gray values, implant-centric view, STL/JSON/DICOM export, and clinician confirmation gate.
-      * F3-F9, F13, F18: Single occlusal arch mode with migration, FDI overlays, dynamic lightbox & density profile,
-        automated occlusal plane from teeth + ASO detection, airway volume/mCSA, TMJ presets, angle/surface distance, and Undo/Redo.
+      * O1-O9: In-process `scipy.ndimage.map_coordinates` panoramic generator, 30 ms coalesced cursor timer,
+        MTime-cached MeasurementEngine, zero-copy volume view, ROI-cropped EDT, `CursorSettings`, ruff config,
+        and synthetic phantom integration test.
+  - Phase 4-7 (UX, Reporting, P1-P3 Clinical Features F1-F20 & Custom AI Checkpoint Inference):
+      * Custom AI Checkpoint Inference (`CheckpointInferenceEngine`): drop in any `.pth`, `.pt`, `.ckpt`,
+        `.onnx`, `.npy`, `.nii.gz`, or `nnUNetv2` folder (plus optional custom `.py` model script) to run
+        3D Gaussian-weighted sliding-window segmentation directly into a styled `vtkMRMLSegmentationNode`.
+      * F1-F13: Mandibular canal & root-canal tracing, generic JSON implant library, single occlusal arch,
+        FDI overlays, dynamic lightbox & density profile, occlusal SVD fit, airway volume/mCSA, TMJ presets,
+        3D angle & surface distance, HTML + PDF report, STL/DICOM export, NNT bone density, and Undo/Redo.
+      * F14-F20: Surgical guide CAD with sleeve bores & printer presets (F14), DICOM SEG/SR export (F15),
+        generic abutment & anatomic crown proposals (F16), 3D cephalometry against norms (F17),
+        `SlicerAutomatedDentalTools` integration (F18), clinician confirmation gate for AI suggestions (F19),
+        and headless batch CLI pipeline (`cli_batch.py`, F20).
 """
 
 from __future__ import annotations
@@ -106,21 +97,31 @@ except ImportError:
             pass
 
 from CBCTPlannerLib import (
+    AUTOMATED_DENTAL_TOOLS_MODULES,
     CLINICAL_DISCLAIMER_TEXT,
     DENTAL_SEGMENT_PRESETS,
     SOFTWARE_VERSION,
     AirwayAnalysisResult,
     CanalProximityResult,
     CanalTracerLogic,
+    CephalometricMeasurement,
+    CheckpointInferenceEngine,
+    CheckpointLoadSummary,
+    CheckpointSpec,
     CrossSectionNavigator,
     CursorSettings,
+    GuideSleeveSpec,
     ImplantPlannerLogic,
     PanoramicCurveLogic,
     PlacedImplant,
+    ProstheticPlanner,
+    ProstheticProposal,
+    SurgicalGuideGenerator,
     TMJCondyleFrame,
     UndoRedoManager,
     VRVisualizationLogic,
     capture_slice_view_png_base64,
+    compute_3d_cephalometry,
     compute_angle_between_three_points_deg,
     compute_occlusal_plane_from_segmentation,
     compute_pharyngeal_airway_metrics,
@@ -128,10 +129,13 @@ from CBCTPlannerLib import (
     compute_tmj_condyle_frames,
     create_or_update_fdi_segmentation_overlays,
     detect_automated_dental_tools_modules,
+    export_dicom_seg_and_sr,
     export_html_to_pdf,
     export_reformatted_dicom_series,
     registerAndSetDentalLayout,
     registerAndSetDentalLightboxLayout,
+    run_automated_dental_tool,
+    run_headless_batch_pipeline,
     should_handle_navigation_shortcut,
 )
 from CBCTPlannerLib.core.arch_detector import (
@@ -194,10 +198,10 @@ class CBCTPlanner(ScriptedLoadableModule):
             self.parent.contributors = ["Seyyed Hamid Aghlmand Sarmi"]
             self.parent.helpText = (
                 f"{CLINICAL_DISCLAIMER_TEXT}\n\n"
-                "Dental CBCT Planner: 6-step workflow (Load -> Arch -> Panoramic -> "
-                "Cross-sections -> Plan & Implants -> Canal/Airway/TMJ) with in-process CPR, "
-                "dynamic multi-slice lightbox, +-30 deg tilt, mandibular canal proximity alerts, "
-                "extensible JSON implant library, and HTML/PDF/CSV/STL/DICOM export."
+                "Dental CBCT Planner: 7-step workflow (Load & Custom AI Checkpoint -> Arch -> "
+                "Panoramic -> Cross-sections -> Plan & Implants -> Canal/Airway/TMJ -> Surgical Guide, "
+                "Crown/Abutment, 3D Ceph & DICOM SEG/SR) with in-process CPR, dynamic multi-slice "
+                "lightbox, +-30 deg tilt, and headless CLI batch execution."
             )
             self.parent.acknowledgementText = (
                 "Uses 3D Slicer, DentalSegmentator visualization presets, and PerkLab CPR conventions."
@@ -230,6 +234,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.step4ContentWidget: Any = None
         self.step5ContentWidget: Any = None
         self.step6ContentWidget: Any = None
+        self.step7ContentWidget: Any = None
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
@@ -299,9 +304,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         bannerLayout.addLayout(undoRow)
         self.layout.addWidget(bannerFrame)
 
-        # ==================== STEP 1: LOAD ====================
+        # ==================== STEP 1: LOAD & CUSTOM AI CHECKPOINT ====================
         self.step1Box = ctk.ctkCollapsibleButton()
-        self.step1Box.text = "Step 1: Load CBCT, Segmentation & 3D / VR View"
+        self.step1Box.text = "Step 1: Load CBCT, Custom AI Checkpoint & 3D / VR View"
         self.step1Box.collapsed = False
         self.layout.addWidget(self.step1Box)
         step1Layout = qt.QFormLayout(self.step1Box)
@@ -328,9 +333,44 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.segmentationSelector.noneEnabled = True
         self.segmentationSelector.setMRMLScene(slicer.mrmlScene)
         self.segmentationSelector.setToolTip(
-            "Optional: Select a DentalSegmentator or ToothFairy3 segmentation node for automated measurements and 3D styling."
+            "Optional: Select an existing segmentation node, or generate one below by placing your trained AI checkpoint."
         )
         step1Layout.addRow("Segmentation (Optional):", self.segmentationSelector)
+
+        # Custom AI Checkpoint Loader ("Place My Checkpoint" Workflow)
+        self.checkpointPathEdit = ctk.ctkPathLineEdit()
+        self.checkpointPathEdit.setToolTip(
+            "Select your trained 3D segmentation checkpoint (.pth, .pt, .ckpt, .onnx, .npy, .nii.gz, or nnU-Net model folder)."
+        )
+        step1Layout.addRow("AI Model Checkpoint:", self.checkpointPathEdit)
+
+        self.customArchPathEdit = ctk.ctkPathLineEdit()
+        self.customArchPathEdit.setToolTip(
+            "Optional: Select your custom Python (.py) model file if loading a raw PyTorch state_dict with a custom nn.Module."
+        )
+        step1Layout.addRow("Custom Model .py (Optional):", self.customArchPathEdit)
+
+        ckptRunRow = qt.QHBoxLayout()
+        self.ckptSchemeCombo = qt.QComboBox()
+        self.ckptSchemeCombo.addItem("5-Class (DentalSegmentator)", "5class")
+        self.ckptSchemeCombo.addItem("ToothFairy3 (32 FDI Teeth + Canal)", "toothfairy3")
+        self.ckptSchemeCombo.setToolTip("Select the output class label scheme of your checkpoint.")
+        self.ckptPatchSpin = qt.QSpinBox()
+        self.ckptPatchSpin.minimum = 32
+        self.ckptPatchSpin.maximum = 256
+        self.ckptPatchSpin.singleStep = 16
+        self.ckptPatchSpin.value = 96
+        self.ckptPatchSpin.suffix = "³"
+        self.ckptPatchSpin.setToolTip("3D sliding-window cubic patch size (e.g. 96³ or 128³).")
+        self.btnRunCheckpointSeg = qt.QPushButton("Run Checkpoint Segmentation")
+        self.btnRunCheckpointSeg.setToolTip(
+            "Run 3D Gaussian-weighted sliding-window inference using your checkpoint and populate the Slicer Segmentation node."
+        )
+        ckptRunRow.addWidget(self.ckptSchemeCombo)
+        ckptRunRow.addWidget(qt.QLabel("Patch:"))
+        ckptRunRow.addWidget(self.ckptPatchSpin)
+        ckptRunRow.addWidget(self.btnRunCheckpointSeg)
+        step1Layout.addRow("Checkpoint Inference:", ckptRunRow)
 
         layoutBtnRow = qt.QHBoxLayout()
         self.btnDentalLightbox = qt.QPushButton("3-Slice Lightbox (-2 / 0 / +2 mm)")
@@ -605,7 +645,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         step4Layout.addRow("Lock to Tooth FDI:", self.lockFdiCombo)
 
-        # B12: Explicit Slab Reconstruction Checkbox + Mode + Thickness
         csParamsRow = qt.QHBoxLayout()
         self.csWidthSpin = qt.QDoubleSpinBox()
         self.csWidthSpin.minimum = 8.0
@@ -730,7 +769,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         rulerRow.addWidget(self.btnClearPlan)
         step5Layout.addLayout(rulerRow)
 
-        # F2 & F19: Implant Library & Placement Bar
         implantRow = qt.QHBoxLayout()
         self.implantLibraryCombo = qt.QComboBox()
         if self.logic is not None:
@@ -843,6 +881,64 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         airwayTmjRow.addWidget(self.btnTmjLeftSag)
         step6Layout.addRow("Airway & TMJ:", airwayTmjRow)
 
+        # ==================== STEP 7: SURGICAL GUIDE, PROSTHETICS, 3D CEPH & DICOM SEG/SR (F14-F20) ====================
+        self.step7Box = ctk.ctkCollapsibleButton()
+        self.step7Box.text = "Step 7: Surgical Guide CAD, Crown/Abutment, 3D Ceph & DICOM SEG/SR (F14–F20)"
+        self.step7Box.collapsed = True
+        self.layout.addWidget(self.step7Box)
+        step7Outer = qt.QVBoxLayout(self.step7Box)
+
+        self.step7HintLabel = qt.QLabel(
+            "Generate printable surgical guides with drill sleeve channels (F14), crown/abutment proposals (F16), "
+            "3D cephalometry (F17), or DICOM SEG/SR exports (F15)."
+        )
+        self.step7HintLabel.setWordWrap(True)
+        step7Outer.addWidget(self.step7HintLabel)
+
+        self.step7ContentWidget = qt.QWidget()
+        step7Layout = qt.QFormLayout(self.step7ContentWidget)
+        step7Outer.addWidget(self.step7ContentWidget)
+
+        guideRow = qt.QHBoxLayout()
+        self.guideSupportCombo = qt.QComboBox()
+        self.guideSupportCombo.addItem("Tooth-Supported Guide", "tooth_supported")
+        self.guideSupportCombo.addItem("Mucosa-Supported Guide", "mucosa_supported")
+        self.guideSupportCombo.setToolTip("Choose tooth-supported or mucosa-supported surgical guide geometry (F14).")
+        self.printerPresetCombo = qt.QComboBox()
+        if self.logic is not None:
+            for p_entry in self.logic.surgical_guides.presets.values():
+                self.printerPresetCombo.addItem(p_entry.label, p_entry.id)
+        self.printerPresetCombo.setToolTip("Select 3D printer tolerance and sleeve clearance preset (F14).")
+        self.btnExportSurgicalGuide = qt.QPushButton("Generate & Export Surgical Guide STL")
+        self.btnExportSurgicalGuide.setToolTip("Build surgical guide mesh with open drill sleeve bores and export to STL + JSON (F14).")
+        guideRow.addWidget(self.guideSupportCombo)
+        guideRow.addWidget(self.printerPresetCombo)
+        guideRow.addWidget(self.btnExportSurgicalGuide)
+        step7Layout.addRow("Surgical Guide (F14):", guideRow)
+
+        p3Row = qt.QHBoxLayout()
+        self.btnProposeCrowns = qt.QPushButton("Propose Crowns & Abutments (F16)")
+        self.btnProposeCrowns.setToolTip("Generate generic Ti-base abutments and anatomic crowns above placed implants (F16).")
+        self.btnCompute3DCeph = qt.QPushButton("Compute 3D Cephalometry (F17)")
+        self.btnCompute3DCeph.setToolTip("Compute SNA, SNB, ANB, FMA, GoGn-SN, and Interincisal angles against clinical norms (F17).")
+        self.btnExportDicomSegSr = qt.QPushButton("Export DICOM SEG + SR (F15)")
+        self.btnExportDicomSegSr.setToolTip("Export segmentation and treatment plan as DICOM-SEG and DICOM BasicTextSR (F15).")
+        p3Row.addWidget(self.btnProposeCrowns)
+        p3Row.addWidget(self.btnCompute3DCeph)
+        p3Row.addWidget(self.btnExportDicomSegSr)
+        step7Layout.addRow("Prosthetics / Ceph / DICOM:", p3Row)
+
+        adtRow = qt.QHBoxLayout()
+        self.adtToolCombo = qt.QComboBox()
+        for mod_name in AUTOMATED_DENTAL_TOOLS_MODULES:
+            self.adtToolCombo.addItem(mod_name, mod_name)
+        self.adtToolCombo.setToolTip("Optional integration with SlicerAutomatedDentalTools modules when installed (F18).")
+        self.btnLaunchAdtTool = qt.QPushButton("Open AutomatedDentalTools Module (F18)")
+        self.btnLaunchAdtTool.setToolTip("Switch to or invoke the selected SlicerAutomatedDentalTools module if installed.")
+        adtRow.addWidget(self.adtToolCombo)
+        adtRow.addWidget(self.btnLaunchAdtTool)
+        step7Layout.addRow("AutomatedDentalTools (F18):", adtRow)
+
         self.layout.addStretch()
 
         # Connect signals
@@ -851,6 +947,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.volumeSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onVolumeNodeChanged)
         self.segmentationSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSegmentationNodeChanged)
+        self.btnRunCheckpointSeg.clicked.connect(self.onRunCheckpointSegmentationClicked)
         self.btnDentalLightbox.clicked.connect(self.onSetDentalLightboxLayout)
         self.btnDentalLayout.clicked.connect(self.onSetDentalLayout)
         self.btnStandardMpr.clicked.connect(self.onSetStandardMpr)
@@ -915,6 +1012,12 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnTmjRightSag.clicked.connect(lambda: self.onTmjPresetClicked("Right"))
         self.btnTmjLeftSag.clicked.connect(lambda: self.onTmjPresetClicked("Left"))
 
+        self.btnExportSurgicalGuide.clicked.connect(self.onExportSurgicalGuideClicked)
+        self.btnProposeCrowns.clicked.connect(self.onProposeCrownsClicked)
+        self.btnCompute3DCeph.clicked.connect(self.onCompute3DCephClicked)
+        self.btnExportDicomSegSr.clicked.connect(self.onExportDicomSegSrClicked)
+        self.btnLaunchAdtTool.clicked.connect(self.onLaunchAdtToolClicked)
+
     def _createOdontogramButton(self, fdi: int) -> Any:
         btn = qt.QToolButton()
         btn.setText(str(fdi))
@@ -966,6 +1069,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             settings.setValue(self.SETTINGS_PREFIX + "tickSpacingMm", self.tickSpacingSpin.value)
             settings.setValue(self.SETTINGS_PREFIX + "lightboxStepMm", self.lightboxStepSpin.value)
             settings.setValue(self.SETTINGS_PREFIX + "vrPreset", self.vrPresetCombo.currentText)
+            if self.checkpointPathEdit.currentPath:
+                settings.setValue(self.SETTINGS_PREFIX + "lastCheckpointPath", self.checkpointPathEdit.currentPath)
         except Exception:
             pass
 
@@ -1024,7 +1129,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.volumeSelector.setCurrentNode(volNode)
             self.segmentationSelector.setCurrentNode(segNode)
 
-            # B14: Ensure observers are attached even for curves loaded from an MRB/scene file
             self._ensureParameterNodeCurveObservers(volNode)
 
             has_vol = volNode is not None
@@ -1033,7 +1137,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.archModeCombo.setCurrentText(arch_mode)
             self.activeJawCombo.setCurrentText(jaw)
 
-            # B16: Restore all cross-section, slab, tilt, lightbox, panoramic, and VR parameters from ParameterNode
             self.csWidthSpin.setValue(float(self._parameterNode.GetParameter("CrossSectionWidthMm") or 24.0))
             self.csSlabEnabledCheckBox.setChecked(
                 (self._parameterNode.GetParameter("SlabEnabled") or "false").lower() == "true"
@@ -1059,12 +1162,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 (self._parameterNode.GetParameter("IncludePatientMetadata") or "false").lower() == "true"
             )
 
+            ckpt_path_str = self._parameterNode.GetParameter("CheckpointPath") or ""
+            if ckpt_path_str and hasattr(self.checkpointPathEdit, "setCurrentPath"):
+                self.checkpointPathEdit.setCurrentPath(ckpt_path_str)
+
             locked_fdi = self._parameterNode.GetParameter("LockedToothFDI") or ""
             idx_lock = self.lockFdiCombo.findData(locked_fdi)
             if idx_lock >= 0:
                 self.lockFdiCombo.setCurrentIndex(idx_lock)
 
-            # Restore selected teeth set from ParameterNode
             sel_str = self._parameterNode.GetParameter("SelectedTeethFDI") or ""
             restored_sel = {int(tok) for tok in sel_str.split(",") if tok.strip().isdigit()}
             if restored_sel != self.selectedTeeth:
@@ -1082,9 +1188,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             )
             has_curve = curveNode is not None and curveNode.GetNumberOfControlPoints() >= 4
 
-            # B18: Keep ctkCollapsibleButton headers ALWAYS enabled so user can expand and read prerequisites;
-            # disable only the inner content widgets!
-            for box in (self.step1Box, self.step2Box, self.step3Box, self.step4Box, self.step5Box, self.step6Box):
+            for box in (
+                self.step1Box,
+                self.step2Box,
+                self.step3Box,
+                self.step4Box,
+                self.step5Box,
+                self.step6Box,
+                self.step7Box,
+            ):
                 box.setEnabled(True)
             if self.step2ContentWidget is not None:
                 self.step2ContentWidget.setEnabled(has_vol)
@@ -1096,6 +1208,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.step5ContentWidget.setEnabled(has_vol and has_curve)
             if self.step6ContentWidget is not None:
                 self.step6ContentWidget.setEnabled(has_vol)
+            if self.step7ContentWidget is not None:
+                self.step7ContentWidget.setEnabled(has_vol)
 
             if not has_vol:
                 self.step1HintLabel.setText("Status: Waiting for an input CBCT volume.")
@@ -1104,7 +1218,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.step4HintLabel.setText("Prerequisite missing: Load a CBCT volume and define a dental arch curve (>= 4 points).")
                 self.step5HintLabel.setText("Prerequisite missing: Load a CBCT volume and define a dental arch curve (>= 4 points).")
             else:
-                seg_status = f"Segmentation: {segNode.GetName()}" if segNode else "Unsegmented (Manual Ruler mode)"
+                seg_status = f"Segmentation: {segNode.GetName()}" if segNode else "Unsegmented (Manual Ruler or AI Checkpoint mode)"
                 self.step1HintLabel.setText(f"Loaded: {volNode.GetName()} | {seg_status}")
                 if self.step2Box.collapsed and not has_curve:
                     self.step2Box.collapsed = False
@@ -1179,7 +1293,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.globalStatusLabel.setText(f"Redid: {desc}")
 
     # ------------------------------------------------------------------
-    # Step 1 Callbacks: Volume, Layout, Non-Destructive Occlusal Plane & VR
+    # Step 1 Callbacks: Volume, Checkpoint Inference, Layout, Occlusal Plane & VR
     # ------------------------------------------------------------------
     def onVolumeNodeChanged(self, node: Any) -> None:
         if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
@@ -1192,6 +1306,34 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.updateGUIFromParameterNode()
             if self.selectedTeeth:
                 self.onRefreshAllSelectedTeeth()
+
+    def onRunCheckpointSegmentationClicked(self) -> None:
+        """Run user-supplied AI checkpoint (`.pth`, `.pt`, `.ckpt`, `.onnx`, `.npy`, `.nii.gz`) on the active CBCT volume."""
+        volNode = self.volumeSelector.currentNode()
+        ckpt_str = str(self.checkpointPathEdit.currentPath or "").strip()
+        if not volNode or not ckpt_str or not self.logic:
+            if slicer:
+                slicer.util.warningDisplay("Please select both an Input CBCT Volume and an AI Model Checkpoint file/folder.")
+            return
+        custom_py = str(self.customArchPathEdit.currentPath or "").strip()
+        scheme = str(self.ckptSchemeCombo.currentData or "5class")
+        p_dim = int(self.ckptPatchSpin.value)
+        if self._parameterNode is not None:
+            self._parameterNode.SetParameter("CheckpointPath", ckpt_str)
+
+        segNode, summary = self.logic.run_custom_checkpoint_on_volume_node(
+            volumeNode=volNode,
+            checkpoint_path=Path(ckpt_str),
+            label_scheme=scheme,
+            patch_size_zyx=(p_dim, p_dim, p_dim),
+            custom_arch_py_path=Path(custom_py) if custom_py else None,
+        )
+        if segNode is not None:
+            self.segmentationSelector.setCurrentNode(segNode)
+            self.step1HintLabel.setText(
+                f"Checkpoint ({summary.format_type}, {summary.device_used}): loaded {summary.loaded_tensors}/{summary.total_ckpt_tensors} tensors -> {segNode.GetName()}"
+            )
+            self.updateGUIFromParameterNode()
 
     def onSetDentalLightboxLayout(self) -> None:
         volNode = self.volumeSelector.currentNode()
@@ -1568,7 +1710,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not curveNode or curveNode.GetNumberOfControlPoints() < 4:
             return
 
-        # B17: If LockedToothFDI is active, keep cursor locked to that tooth's arc position
         locked_fdi = (self._parameterNode.GetParameter("LockedToothFDI") or "") if self._parameterNode else ""
         if locked_fdi.isdigit():
             fdi_locked = int(locked_fdi)
@@ -1664,7 +1805,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if ctrl_held:
             self.toggleToothPlanMembership(fdi)
         else:
-            # B17: Plain click does NOT alter plan membership — restore button checked state to match selectedTeeth
             btn = self.toothButtons.get(int(fdi))
             if btn is not None:
                 btn.blockSignals(True)
@@ -1882,9 +2022,62 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if volNode and self.logic:
             self.logic.apply_tmj_condyle_view(volNode, segmentationNode=segNode, side=side)
 
+    # ------------------------------------------------------------------
+    # Step 7 Callbacks: Surgical Guide (F14), DICOM SEG/SR (F15), Crowns (F16), Ceph (F17), ADT (F18)
+    # ------------------------------------------------------------------
+    def onExportSurgicalGuideClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode()
+        if not volNode or not self.logic:
+            return
+        out_dir_str = qt.QFileDialog.getExistingDirectory(self.parent, "Select Surgical Guide Output Directory")
+        out_dir = Path(out_dir_str) if out_dir_str else Path(slicer.app.temporaryPath)
+        stl_path, json_path, sleeves = self.logic.generate_and_export_surgical_guide(
+            volumeNode=volNode,
+            out_dir=out_dir,
+            support_type=str(self.guideSupportCombo.currentData or "tooth_supported"),
+            preset_id=str(self.printerPresetCombo.currentData or "sla_dlp_standard_50um"),
+        )
+        self.step7HintLabel.setText(f"Exported Surgical Guide STL ({len(sleeves)} sleeves): {stl_path.name}")
+
+    def onProposeCrownsClicked(self) -> None:
+        if not self.logic:
+            return
+        proposals = self.logic.propose_crowns_and_abutments_for_placed_implants()
+        self.step7HintLabel.setText(
+            f"Generated {len(proposals)} prosthetic crown + Ti-base abutment proposal(s)."
+        )
+
+    def onCompute3DCephClicked(self) -> None:
+        if not self.logic:
+            return
+        table = self.logic.compute_3d_cephalometry_from_scene()
+        summary = ", ".join(f"{m.name}={m.value:.1f}{m.unit} ({m.interpretation})" for m in table[:3])
+        self.step7HintLabel.setText(f"3D Cephalometry: {summary or 'Place S, N, A, B, Go, Gn fiducials first'}")
+
+    def onExportDicomSegSrClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode()
+        segNode = self.segmentationSelector.currentNode()
+        if not volNode or not self.logic:
+            return
+        out_dir_str = qt.QFileDialog.getExistingDirectory(self.parent, "Select DICOM SEG/SR Output Directory")
+        out_dir = Path(out_dir_str) if out_dir_str else Path(slicer.app.temporaryPath)
+        seg_dcm, sr_dcm = self.logic.export_scene_dicom_seg_and_sr(
+            volNode,
+            segNode,
+            self._getOrderedPlanRows(),
+            out_dir,
+            include_patient_metadata=bool(self.includePatientMetaCheckBox.isChecked()),
+        )
+        self.step7HintLabel.setText(f"Exported DICOM SEG & SR: {seg_dcm.name}, {sr_dcm.name}")
+
+    def onLaunchAdtToolClicked(self) -> None:
+        tool_name = str(self.adtToolCombo.currentData or "ASO")
+        res = run_automated_dental_tool(tool_name)
+        self.step7HintLabel.setText(f"AutomatedDentalTools [{tool_name}]: {res['status']}")
+
 
 class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
-    """Core logic orchestrating ParameterNode state, VR, Arch Curves, Panoramic CPR, Lightbox, Implants, Canal, Airway & TMJ."""
+    """Core logic orchestrating ParameterNode state, Checkpoint Inference, VR, Arch Curves, Panoramic CPR, Lightbox, Implants, Canal, Airway, TMJ & Phase 7 CAD."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1893,18 +2086,20 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         self.navigator = CrossSectionNavigator(panoramic_logic=self.panoramic)
         self.canals = CanalTracerLogic()
         self.implants = ImplantPlannerLogic()
+        self.checkpoint_engine = CheckpointInferenceEngine()
+        self.surgical_guides = SurgicalGuideGenerator()
+        self.prosthetics = ProstheticPlanner()
         self.undo_redo = UndoRedoManager(max_depth=50)
         self._is_programmatic_curve_update: bool = False
         self._occlusal_normal: np.ndarray = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        # B2: Per-tooth user-calibrated arc positions in mm
         self._calibrated_tooth_arc_mm: Dict[str, float] = {}
-        # F19: Set of FDI teeth whose AI implant suggestion has been explicitly confirmed by clinician
         self._confirmed_ai_suggestions: Set[int] = set()
-        # O3: Cached MeasurementEngine keyed by (vol_id, vol_mtime, seg_id, seg_mtime, lower_mtime, upper_mtime, occ_tuple)
         self._cached_engine_key: Optional[Tuple[Any, ...]] = None
         self._cached_engine: Optional[MeasurementEngine] = None
         self._ruler_observers: List[Tuple[Any, int]] = []
         self.last_airway_result: Optional[AirwayAnalysisResult] = None
+        self.last_prosthetic_proposals: List[ProstheticProposal] = []
+        self.last_cephalometry_table: List[CephalometricMeasurement] = []
 
     def cleanup(self) -> None:
         self.panoramic.cancel_active_panoramic_cli()
@@ -1955,6 +2150,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "SelectedTeethFDI": "",
             "CanalSafetyMarginMm": "2.0",
             "IncludePatientMetadata": "false",
+            "CheckpointPath": "",
             "VRPreset": "CT-Dental-CBCT",
             "VRShiftHu": "0.0",
             "VRVisible": "false",
@@ -2014,12 +2210,52 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "SelectedTeethFDI",
             "CanalSafetyMarginMm",
             "IncludePatientMetadata",
+            "CheckpointPath",
             "VRPreset",
             "VRShiftHu",
             "VRVisible",
             "VRCropEnabled",
         )
         return {k: (parameterNode.GetParameter(k) or "") for k in keys}
+
+    # ------------------------------------------------------------------
+    # Custom AI Checkpoint Inference ("Place My Checkpoint" Workflow)
+    # ------------------------------------------------------------------
+    def run_custom_checkpoint_on_volume_node(
+        self,
+        volumeNode: Any,
+        checkpoint_path: Path,
+        label_scheme: str = "5class",
+        patch_size_zyx: Tuple[int, int, int] = (96, 96, 96),
+        custom_arch_py_path: Optional[Path] = None,
+        custom_arch_class_name: Optional[str] = None,
+        on_progress: Optional[ Any ] = None,
+    ) -> Tuple[Any, CheckpointLoadSummary]:
+        """Run user-supplied checkpoint on `volumeNode` and populate a styled `vtkMRMLSegmentationNode`."""
+        if slicer is None or volumeNode is None:
+            raise RuntimeError("Slicer and an input CBCT volume node are required.")
+        img_zyx = slicer.util.arrayFromVolume(volumeNode)
+        spec = CheckpointSpec(
+            checkpoint_path=Path(checkpoint_path),
+            label_scheme=label_scheme,
+            patch_size_zyx=patch_size_zyx,
+            custom_arch_py_path=custom_arch_py_path,
+            custom_arch_class_name=custom_arch_class_name,
+        )
+        labelmap_zyx, summary = self.checkpoint_engine.run_checkpoint_on_array(
+            img_zyx, spec, on_progress=on_progress
+        )
+        pNode = self.getParameterNode()
+        segNode = self.checkpoint_engine.populate_slicer_segmentation_from_labelmap(
+            labelmap_zyx,
+            volumeNode=volumeNode,
+            label_scheme=label_scheme,
+            parameterNode=pNode,
+        )
+        if segNode is not None:
+            self.vr.apply_dental_segmentator_styling(segNode)
+            self.update_fdi_overlays_from_segmentation(volumeNode, segNode, visible=True)
+        return segNode, summary
 
     # ------------------------------------------------------------------
     # B3 & F6: Non-Destructive Occlusal Plane Alignment & Reset
@@ -2329,7 +2565,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         pNode = parameterNode or (self.getParameterNode() if slicer is not None else None)
         node = self.panoramic.resolve_curve_node(volumeNode, jaw=jaw, parameterNode=pNode)
         if node is None and jaw.lower().startswith("sh"):
-            # F3: Seamless migration — if Shared Occlusal Arch is selected on an existing scene with Lower/Upper curve
             node = self.panoramic.resolve_curve_node(
                 volumeNode, jaw="Lower", parameterNode=pNode
             ) or self.panoramic.resolve_curve_node(volumeNode, jaw="Upper", parameterNode=pNode)
@@ -2368,12 +2603,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     def extract_arch_points_from_segmentation(
         self, segmentationNode: Any, volumeNode: Any, jaw: str
     ) -> Optional[np.ndarray]:
-        """B20: Extract 3D tooth coordinates in RAS from a segmentation node.
-
-        Drops the legacy whole-skull ('maxilla'/'mandible') fallback so arch auto-fit never fits to
-        the entire cranium or mandibular rami/condyles. If no tooth segments exist, returns None so
-        the caller falls back cleanly to manual placement.
-        """
+        """B20: Extract 3D tooth coordinates in RAS from a segmentation node (never falls back to whole skull)."""
         if not segmentationNode:
             return None
         segmentation = segmentationNode.GetSegmentation()
@@ -2442,7 +2672,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     else:
                         target_val = 3 if jaw_low.startswith("up") else 4
                         z_idx, y_idx, x_idx = np.where(mask == target_val)
-                    # B20: Do NOT fall back to label 1 (Maxilla/Skull) or label 2 (full Mandible)!
                     if len(x_idx) >= 6:
                         vox = np.column_stack([x_idx, y_idx, z_idx])
                         return vol.voxel_to_world(vox)
@@ -2763,7 +2992,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         if user_mod_attr == "1":
             return True
 
-        # Check if control point coordinates differ from the initial seeded defaults
         init_json = node.GetAttribute("CBCTPlanner.InitialEndpoints") if hasattr(node, "GetAttribute") else None
         if init_json and hasattr(node, "GetNumberOfControlPoints") and node.GetNumberOfControlPoints() >= 2:
             try:
@@ -2782,11 +3010,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
 
     @classmethod
     def _read_manual_ruler_length(cls, ruler_name_or_node: Any) -> Optional[float]:
-        """B1: Return manual ruler length in mm ONLY when user-modified (`CBCTPlanner.UserModified == "1"`).
-
-        Untouched default-seeded rulers return `None` so pre-created 10/6/4 mm templates are never
-        reported as clinical measurements!
-        """
+        """B1: Return manual ruler length in mm ONLY when user-modified (`CBCTPlanner.UserModified == "1"`)."""
         node = ruler_name_or_node
         if isinstance(ruler_name_or_node, str):
             if slicer is None or getattr(slicer, "mrmlScene", None) is None:
@@ -2846,7 +3070,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     rNode.AddControlPoint(*p0_list)
                     rNode.AddControlPoint(*p1_list)
 
-                # Attach observer that flips UserModified -> "1" on first user interaction
                 if vtk is not None and hasattr(rNode, "AddObserver"):
                     def _on_ruler_interacted(caller: Any, _evt: Any) -> None:
                         cls_ref = self.__class__
@@ -3064,7 +3287,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         ]
 
     # ------------------------------------------------------------------
-    # F1, F2, F4, F7, F8: Canal, Implant, FDI Overlays, Airway & TMJ
+    # F1, F2, F4, F7, F8, F14, F15, F16, F17: Clinical & Phase 7 Operations
     # ------------------------------------------------------------------
     def extract_and_display_mandibular_canals(
         self, volumeNode: Any, segmentationNode: Any
@@ -3153,7 +3376,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     def apply_tmj_condyle_view(
         self, volumeNode: Any, segmentationNode: Any = None, side: str = "Right"
     ) -> Optional[TMJCondyleFrame]:
-        """F8: Align Yellow (Sagittal) andGreen/Red (Coronal) views to the Left or Right mandibular condyle."""
+        """F8: Align Yellow (Sagittal) and Green/Red (Coronal) views to the Left or Right mandibular condyle."""
         vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False) if (slicer and volumeNode) else None
         mask, _ = (
             self._extract_combined_label_mask(volumeNode, segmentationNode)
@@ -3178,6 +3401,95 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                         0,
                     )
         return frame
+
+    def generate_and_export_surgical_guide(
+        self,
+        volumeNode: Any,
+        out_dir: Path,
+        support_type: str = "tooth_supported",
+        preset_id: str = "sla_dlp_standard_50um",
+    ) -> Tuple[Path, Path, List[GuideSleeveSpec]]:
+        """F14: Generate surgical guide mesh from active arch curve and placed implants, and export STL + JSON."""
+        pNode = self.getParameterNode() if slicer is not None else None
+        jaw = (pNode.GetParameter("ActiveJaw") or "Lower") if pNode else "Lower"
+        curveNode = self.get_curve_node_for_jaw(volumeNode, jaw, parameterNode=pNode)
+        if curveNode is not None and curveNode.GetNumberOfControlPoints() >= 4:
+            arch_pts = self.panoramic.extract_world_points_from_curve_node(curveNode)
+        else:
+            arch_pts = np.array(
+                [[25.0, -15.0, 0.0], [15.0, 10.0, 0.0], [-15.0, 10.0, 0.0], [-25.0, -15.0, 0.0]],
+                dtype=np.float64,
+            )
+        implants = self.implants.get_reportable_implants(include_unconfirmed=False)
+        return self.surgical_guides.export_surgical_guide_stl_and_json(
+            arch_pts, implants, out_dir=out_dir, support_type=support_type, preset_id=preset_id
+        )
+
+    def propose_crowns_and_abutments_for_placed_implants(
+        self, out_dir: Optional[Path] = None
+    ) -> List[ProstheticProposal]:
+        """F16: Propose generic Ti-base abutments and anatomic crowns for all reportable implants."""
+        proposals: List[ProstheticProposal] = []
+        occ = self.get_occlusal_normal()
+        for imp in self.implants.get_reportable_implants(include_unconfirmed=False):
+            prop, verts, faces = self.prosthetics.generate_proposal_for_implant(imp, occlusal_normal=occ)
+            proposals.append(prop)
+            if out_dir is not None:
+                stl_file = Path(out_dir) / f"Prosthetic_FDI_{imp.fdi}_{prop.crown_id}.stl"
+                ImplantPlannerLogic.write_ascii_stl(verts, faces, stl_file, solid_name=f"Crown_{imp.fdi}")
+        self.last_prosthetic_proposals = proposals
+        return proposals
+
+    def compute_3d_cephalometry_from_scene(
+        self, landmarks_ras: Optional[Dict[str, Sequence[float]]] = None
+    ) -> List[CephalometricMeasurement]:
+        """F17: Compute 3D cephalometric angles from supplied or scene/ALI fiducial landmarks."""
+        lm_map: Dict[str, Sequence[float]] = dict(landmarks_ras or {})
+        if not lm_map and slicer is not None and getattr(slicer, "mrmlScene", None) is not None:
+            for fid_node in slicer.util.getNodesByClass("vtkMRMLMarkupsFiducialNode"):
+                n_pts = fid_node.GetNumberOfControlPoints()
+                for i in range(n_pts):
+                    lbl = fid_node.GetNthControlPointLabel(i)
+                    if lbl:
+                        buf = [0.0, 0.0, 0.0]
+                        fid_node.GetNthControlPointPositionWorld(i, buf)
+                        lm_map[str(lbl).strip()] = buf
+        table = compute_3d_cephalometry(lm_map)
+        self.last_cephalometry_table = table
+        return table
+
+    def export_scene_dicom_seg_and_sr(
+        self,
+        volumeNode: Any,
+        segmentationNode: Any,
+        plan_data: Sequence[Dict[str, Any]],
+        out_dir: Path,
+        include_patient_metadata: bool = False,
+    ) -> Tuple[Path, Path]:
+        """F15: Export scene segmentation mask and treatment plan as DICOM SEG and DICOM SR."""
+        mask, _ = (
+            self._extract_combined_label_mask(volumeNode, segmentationNode)
+            if (slicer and volumeNode and segmentationNode)
+            else (None, False)
+        )
+        spacing = (0.5, 0.5, 0.5)
+        if slicer and volumeNode:
+            vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+            spacing = vol.spacing
+        p_name = (
+            (volumeNode.GetName() if (volumeNode and hasattr(volumeNode, "GetName")) else "Patient")
+            if include_patient_metadata
+            else "Anonymous"
+        )
+        return export_dicom_seg_and_sr(
+            mask_zyx=mask,
+            spacing_zyx=spacing,
+            plan_data=plan_data,
+            implants=self.implants.get_reportable_implants(include_unconfirmed=False),
+            out_dir=out_dir,
+            patient_name=p_name,
+            patient_id="Anonymous",
+        )
 
     # ------------------------------------------------------------------
     # B21, B22 & F10: Report & CSV/JSON Export
@@ -3235,7 +3547,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             for item in plan_data:
                 pos = item.get("pos_ras")
                 src = item.get("source") or NOT_MEASURED
-                # F19: Only write AI-suggested rec_diameter/rec_length into CSV if confirmed (or placed)
                 confirmed = bool(item.get("ai_suggestion_confirmed", False))
                 row_dict = {
                     "fdi": item.get("fdi"),
@@ -3312,7 +3623,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         step_val = float(lightbox_step_mm)
         step_str = f"{step_val:.1f}".rstrip("0").rstrip(".")
 
-        # B22: Anonymize patient fields by default unless opt-in is True
         eff_patient_name = html.escape(str(patient_name or "Patient") if include_patient_metadata else "Anonymous")
         eff_patient_id = html.escape(str(patient_id or "N/A") if include_patient_metadata else "Anonymous")
         report_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -3336,7 +3646,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             else:
                 misch_str = NOT_MEASURED
 
-            # F19: Only include AI-suggested implant dimensions in the report if explicitly confirmed by clinician!
             if item.get("placed_implant_label"):
                 imp_str = html.escape(str(item["placed_implant_label"]))
             elif (
@@ -3367,7 +3676,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 f"</tr>"
             )
 
-        # F2 & B22: Placed Implants Verification Section
         implant_rows_html: List[str] = []
         for imp in self.implants.get_reportable_implants(include_unconfirmed=False):
             par_str = (
@@ -3399,7 +3707,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         screenshots_html = ""
         if capture_screenshots:
             cards = []
-            # B22: Derive lightbox labels dynamically from actual `lightbox_step_mm`
             for label, s_name in (
                 ("Panoramic View (Green)", "Green"),
                 ("Axial View (Red)", "Red"),
@@ -3488,9 +3795,9 @@ class CBCTPlannerTest(ScriptedLoadableModuleTest):
         """O9: Verify phantom arch, CPR handedness, bounded caches, untouched ruler -> None, and B4 oblique measurements."""
         img = np.full((48, 64, 64), -600.0, dtype=np.float32)
         mask = np.zeros((48, 64, 64), dtype=np.uint16)
-        mask[10:30, 20:30, 10:54] = 2  # Mandible
+        mask[10:30, 20:30, 10:54] = 2
         img[10:30, 20:30, 10:54] = 950.0
-        mask[12:14, 24:26, 10:54] = 5  # Mandibular canal
+        mask[12:14, 24:26, 10:54] = 5
 
         vol = CBCTVolume(
             image=img,
