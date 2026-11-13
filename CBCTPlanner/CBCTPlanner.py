@@ -1359,8 +1359,10 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if cid in self._observedCurveNodeIDs:
             return
         self._observedCurveNodeIDs.add(cid)
-        self.addObserver(curveNode, vtk.vtkCommand.PointModifiedEvent, self._onCurvePointDragged)
-        self.addObserver(curveNode, vtk.vtkCommand.EndInteractionEvent, self._onCurveInteractionEnded)
+        point_mod_evt = getattr(getattr(slicer, "vtkMRMLMarkupsNode", None), "PointModifiedEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
+        end_inter_evt = getattr(vtk.vtkCommand, "EndInteractionEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
+        self.addObserver(curveNode, point_mod_evt, self._onCurvePointDragged)
+        self.addObserver(curveNode, end_inter_evt, self._onCurveInteractionEnded)
 
     def _onCurvePointDragged(self, caller: Any, _event: Any) -> None:
         if self.logic and not self.logic._is_programmatic_curve_update:
@@ -1920,7 +1922,14 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
 
     def getParameterNode(self) -> Any:
         """O6: Return singleton ParameterNode and initialize defaults only once per node."""
-        node = super().getParameterNode()
+        if getattr(self, "_parameterNode", None) is not None:
+            return self._parameterNode
+        try:
+            if slicer is None or getattr(slicer, "mrmlScene", None) is None:
+                return getattr(self, "_parameterNode", None)
+            node = super().getParameterNode()
+        except Exception:
+            return getattr(self, "_parameterNode", None)
         if node is not None:
             self._setDefaultParameters(node)
         return node
@@ -2852,7 +2861,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                         cls_ref = self.__class__
                         cls_ref._is_ruler_user_modified(caller)
 
-                    for evt in (vtk.vtkCommand.PointModifiedEvent, vtk.vtkCommand.EndInteractionEvent):
+                    point_mod_evt = getattr(getattr(slicer, "vtkMRMLMarkupsNode", None), "PointModifiedEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
+                    end_inter_evt = getattr(vtk.vtkCommand, "EndInteractionEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
+                    for evt in (point_mod_evt, end_inter_evt):
                         tag = rNode.AddObserver(evt, _on_ruler_interacted)
                         self._ruler_observers.append((rNode, tag))
 

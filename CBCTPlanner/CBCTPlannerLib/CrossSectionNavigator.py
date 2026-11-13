@@ -402,7 +402,9 @@ class CrossSectionNavigator:
             nid = node.GetID() if hasattr(node, "GetID") else str(id(node))
             if nid in self._observed_node_ids:
                 continue
-            for evt in (vtk.vtkCommand.PointModifiedEvent, vtk.vtkCommand.EndInteractionEvent):
+            point_mod_evt = getattr(getattr(slicer, "vtkMRMLMarkupsNode", None), "PointModifiedEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
+            end_inter_evt = getattr(vtk.vtkCommand, "EndInteractionEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
+            for evt in (point_mod_evt, end_inter_evt):
                 tag = node.AddObserver(evt, handler)
                 self._line_observers.append((node, tag))
             self._observed_node_ids[nid] = node
