@@ -1,16 +1,18 @@
 """
-Dental Arch Curve Detection and Curved Planar Reformation (CPR) Frame Computation.
+Dental Arch Curve Detection, Sub-Sample Segment Projection (B13), FDI-to-Arc Mapping (B2),
+and Principal Horseshoe Curve Fitting (B20) for U-shaped, V-shaped, and Tapered Arches.
 All optional dependencies (scipy, scikit-image) are loaded lazily on demand.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from . import ensure_optional_package
 from .labels import (
+    ANATOMICAL_MESIODISTAL_WIDTHS_MM,
     LOWER_JAW_ID,
     MANDIBULAR_TEETH_IDS,
     MAXILLARY_TEETH_IDS,
@@ -19,7 +21,7 @@ from .labels import (
 from .mask_centerline import CenterlineCurve
 
 # FDI sequence from patient right posterior to patient left posterior for each jaw.
-JAW_TOOTH_ORDER = {
+JAW_TOOTH_ORDER: Dict[str, List[str]] = {
     "lower": [
         "48", "47", "46", "45", "44", "43", "42", "41",
         "31", "32", "33", "34", "35", "36", "37", "38",
@@ -29,6 +31,65 @@ JAW_TOOTH_ORDER = {
         "21", "22", "23", "24", "25", "26", "27", "28",
     ],
 }
+
+
+def project_point_to_polyline_arc_mm(
+    pts: np.ndarray,
+    arc_s: np.ndarray,
+    point_mm: Sequence[float],
+) -> Tuple[float, float, np.ndarray]:
+    """B13: Exact projection of a 3D point onto a 3D polyline `(pts, arc_s)` by projecting onto each segment.
+
+    Returns `(best_arc_mm, min_distance_mm, closest_point_ras)`.
+    Achieves sub-sample accuracy instead of snapping to discrete sample vertices.
+    """
+    poly_pts = np.asarray(pts, dtype=np.float64)
+    s_arr = np.asarray(arc_s, dtype=np.float64)
+    pt = np.asarray(point_mm, dtype=np.float64).reshape(3)
+
+    if len(poly_pts) == 0:
+        return 0.0, float("inf"), pt.copy()
+    if len(poly_pts) == 1:
+        d = float(np.linalg.norm(poly_pts[0] - pt))
+        return float(s_arr[0]), d, poly_pts[0].copy()
+
+    p0 = poly_pts[:-1]
+    p1 = poly_pts[1:]
+    seg_vecs = p1 - p0
+    seg_len_sq = np.sum(seg_vecs * seg_vecs, axis=1)
+    safe_len_sq = np.where(seg_len_sq > 1e-12, seg_len_sq, 1.0)
+
+    rel = pt[None, :] - p0
+    t_raw = np.sum(rel * seg_vecs, axis=1) / safe_len_sq
+    t_clamped = np.clip(np.where(seg_len_sq > 1e-12, t_raw, 0.0), 0.0, 1.0)
+
+    proj_pts = p0 + t_clamped[:, None] * seg_vecs
+    dists_sq = np.sum((proj_pts - pt[None, :]) ** 2, axis=1)
+    best_i = int(np.argmin(dists_sq))
+
+    best_t = float(t_clamped[best_i])
+    best_arc = float(s_arr[best_i] + best_t * (s_arr[best_i + 1] - s_arr[best_i]))
+    best_dist = float(np.sqrt(dists_sq[best_i]))
+    best_pt = proj_pts[best_i].copy()
+    return best_arc, best_dist, best_pt
+
+
+def _voxel_grid_downsample(points: np.ndarray, grid_size_mm: float = 1.5) -> np.ndarray:
+    """B20: Downsample a 3D point cloud using spatial voxel cells so dense mesh regions do not bias arch fitting."""
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) <= 32 or grid_size_mm <= 0.0:
+        return pts
+    mins = np.min(pts, axis=0)
+    keys = np.floor((pts - mins) / float(grid_size_mm)).astype(np.int64)
+    _, unique_inv = np.unique(keys, axis=0, return_inverse=True)
+    n_cells = int(unique_inv.max()) + 1
+    if n_cells < 6:
+        return pts
+    out = np.zeros((n_cells, 3), dtype=np.float64)
+    counts = np.bincount(unique_inv).astype(np.float64)
+    for d in range(3):
+        out[:, d] = np.bincount(unique_inv, weights=pts[:, d]) / counts
+    return out
 
 
 def _prune_pathological_points(points: np.ndarray, max_deviation_mm: float = 8.0) -> np.ndarray:
@@ -76,6 +137,19 @@ class ArchFrame:
     arc_length_mm: float
 
 
+@dataclass
+class ToothArcSite:
+    """B2: Mapped tooth site along the dental arch curve with explicit provenance."""
+
+    fdi: str
+    arc_mm: float
+    t_normalized: float
+    point_ras: np.ndarray
+    source: str  # "segmentation", "calibrated_marker", "interpolated_from_neighbors", "approximate_width_table"
+    is_approximate: bool
+    is_missing_tooth: bool = False
+
+
 class DentalArch:
     """Parametric 3D Dental Arch Spline with RAS Right-to-Left (+X to -X) orientation."""
 
@@ -92,8 +166,6 @@ class DentalArch:
         if len(pts) < 4:
             raise ValueError(f"Need at least 4 control points to fit a spline, got {len(pts)}")
 
-        # In 3D Slicer RAS: +X is Patient Right, -X is Patient Left.
-        # Orient curve from Patient Right (+X) -> Patient Left (-X) when ras_convention=True.
         if ras_convention and pts[0, 0] < pts[-1, 0]:
             pts = pts[::-1].copy()
         elif (not ras_convention) and pts[0, 0] > pts[-1, 0]:
@@ -104,9 +176,13 @@ class DentalArch:
         self.source = source
         self.ras_convention = ras_convention
 
-        up_vec = np.asarray(occlusal_normal if occlusal_normal is not None else (0.0, 0.0, 1.0), dtype=np.float64)
+        up_vec = np.asarray(
+            occlusal_normal if occlusal_normal is not None else (0.0, 0.0, 1.0), dtype=np.float64
+        )
         up_norm = float(np.linalg.norm(up_vec))
-        self.occlusal_normal = up_vec / up_norm if up_norm > 1e-8 else np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        self.occlusal_normal = (
+            up_vec / up_norm if up_norm > 1e-8 else np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        )
         if self.occlusal_normal[2] < 0:
             self.occlusal_normal = -self.occlusal_normal
 
@@ -118,6 +194,7 @@ class DentalArch:
         if total_chord <= 1e-6:
             raise ValueError("Control points are degenerate (zero distance)")
         u_norm = u / total_chord
+        self._u_ctrl = u_norm
 
         self._use_scipy = False
         self.tck = None
@@ -133,7 +210,7 @@ class DentalArch:
             )
             self._use_scipy = True
         except ImportError:
-            self._u_ctrl = u_norm
+            pass
 
         dense_samples = 500
         u_dense = np.linspace(0.0, 1.0, dense_samples)
@@ -206,29 +283,20 @@ class DentalArch:
         if up[2] < 0:
             up = -up
 
-        # Project tangent onto the occlusal plane so cross-sections stay perpendicular to occlusal plane
         t_proj = d_pt - np.dot(d_pt, up) * up
         t_norm = float(np.linalg.norm(t_proj))
         tangent = t_proj / t_norm if t_norm > 1e-8 else np.array([-1.0, 0.0, 0.0], dtype=np.float64)
 
-        # In RAS, for an arch running Patient Right (+X, posterior -Y) -> Anterior (+Y) -> Patient Left (-X, posterior -Y):
-        # Tangent at anterior midline points toward Patient Left (-X, 0, 0).
-        # T x Up = (-1, 0, 0) x (0, 0, 1) = (0, +1, 0) = +Y (Anterior / Labial / Buccal)!
-        # At right molar (18/48), tangent points Anterior (+Y): (0, 1, 0) x (0, 0, 1) = (+1, 0, 0) = +X (Right Buccal)!
-        # At left molar (28/38), tangent points Posterior (-Y): (0, -1, 0) x (0, 0, 1) = (-1, 0, 0) = -X (Left Buccal)!
-        # Therefore N = T x Up ALWAYS points outward (Buccal/Labial) along a RAS Right->Left arch!
         normal = np.cross(tangent, up)
         n_norm = float(np.linalg.norm(normal))
         normal = normal / n_norm if n_norm > 1e-8 else np.array([0.0, 1.0, 0.0], dtype=np.float64)
 
-        # Verify outward buccal orientation against arch chord midpoint (posterior baseline)
         chord_mid = 0.5 * (self.control_points[0] + self.control_points[-1])
         outward_vec = pt - chord_mid
         outward_in_plane = outward_vec - np.dot(outward_vec, up) * up
         if np.linalg.norm(outward_in_plane) > 1e-3 and np.dot(normal, outward_in_plane) < 0:
             normal = -normal
 
-        # Binormal = Up (orthonormalized as N x T so that T, N, B is a right-handed or upright frame with B = +Up)
         binormal = np.cross(normal, tangent)
         b_norm = float(np.linalg.norm(binormal))
         binormal = binormal / b_norm if b_norm > 1e-8 else up
@@ -249,19 +317,25 @@ class DentalArch:
         return [self.get_frame(i / float(n_steps)) for i in range(n_steps + 1)]
 
     def find_closest_parameter(self, point_mm: np.ndarray) -> Tuple[float, float]:
+        """B13: Sub-sample segment projection followed by local spline refinement."""
         pt = np.asarray(point_mm, dtype=np.float64).reshape(3)
-        dists_sq = np.sum((self.pts_dense - pt) ** 2, axis=1)
-        best_idx = int(np.argmin(dists_sq))
-        best_t = float(self.t_dense[best_idx])
+        best_arc, best_dist, _ = project_point_to_polyline_arc_mm(
+            self.pts_dense, self.cum_arc_lengths, pt
+        )
+        best_t = float(np.clip(best_arc / max(self.total_arc_length, 1e-9), 0.0, 1.0))
 
-        dt = 0.02
-        fine_ts = np.linspace(max(0.0, best_t - dt), min(1.0, best_t + dt), 50)
-        arc_mm = fine_ts * self.total_arc_length
-        u = np.interp(arc_mm, self.cum_arc_lengths, self.u_dense)
-        fine_pts = self._eval_raw(u)
-        fine_dists_sq = np.sum((fine_pts - pt) ** 2, axis=1)
-        fine_idx = int(np.argmin(fine_dists_sq))
-        return float(fine_ts[fine_idx]), float(np.sqrt(fine_dists_sq[fine_idx]))
+        if self._use_scipy and self.tck is not None:
+            dt = 0.005
+            fine_ts = np.linspace(max(0.0, best_t - dt), min(1.0, best_t + dt), 41)
+            fine_arcs = fine_ts * self.total_arc_length
+            u = np.interp(fine_arcs, self.cum_arc_lengths, self.u_dense)
+            fine_pts = self._eval_raw(u)
+            ref_arc, ref_dist, _ = project_point_to_polyline_arc_mm(fine_pts, fine_arcs, pt)
+            if ref_dist <= best_dist:
+                best_arc = ref_arc
+                best_dist = ref_dist
+                best_t = float(np.clip(best_arc / max(self.total_arc_length, 1e-9), 0.0, 1.0))
+        return best_t, best_dist
 
     @classmethod
     def from_teeth_centroids(
@@ -352,7 +426,7 @@ class DentalArch:
         return cls(
             control_points=ctrl_pts,
             jaw_type=jaw_type,
-            smoothing=0.2 * len(ctrl_pts),
+            smoothing=0.1 * len(ctrl_pts),
             source="point_cloud",
             ras_convention=ras_convention,
         )
@@ -379,37 +453,215 @@ def fit_dental_arch_from_points(
     num_control_points: int = 11,
     ras_convention: bool = True,
 ) -> np.ndarray:
-    """Fit a parabolic dental arch Y(X), Z(X) to a 3D point cloud.
+    """B20: Fit a principal-curve spline along a 3D dental arch point cloud.
 
-    In 3D Slicer RAS (`ras_convention=True`), +X is Patient Right and -X is Patient Left,
-    so control points are ordered descending in X (+X -> -X).
+    Replaces the legacy quadratic `y(x)` fit and stride sampling:
+      1. Spatial voxel-grid downsampling (`1.5 mm` cells) eliminates mesh vertex-density bias.
+      2. Orders points around the open horseshoe arch from Patient Right (`+X` in RAS) through
+         Anterior (`+Y`) to Patient Left (`-X`).
+      3. Computes binned curvilinear medians along the horseshoe angle so U-shaped (parallel
+         posterior legs), V-shaped, and tapered arches are tracked faithfully without parabolic distortion.
+      4. Evaluates a smooth cubic B-spline at `num_control_points` uniform arc-length intervals.
     """
     _ = jaw_type
-    pts = np.asarray(points_3d, dtype=np.float64)
-    if len(pts) < 6:
-        raise ValueError(f"Need at least 6 points to fit a dental arch, got {len(pts)}")
+    raw_pts = np.asarray(points_3d, dtype=np.float64)
+    if len(raw_pts) < 4:
+        raise ValueError(f"Need at least 4 points to fit a dental arch, got {len(raw_pts)}")
 
-    med = np.median(pts, axis=0)
-    dev = np.abs(pts - med)
-    mad = np.median(dev, axis=0)
-    mad[mad == 0] = 1.0
-    valid = np.all(dev < 3.5 * mad, axis=1)
-    filtered = pts[valid] if np.sum(valid) >= 6 else pts
+    # 1. Remove vertex-density bias via spatial voxel-grid averaging when given a dense surface cloud
+    pts = _voxel_grid_downsample(raw_pts, grid_size_mm=1.5) if len(raw_pts) > 32 else raw_pts.copy()
 
-    xs, ys, zs = filtered[:, 0], filtered[:, 1], filtered[:, 2]
-    poly_y = np.polyfit(xs, ys, 2)
-    poly_z = np.polyfit(xs, zs, 2)
+    # 2. Robust outlier rejection in Z (occlusal band) and XY
+    if len(pts) >= 12:
+        med = np.median(pts, axis=0)
+        dev = np.abs(pts - med)
+        mad = np.median(dev, axis=0)
+        mad = np.where(mad < 1.0, 1.0, mad)
+        valid = np.all(dev < 4.0 * mad, axis=1)
+        if int(np.sum(valid)) >= 6:
+            pts = pts[valid]
 
-    x_min = float(np.percentile(xs, 5))
-    x_max = float(np.percentile(xs, 95))
-    margin = (x_max - x_min) * 0.05
-    if ras_convention:
-        # Patient Right (+X) to Patient Left (-X)
-        x_samples = np.linspace(x_max + margin, x_min - margin, num_control_points)
+    # 3. Order points around the open horseshoe arch in the XY plane
+    y_min = float(np.percentile(pts[:, 1], 10))
+    x_mid = float(0.5 * (np.percentile(pts[:, 0], 5) + np.percentile(pts[:, 0], 95)))
+    ref_xy = np.array([x_mid, y_min - 5.0], dtype=np.float64)
+
+    angles = np.arctan2(pts[:, 1] - ref_xy[1], pts[:, 0] - ref_xy[0])
+
+    if len(pts) <= 60:
+        order = np.argsort(angles)
+        ordered = pts[order]
+        ordered = _prune_pathological_points(ordered, max_deviation_mm=10.0)
     else:
-        # LPS: Patient Right (-X) to Patient Left (+X)
-        x_samples = np.linspace(x_min - margin, x_max + margin, num_control_points)
+        n_bins = min(max(num_control_points * 2, 21), max(12, len(pts) // 2))
+        a_min = float(np.percentile(angles, 1))
+        a_max = float(np.percentile(angles, 99))
+        edges = np.linspace(a_min, a_max, n_bins + 1)
+        bin_centers: List[np.ndarray] = []
+        for b_idx in range(n_bins):
+            if b_idx < n_bins - 1:
+                in_bin = (angles >= edges[b_idx]) & (angles < edges[b_idx + 1])
+            else:
+                in_bin = (angles >= edges[b_idx]) & (angles <= edges[b_idx + 1])
+            if np.any(in_bin):
+                bin_centers.append(np.median(pts[in_bin], axis=0))
+        ordered = np.array(bin_centers, dtype=np.float64)
+        ordered = _prune_pathological_points(ordered, max_deviation_mm=10.0)
 
-    y_samples = np.polyval(poly_y, x_samples)
-    z_samples = np.polyval(poly_z, x_samples)
-    return np.column_stack([x_samples, y_samples, z_samples])
+    if len(ordered) < 4:
+        order = np.argsort(pts[:, 0])[::-1] if ras_convention else np.argsort(pts[:, 0])
+        ordered = pts[order]
+
+    if ras_convention and ordered[0, 0] < ordered[-1, 0]:
+        ordered = ordered[::-1].copy()
+    elif (not ras_convention) and ordered[0, 0] > ordered[-1, 0]:
+        ordered = ordered[::-1].copy()
+
+    # 4. Resample uniformly along arc length via cubic spline
+    diffs = np.diff(ordered, axis=0)
+    seg_d = np.linalg.norm(diffs, axis=1)
+    keep = np.concatenate([[True], seg_d > 1e-4])
+    ordered = ordered[keep]
+    if len(ordered) < 4:
+        return ordered
+
+    diffs = np.diff(ordered, axis=0)
+    cum_s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(diffs, axis=1))])
+    total_s = float(cum_s[-1])
+    if total_s <= 1e-6:
+        return ordered
+    u_norm = cum_s / total_s
+
+    try:
+        from scipy import interpolate  # type: ignore
+
+        k = min(3, len(ordered) - 1)
+        smoothing = 0.01 * len(ordered) if len(raw_pts) > 60 else 0.0
+        tck, _ = interpolate.splprep(
+            [ordered[:, 0], ordered[:, 1], ordered[:, 2]],
+            u=u_norm,
+            s=smoothing,
+            k=k,
+        )
+        u_dense = np.linspace(0.0, 1.0, 300)
+        dense_pts = np.column_stack(interpolate.splev(u_dense, tck))
+        dense_s = np.concatenate(
+            [[0.0], np.cumsum(np.linalg.norm(np.diff(dense_pts, axis=0), axis=1))]
+        )
+        target_s = np.linspace(0.0, float(dense_s[-1]), num_control_points)
+        target_u = np.interp(target_s, dense_s, u_dense)
+        ctrl = np.column_stack(interpolate.splev(target_u, tck))
+    except ImportError:
+        target_s = np.linspace(0.0, total_s, num_control_points)
+        ctrl = np.column_stack([np.interp(target_s, cum_s, ordered[:, d]) for d in range(3)])
+
+    if ras_convention and ctrl[0, 0] < ctrl[-1, 0]:
+        ctrl = ctrl[::-1].copy()
+    elif (not ras_convention) and ctrl[0, 0] > ctrl[-1, 0]:
+        ctrl = ctrl[::-1].copy()
+    return ctrl
+
+
+def compute_fdi_arc_positions_mm(
+    total_arc_length_mm: float,
+    jaw_type: str = "lower",
+    arch: Optional[DentalArch] = None,
+    curve_pts: Optional[np.ndarray] = None,
+    curve_arc_s: Optional[np.ndarray] = None,
+    segmented_centroids: Optional[Dict[str, np.ndarray]] = None,
+    calibrated_arc_mm: Optional[Dict[str, float]] = None,
+) -> Dict[str, ToothArcSite]:
+    """B2: Map every FDI tooth in `jaw_type` to its arc-length position along the curve."""
+    jaw_key = "lower" if jaw_type.lower().startswith("low") else "upper"
+    order = JAW_TOOTH_ORDER[jaw_key]
+    L = max(1.0, float(total_arc_length_mm))
+
+    if arch is not None and (curve_pts is None or curve_arc_s is None):
+        curve_pts = arch.pts_dense
+        curve_arc_s = arch.cum_arc_lengths
+
+    def _eval_point_at_arc(s_val: float) -> np.ndarray:
+        s_c = float(np.clip(s_val, 0.0, L))
+        if arch is not None:
+            return arch.evaluate_at_mm(s_c)
+        if curve_pts is not None and curve_arc_s is not None and len(curve_pts) >= 2:
+            return np.array(
+                [np.interp(s_c, curve_arc_s, curve_pts[:, d]) for d in range(3)],
+                dtype=np.float64,
+            )
+        return np.zeros(3, dtype=np.float64)
+
+    widths = np.array([ANATOMICAL_MESIODISTAL_WIDTHS_MM.get(fdi, 7.5) for fdi in order], dtype=np.float64)
+    cum_centers = np.cumsum(widths) - 0.5 * widths
+    span_start = 0.04 * L
+    span_end = 0.96 * L
+    norm_w = (cum_centers - cum_centers[0]) / max(1e-6, float(cum_centers[-1] - cum_centers[0]))
+    table_arcs = span_start + norm_w * (span_end - span_start)
+
+    anchored_arc: Dict[int, float] = {}
+    anchored_source: Dict[int, str] = {}
+
+    cal_map = {str(k): float(v) for k, v in (calibrated_arc_mm or {}).items()}
+    seg_map = {str(k): np.asarray(v, dtype=np.float64) for k, v in (segmented_centroids or {}).items()}
+
+    for idx, fdi in enumerate(order):
+        if fdi in cal_map:
+            anchored_arc[idx] = float(np.clip(cal_map[fdi], 0.0, L))
+            anchored_source[idx] = "calibrated_marker"
+        elif fdi in seg_map:
+            c_pt = seg_map[fdi]
+            if curve_pts is not None and curve_arc_s is not None and len(curve_pts) >= 2:
+                proj_s, _, _ = project_point_to_polyline_arc_mm(curve_pts, curve_arc_s, c_pt)
+                anchored_arc[idx] = float(np.clip(proj_s, 0.0, L))
+            elif arch is not None:
+                t_val, _ = arch.find_closest_parameter(c_pt)
+                anchored_arc[idx] = float(np.clip(t_val * L, 0.0, L))
+            else:
+                anchored_arc[idx] = float(table_arcs[idx])
+            anchored_source[idx] = "segmentation"
+
+    results: Dict[str, ToothArcSite] = {}
+    anchored_indices = sorted(anchored_arc.keys())
+
+    for idx, fdi in enumerate(order):
+        if idx in anchored_arc:
+            s_val = anchored_arc[idx]
+            src = anchored_source[idx]
+            is_approx = False
+            is_missing = False
+        elif len(anchored_indices) >= 1:
+            left_neighbors = [i for i in anchored_indices if i < idx]
+            right_neighbors = [i for i in anchored_indices if i > idx]
+            if left_neighbors and right_neighbors:
+                i0 = left_neighbors[-1]
+                i1 = right_neighbors[0]
+                dw_total = float(cum_centers[i1] - cum_centers[i0])
+                frac = float(cum_centers[idx] - cum_centers[i0]) / max(1e-6, dw_total)
+                s_val = float(np.clip(anchored_arc[i0] + frac * (anchored_arc[i1] - anchored_arc[i0]), 0.0, L))
+            elif left_neighbors:
+                i0 = left_neighbors[-1]
+                scale = (span_end - span_start) / max(1e-6, float(cum_centers[-1] - cum_centers[0]))
+                s_val = float(np.clip(anchored_arc[i0] + (cum_centers[idx] - cum_centers[i0]) * scale, 0.0, L))
+            else:
+                i1 = right_neighbors[0]
+                scale = (span_end - span_start) / max(1e-6, float(cum_centers[-1] - cum_centers[0]))
+                s_val = float(np.clip(anchored_arc[i1] - (cum_centers[i1] - cum_centers[idx]) * scale, 0.0, L))
+            src = "interpolated_from_neighbors"
+            is_approx = True
+            is_missing = bool(seg_map) and (fdi not in seg_map)
+        else:
+            s_val = float(table_arcs[idx])
+            src = "approximate_width_table"
+            is_approx = True
+            is_missing = False
+
+        results[fdi] = ToothArcSite(
+            fdi=fdi,
+            arc_mm=round(s_val, 3),
+            t_normalized=round(s_val / L, 6),
+            point_ras=_eval_point_at_arc(s_val),
+            source=src,
+            is_approximate=is_approx,
+            is_missing_tooth=is_missing,
+        )
+    return results

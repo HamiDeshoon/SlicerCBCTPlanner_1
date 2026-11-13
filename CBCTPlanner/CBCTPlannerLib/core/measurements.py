@@ -1,20 +1,22 @@
 """
 Clinical Dental CBCT Measurement Engine.
-Performs millimeter-precise calculations from real volume & segmentation masks ONLY.
-Never returns fabricated or hardcoded fallback clinical values; returns None when a structure
-or measurement cannot be determined from the segmentation/volume.
+Performs millimeter-precise calculations in the arch-frame cross-section plane (B4) from real
+volume & segmentation masks ONLY. Never returns fabricated or hardcoded fallback clinical values;
+returns None when a structure or measurement cannot be determined from the segmentation/volume.
+All Misch bone density classifications are explicitly labeled approximate because CBCT gray values
+are not calibrated Hounsfield Units (B4, F12).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from . import ensure_optional_package
-from .arch_detector import DentalArch
+from .arch_detector import DentalArch, compute_fdi_arc_positions_mm
 from .labels import (
-    FDI_TO_PULP_ID,
+    DENTALSEGMENTATOR_CANAL_ID,
     LEFT_IAN_ID,
     LEFT_SINUS_ID,
     LOWER_JAW_ID,
@@ -26,9 +28,7 @@ from .labels import (
 from .tooth_localizer import ToothInfo, ToothLocalizer
 from .volume_loader import CBCTVolume
 
-# Support DentalSegmentator 5-class group IDs as well as ToothFairy3 label IDs:
-# In DentalSegmentator: 1=Maxilla, 2=Mandible, 3=Upper Teeth, 4=Lower Teeth, 5=Mandibular canal
-DENTALSEGMENTATOR_CANAL_ID = 5
+MISCH_APPROXIMATE_DISCLAIMER = "approximate (CBCT gray values are not calibrated HU)"
 
 
 @dataclass
@@ -51,6 +51,9 @@ class ImplantSiteMeasurement:
     suggested_length_mm: Optional[float]
     suggested_angulation_deg: Optional[float]
     is_ai_suggested: bool = True
+    ai_suggestion_confirmed: bool = False
+    site_position_source: str = "segmentation"
+    is_approximate_site: bool = False
     buccal_bone_thickness_mm: Optional[float] = None
     lingual_bone_thickness_mm: Optional[float] = None
     socket_depth_mm: Optional[float] = None
@@ -72,6 +75,7 @@ class ImplantSiteMeasurement:
     canal_entrance_depth_mm: Optional[float] = None
     canal_entrance_coord_mm: Optional[List[float]] = None
     apical_foramen_coord_mm: Optional[List[float]] = None
+    nnt_density_summary: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -88,7 +92,7 @@ class NerveProximityMetric:
 
 
 class MeasurementEngine:
-    """Master engine for calculating dental CBCT clinical metrics without fabricated constants."""
+    """Master engine for calculating dental CBCT clinical metrics in the arch-frame cross-section (B4)."""
 
     def __init__(
         self,
@@ -97,6 +101,7 @@ class MeasurementEngine:
         arch: Optional[DentalArch] = None,
         arches: Optional[Dict[str, DentalArch]] = None,
         is_dental_segmentator_5class: bool = False,
+        extract_teeth_eagerly: bool = True,
     ):
         self.volume = volume
         self.mask = mask
@@ -105,9 +110,12 @@ class MeasurementEngine:
         self.is_dental_segmentator_5class = is_dental_segmentator_5class
         self.localizer = ToothLocalizer(volume, mask, arch=arch, arches=self.arches)
         self.teeth: Dict[str, ToothInfo] = (
-            {} if is_dental_segmentator_5class else self.localizer.extract_all_teeth()
+            {}
+            if (is_dental_segmentator_5class or not extract_teeth_eagerly)
+            else self.localizer.extract_all_teeth()
         )
-        self._distance_maps: Dict[int, np.ndarray] = {}
+        # O3: Cache ROI-cropped distance transforms keyed by structure_id -> (dt_sub, z_slice, y_slice, x_slice)
+        self._cropped_dt_cache: Dict[int, Tuple[np.ndarray, slice, slice, slice]] = {}
 
     def _jaw_id(self, is_mandible: bool) -> int:
         if self.is_dental_segmentator_5class:
@@ -131,39 +139,124 @@ class MeasurementEngine:
             return self.arch
         return self._arch_for_jaw(info.quadrant in (3, 4))
 
-    def get_distance_transform(self, structure_id: int) -> Optional[np.ndarray]:
-        """Compute or retrieve cached 3D Euclidean distance transform in mm."""
-        if structure_id not in self._distance_maps:
+    def _get_tooth_info(self, fdi: str) -> Optional[ToothInfo]:
+        fdi_str = str(fdi)
+        if fdi_str in self.teeth:
+            return self.teeth[fdi_str]
+        if not self.is_dental_segmentator_5class:
+            extracted = self.localizer.extract_tooth(fdi_str)
+            if extracted is not None:
+                self.teeth[fdi_str] = extracted
+            return extracted
+        return None
+
+    def get_distance_at_world_point(self, structure_id: int, world_pt_ras: np.ndarray) -> Optional[float]:
+        """O3: Evaluate 3D Euclidean distance transform (in mm) to `structure_id` using an ROI-cropped EDT."""
+        if structure_id not in self._cropped_dt_cache:
             binary = self.mask == structure_id
             if not binary.any():
                 return None
             scipy_nd = ensure_optional_package(
                 "scipy.ndimage", "scipy", "3D distance transform"
             )
+            z_idx, y_idx, x_idx = np.where(binary)
             sz, sy, sx = self.volume.spacing
-            self._distance_maps[structure_id] = scipy_nd.distance_transform_edt(
-                ~binary, sampling=(sz, sy, sx)
-            )
-        return self._distance_maps[structure_id]
+            margin_z = int(max(4, round(30.0 / max(1e-3, sz))))
+            margin_y = int(max(4, round(30.0 / max(1e-3, sy))))
+            margin_x = int(max(4, round(30.0 / max(1e-3, sx))))
+
+            z0 = max(0, int(z_idx.min()) - margin_z)
+            z1 = min(self.mask.shape[0], int(z_idx.max()) + margin_z + 1)
+            y0 = max(0, int(y_idx.min()) - margin_y)
+            y1 = min(self.mask.shape[1], int(y_idx.max()) + margin_y + 1)
+            x0 = max(0, int(x_idx.min()) - margin_x)
+            x1 = min(self.mask.shape[2], int(x_idx.max()) + margin_x + 1)
+
+            zs, ys, xs = slice(z0, z1), slice(y0, y1), slice(x0, x1)
+            sub_bin = binary[zs, ys, xs]
+            dt_sub = scipy_nd.distance_transform_edt(~sub_bin, sampling=(sz, sy, sx))
+            self._cropped_dt_cache[structure_id] = (dt_sub, zs, ys, xs)
+
+        dt_sub, zs, ys, xs = self._cropped_dt_cache[structure_id]
+        vox = self.volume.world_to_voxel(world_pt_ras)
+        vx, vy, vz = int(round(vox[0])), int(round(vox[1])), int(round(vox[2]))
+        if (
+            zs.start <= vz < zs.stop
+            and ys.start <= vy < ys.stop
+            and xs.start <= vx < xs.stop
+        ):
+            return float(dt_sub[vz - zs.start, vy - ys.start, vx - xs.start])
+        return None
+
+    def _get_cross_section_frame(
+        self, site_center_mm: np.ndarray, is_mandible: bool
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return orthonormal `(P, T, N, B)` frame at `site_center_mm` for cross-section resampling (B4)."""
+        arch = self._arch_for_jaw(is_mandible)
+        if arch is not None:
+            t_param, _ = arch.find_closest_parameter(site_center_mm)
+            frame = arch.get_frame(t_param)
+            return np.asarray(site_center_mm, dtype=np.float64), frame.tangent, frame.normal, frame.binormal
+        # Fallback orthonormal RAS axes if no arch is provided
+        return (
+            np.asarray(site_center_mm, dtype=np.float64),
+            np.array([-1.0, 0.0, 0.0], dtype=np.float64),
+            np.array([0.0, 1.0, 0.0], dtype=np.float64),
+            np.array([0.0, 0.0, 1.0], dtype=np.float64),
+        )
+
+    def _resample_arch_cross_section(
+        self,
+        site_center_mm: np.ndarray,
+        is_mandible: bool,
+        half_u_mm: float = 15.0,
+        half_v_mm: float = 25.0,
+        step_mm: float = 0.25,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """B4: Resample label mask and image intensity on a 2D cross-section grid perpendicular to the arch tangent.
+
+        Grid coordinates:
+          - `u_coords`: Buccal-Lingual offsets along `N` (`-half_u_mm` to `+half_u_mm`)
+          - `v_coords`: Inferior-Superior offsets along occlusal normal `B` (`-half_v_mm` to `+half_v_mm`)
+          - `world_grid[iv, iu] = P + u_coords[iu] * N + v_coords[iv] * B`
+        """
+        P, T, N, B = self._get_cross_section_frame(site_center_mm, is_mandible)
+        n_u = int(round(2.0 * half_u_mm / step_mm)) + 1
+        n_v = int(round(2.0 * half_v_mm / step_mm)) + 1
+        u_coords = np.linspace(-half_u_mm, half_u_mm, n_u)
+        v_coords = np.linspace(-half_v_mm, half_v_mm, n_v)
+
+        uu, vv = np.meshgrid(u_coords, v_coords)  # shape (n_v, n_u)
+        world_grid = (
+            P[None, None, :]
+            + uu[:, :, None] * N[None, None, :]
+            + vv[:, :, None] * B[None, None, :]
+        )
+        mask_cs = self.volume.sample_mask_world_points(self.mask, world_grid)
+        img_cs = self.volume.sample_world_points(world_grid, order=1, cval=-1000.0)
+        return u_coords, v_coords, mask_cs, img_cs, P, N, B
 
     def measure_implant_site(
         self, fdi: str, offset_mm: float = 0.0
     ) -> Optional[ImplantSiteMeasurement]:
-        """Compute implant planning metrics from actual segmentation/volume; returns None if unmeasurable."""
+        """Compute implant planning metrics in the arch-frame cross-section (B4); returns None if unmeasurable."""
         info = get_tooth_label(str(fdi))
         if not info:
             return None
 
         is_mandible = info.quadrant in (3, 4)
         jaw_id = self._jaw_id(is_mandible)
-        jaw_mask = self.mask == jaw_id
         arch = self._arch_for_fdi(str(fdi))
 
-        tooth = self.teeth.get(str(fdi))
+        tooth = self._get_tooth_info(str(fdi))
         if tooth is not None:
             base_site_mm = tooth.centroid_mm
+            site_source = "segmentation"
+            is_approx_site = False
         elif arch is not None:
-            base_site_mm = self._estimate_missing_tooth_site(str(fdi))
+            base_site_mm, site_source, is_approx_site = self._estimate_missing_tooth_site_with_provenance(
+                str(fdi)
+            )
         else:
             return None
 
@@ -179,19 +272,26 @@ class MeasurementEngine:
         vital_id = next((vid for vid in vital_candidates if (self.mask == vid).any()), None)
         vital_name = "Inferior Alveolar Canal" if is_mandible else "Maxillary Sinus Floor"
 
-        bone_height_mm, vital_dist_mm = self._compute_bone_height(
-            site_center_mm, is_mandible, jaw_id, vital_id
+        # B4: Resample the arch-frame cross-section plane once and extract height, widths, plates, and density
+        u_coords, v_coords, mask_cs, img_cs, P, N, B = self._resample_arch_cross_section(
+            site_center_mm, is_mandible=is_mandible, half_u_mm=15.0, half_v_mm=25.0, step_mm=0.25
+        )
+
+        bone_height_mm, vital_dist_mm, crest_v = self._compute_bone_height_in_cs(
+            u_coords, v_coords, mask_cs, P, B, is_mandible, jaw_id, vital_id
         )
 
         depths = [0.0, 3.0, 5.0, 6.0, 9.0]
-        widths = self._compute_bone_widths(site_center_mm, is_mandible, jaw_id, depths)
+        widths = self._compute_bone_widths_in_cs(
+            u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths
+        )
         crest_w = widths.get(0.0)
         mid_w = widths.get(6.0) if widths.get(6.0) is not None else widths.get(3.0)
         apical_w = widths.get(9.0)
 
         mesiodistal_mm = self._compute_mesiodistal_space(str(fdi))
-        mean_density_hu = self._compute_site_bone_density(
-            site_center_mm, is_mandible, bone_height_mm, jaw_id
+        mean_density_hu, nnt_summary = self._compute_site_bone_density_in_cs(
+            u_coords, v_coords, mask_cs, img_cs, crest_v, is_mandible, bone_height_mm, jaw_id
         )
         density_class = (
             self._classify_misch_density(mean_density_hu)
@@ -208,8 +308,8 @@ class MeasurementEngine:
             else None
         )
 
-        buccal_plate_w, lingual_plate_w = self._compute_cortical_plates(
-            site_center_mm, is_mandible, jaw_id, tooth=tooth
+        buccal_plate_w, lingual_plate_w = self._compute_cortical_plates_in_cs(
+            u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, tooth=tooth
         )
 
         return ImplantSiteMeasurement(
@@ -229,156 +329,120 @@ class MeasurementEngine:
             suggested_length_mm=suggested_len,
             suggested_angulation_deg=suggested_ang,
             is_ai_suggested=True,
+            ai_suggestion_confirmed=False,
+            site_position_source=site_source,
+            is_approximate_site=is_approx_site,
             buccal_bone_thickness_mm=buccal_plate_w,
             lingual_bone_thickness_mm=lingual_plate_w,
+            nnt_density_summary=nnt_summary,
         )
 
-    def _compute_bone_height(
+    def _compute_bone_height_in_cs(
         self,
-        site_center_mm: np.ndarray,
+        u_coords: np.ndarray,
+        v_coords: np.ndarray,
+        mask_cs: np.ndarray,
+        P: np.ndarray,
+        B: np.ndarray,
         is_mandible: bool,
         jaw_id: int,
         vital_id: Optional[int],
-    ) -> Tuple[Optional[float], Optional[float]]:
-        """Compute vertical bone height and vital clearance from actual segmented masks; None if absent."""
-        vox_center = self.volume.world_to_voxel(site_center_mm)
-        cx, cy = int(round(vox_center[0])), int(round(vox_center[1]))
-        z_dim, y_dim, x_dim = self.volume.shape
-        sz = self.volume.spacing[0]
+    ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """B4: Compute bone height and vital clearance along occlusal normal `B` in the cross-section plane."""
+        central_u = np.abs(u_coords) <= 1.5
+        jaw_central = (mask_cs[:, central_u] == jaw_id).any(axis=1)
+        if not jaw_central.any():
+            wider_u = np.abs(u_coords) <= 4.0
+            jaw_central = (mask_cs[:, wider_u] == jaw_id).any(axis=1)
+        if not jaw_central.any():
+            return None, None, None
 
-        if not (0 <= cx < x_dim and 0 <= cy < y_dim):
-            return None, None
-
-        y_min, y_max = max(0, cy - 3), min(y_dim, cy + 4)
-        x_min, x_max = max(0, cx - 3), min(x_dim, cx + 4)
-        jaw_col = (self.mask[:, cy, cx] == jaw_id)
-        if not jaw_col.any():
-            jaw_col = (self.mask[:, y_min:y_max, x_min:x_max] == jaw_id).any(axis=(1, 2))
-        if not jaw_col.any():
-            return None, None
-
-        z_indices = np.where(jaw_col)[0]
-        dt_vital = self.get_distance_transform(vital_id) if vital_id is not None else None
-
+        v_jaw = v_coords[jaw_central]
         if is_mandible:
-            crest_z = int(np.max(z_indices))
-            full_jaw_height = float((crest_z - int(np.min(z_indices))) * sz)
+            crest_v = float(np.max(v_jaw))
+            inf_v = float(np.min(v_jaw))
+            full_jaw_height = float(max(0.0, crest_v - inf_v))
             if vital_id is not None:
-                canal_z = np.where(
-                    (self.mask[:, y_min:y_max, x_min:x_max] == vital_id).any(axis=(1, 2))
-                )[0]
-                if len(canal_z) > 0:
-                    canal_top_z = int(np.max(canal_z))
-                    vital_dist = float(max(0.0, (crest_z - canal_top_z) * sz))
-                    return round(vital_dist, 2), round(vital_dist, 2)
-                if dt_vital is not None:
-                    vital_dist = float(dt_vital[crest_z, cy, cx])
-                    return round(min(full_jaw_height, vital_dist), 2), round(vital_dist, 2)
-            return round(full_jaw_height, 2), None
+                canal_u = np.abs(u_coords) <= 4.0
+                canal_rows = (mask_cs[:, canal_u] == vital_id).any(axis=1) & (v_coords <= crest_v)
+                if canal_rows.any():
+                    canal_top_v = float(np.max(v_coords[canal_rows]))
+                    vital_dist = float(max(0.0, crest_v - canal_top_v))
+                    return round(vital_dist, 2), round(vital_dist, 2), crest_v
+                crest_world = P + crest_v * B
+                edt_val = self.get_distance_at_world_point(vital_id, crest_world)
+                if edt_val is not None:
+                    return round(min(full_jaw_height, edt_val), 2), round(edt_val, 2), crest_v
+            return round(full_jaw_height, 2), None, crest_v
         else:
-            crest_z = int(np.min(z_indices))
-            full_jaw_height = float((int(np.max(z_indices)) - crest_z) * sz)
+            crest_v = float(np.min(v_jaw))
+            sup_v = float(np.max(v_jaw))
+            full_jaw_height = float(max(0.0, sup_v - crest_v))
             if vital_id is not None:
-                sinus_z = np.where(
-                    (self.mask[:, y_min:y_max, x_min:x_max] == vital_id).any(axis=(1, 2))
-                )[0]
-                if len(sinus_z) > 0:
-                    sinus_floor_z = int(np.min(sinus_z))
-                    vital_dist = float(max(0.0, (sinus_floor_z - crest_z) * sz))
-                    return round(vital_dist, 2), round(vital_dist, 2)
-                if dt_vital is not None:
-                    vital_dist = float(dt_vital[crest_z, cy, cx])
-                    return round(min(full_jaw_height, vital_dist), 2), round(vital_dist, 2)
-            return round(full_jaw_height, 2), None
+                sinus_u = np.abs(u_coords) <= 4.0
+                sinus_rows = (mask_cs[:, sinus_u] == vital_id).any(axis=1) & (v_coords >= crest_v)
+                if sinus_rows.any():
+                    sinus_floor_v = float(np.min(v_coords[sinus_rows]))
+                    vital_dist = float(max(0.0, sinus_floor_v - crest_v))
+                    return round(vital_dist, 2), round(vital_dist, 2), crest_v
+                crest_world = P + crest_v * B
+                edt_val = self.get_distance_at_world_point(vital_id, crest_world)
+                if edt_val is not None:
+                    return round(min(full_jaw_height, edt_val), 2), round(edt_val, 2), crest_v
+            return round(full_jaw_height, 2), None, crest_v
 
-    def _compute_bone_widths(
-        self,
-        site_center_mm: np.ndarray,
+    @staticmethod
+    def _compute_bone_widths_in_cs(
+        u_coords: np.ndarray,
+        v_coords: np.ndarray,
+        mask_cs: np.ndarray,
+        crest_v: Optional[float],
         is_mandible: bool,
         jaw_id: int,
         depths_mm: List[float],
     ) -> Dict[float, Optional[float]]:
-        """Compute buccolingual bone width at each depth; returns None for depths with no segmented bone."""
+        """B4: Measure buccolingual bone width along `N` at specified apical depths from `crest_v`."""
         widths: Dict[float, Optional[float]] = {d: None for d in depths_mm}
-        arch = self._arch_for_jaw(is_mandible)
-        if arch is None:
+        if crest_v is None:
             return widths
-
-        t, _ = arch.find_closest_parameter(site_center_mm)
-        frame = arch.get_frame(t)
-        normal = frame.normal
-        up = frame.binormal
-
-        # Find crest Z coordinate at site_center_mm
-        vox_center = self.volume.world_to_voxel(site_center_mm)
-        cx, cy = int(round(vox_center[0])), int(round(vox_center[1]))
-        z_dim, y_dim, x_dim = self.volume.shape
-        if not (0 <= cx < x_dim and 0 <= cy < y_dim):
-            return widths
-
-        y_min, y_max = max(0, cy - 3), min(y_dim, cy + 4)
-        x_min, x_max = max(0, cx - 3), min(x_dim, cx + 4)
-        jaw_col = (self.mask[:, y_min:y_max, x_min:x_max] == jaw_id).any(axis=(1, 2))
-        if not jaw_col.any():
-            return widths
-        z_indices = np.where(jaw_col)[0]
-        crest_z_vox = int(np.max(z_indices)) if is_mandible else int(np.min(z_indices))
-        crest_world = self.volume.voxel_to_world([cx, cy, crest_z_vox])
-        crest_point = np.array([site_center_mm[0], site_center_mm[1], crest_world[2]], dtype=np.float64)
-
-        apical_dir = -up if is_mandible else up
-        sample_offsets = np.linspace(-15.0, 15.0, 61)
 
         for depth in depths_mm:
-            sample_center = crest_point + apical_dir * depth
-            line_pts = sample_center + np.outer(sample_offsets, normal)
-            inside = []
-            for pt in line_pts:
-                vox = self.volume.world_to_voxel(pt)
-                vx, vy, vz = int(round(vox[0])), int(round(vox[1])), int(round(vox[2]))
-                if 0 <= vz < z_dim and 0 <= vy < y_dim and 0 <= vx < x_dim:
-                    inside.append(bool(self.mask[vz, vy, vx] == jaw_id))
-                else:
-                    inside.append(False)
-            inside_arr = np.array(inside, dtype=bool)
-            if inside_arr.any():
-                true_idx = np.where(inside_arr)[0]
-                w = float((int(np.max(true_idx)) - int(np.min(true_idx))) * 0.5)
+            # At depth 0 (crest), sample 0.5 mm sub-crestal to avoid surface partial-volume grazing
+            eff_d = max(0.25, float(depth)) if depth == 0.0 else float(depth)
+            target_v = crest_v - eff_d if is_mandible else crest_v + eff_d
+            row_idx = int(np.argmin(np.abs(v_coords - target_v)))
+            if abs(float(v_coords[row_idx]) - target_v) > 1.0:
+                continue
+            # Allow +/- 1 row band for robustness
+            r0 = max(0, row_idx - 1)
+            r1 = min(len(v_coords), row_idx + 2)
+            in_jaw = (mask_cs[r0:r1, :] == jaw_id).any(axis=0)
+            if in_jaw.any():
+                u_in = u_coords[in_jaw]
+                w = float(np.max(u_in) - np.min(u_in))
                 widths[depth] = round(w, 2) if w > 0.0 else None
         return widths
 
-    def _compute_cortical_plates(
-        self,
-        site_center_mm: np.ndarray,
+    @staticmethod
+    def _compute_cortical_plates_in_cs(
+        u_coords: np.ndarray,
+        v_coords: np.ndarray,
+        mask_cs: np.ndarray,
+        crest_v: Optional[float],
         is_mandible: bool,
         jaw_id: int,
         tooth: Optional[ToothInfo] = None,
     ) -> Tuple[Optional[float], Optional[float]]:
-        arch = self._arch_for_jaw(is_mandible)
-        if arch is None or tooth is None:
+        if crest_v is None or tooth is None:
             return None, None
-        t, _ = arch.find_closest_parameter(site_center_mm)
-        frame = arch.get_frame(t)
-        normal = frame.normal
-        apical_dir = -frame.binormal if is_mandible else frame.binormal
-        crest_sub = site_center_mm + apical_dir * 2.0
-        offsets = np.linspace(-15.0, 15.0, 61)
-        line_pts = crest_sub + np.outer(offsets, normal)
-
-        bone_idx, tooth_idx = [], []
-        z_dim, y_dim, x_dim = self.volume.shape
-        for i, pt in enumerate(line_pts):
-            vox = self.volume.world_to_voxel(pt)
-            vx, vy, vz = int(round(vox[0])), int(round(vox[1])), int(round(vox[2]))
-            if 0 <= vz < z_dim and 0 <= vy < y_dim and 0 <= vx < x_dim:
-                val = int(self.mask[vz, vy, vx])
-                if val == jaw_id:
-                    bone_idx.append(i)
-                if val == tooth.label_id:
-                    tooth_idx.append(i)
-        if bone_idx and tooth_idx:
-            buccal_th = float(max(0.0, (max(bone_idx) - max(tooth_idx)) * 0.5))
-            lingual_th = float(max(0.0, (min(tooth_idx) - min(bone_idx)) * 0.5))
+        target_v = crest_v - 2.0 if is_mandible else crest_v + 2.0
+        row_idx = int(np.argmin(np.abs(v_coords - target_v)))
+        row_labels = mask_cs[row_idx, :]
+        bone_u = u_coords[row_labels == jaw_id]
+        tooth_u = u_coords[row_labels == tooth.label_id]
+        if len(bone_u) > 0 and len(tooth_u) > 0:
+            buccal_th = float(max(0.0, float(np.max(bone_u)) - float(np.max(tooth_u))))
+            lingual_th = float(max(0.0, float(np.min(tooth_u)) - float(np.min(bone_u))))
             return round(buccal_th, 2), round(lingual_th, 2)
         return None, None
 
@@ -393,55 +457,85 @@ class MeasurementEngine:
             else (f"{2 if quad == 1 else 1}1" if quad in (1, 2) else f"{3 if quad == 4 else 4}1")
         )
         distal_fdi = f"{quad}{t_num + 1}" if t_num < 8 else None
-        t_mesial = self.teeth.get(mesial_fdi)
-        t_distal = self.teeth.get(distal_fdi) if distal_fdi else None
+        t_mesial = self._get_tooth_info(mesial_fdi)
+        t_distal = self._get_tooth_info(distal_fdi) if distal_fdi else None
         if t_mesial and t_distal:
             dist = float(np.linalg.norm(t_mesial.crown_point_mm - t_distal.crown_point_mm))
             return round(max(0.0, dist - 4.0), 2)
         return None
 
-    def _compute_site_bone_density(
+    def _compute_site_bone_density_in_cs(
         self,
-        site_center_mm: np.ndarray,
+        u_coords: np.ndarray,
+        v_coords: np.ndarray,
+        mask_cs: np.ndarray,
+        img_cs: np.ndarray,
+        crest_v: Optional[float],
         is_mandible: bool,
         bone_height_mm: Optional[float],
         jaw_id: int,
-    ) -> Optional[float]:
-        if bone_height_mm is None or bone_height_mm <= 0:
-            return None
-        vox_center = self.volume.world_to_voxel(site_center_mm)
-        cx, cy, cz = int(round(vox_center[0])), int(round(vox_center[1])), int(round(vox_center[2]))
-        rx = int(max(1, round(2.0 / self.volume.spacing[2])))
-        ry = int(max(1, round(2.0 / self.volume.spacing[1])))
-        rz = int(max(2, round(min(bone_height_mm, 10.0) / self.volume.spacing[0])))
+    ) -> Tuple[Optional[float], Dict[str, Any]]:
+        """B4 & F12: Compute implant-zone bone intensity and NNT-style concentric shell summary."""
+        if crest_v is None or bone_height_mm is None or bone_height_mm <= 0:
+            return None, {}
+        depth_span = min(float(bone_height_mm), 10.0)
+        if is_mandible:
+            v_mask = (v_coords <= crest_v) & (v_coords >= crest_v - depth_span)
+        else:
+            v_mask = (v_coords >= crest_v) & (v_coords <= crest_v + depth_span)
 
-        z_slice = (
-            slice(cz, min(cz + rz, self.volume.shape[0]))
-            if not is_mandible
-            else slice(max(0, cz - rz), min(cz + 1, self.volume.shape[0]))
+        core_u = np.abs(u_coords) <= 2.0
+        shell_u = (np.abs(u_coords) > 2.0) & (np.abs(u_coords) <= 3.5)
+
+        core_region = np.outer(v_mask, core_u) & (mask_cs == jaw_id)
+        if not np.any(core_region):
+            core_region = np.outer(v_mask, core_u)
+        if not np.any(core_region):
+            return None, {}
+
+        core_vals = img_cs[core_region]
+        mean_val = round(float(np.mean(core_vals)), 1)
+        std_val = round(float(np.std(core_vals)), 1)
+
+        shell_region = np.outer(v_mask, shell_u) & (mask_cs == jaw_id)
+        shell_mean = (
+            round(float(np.mean(img_cs[shell_region])), 1)
+            if np.any(shell_region)
+            else mean_val
         )
-        y_slice = slice(max(0, cy - ry), min(cy + ry + 1, self.volume.shape[1]))
-        x_slice = slice(max(0, cx - rx), min(cx + rx + 1, self.volume.shape[2]))
-
-        sub_img = self.volume.image[z_slice, y_slice, x_slice]
-        sub_mask = self.mask[z_slice, y_slice, x_slice] == jaw_id
-        if sub_img.size == 0:
-            return None
-        if np.any(sub_mask):
-            return round(float(np.mean(sub_img[sub_mask])), 1)
-        return round(float(np.mean(sub_img)), 1)
+        misch_full = self._classify_misch_density(mean_val)
+        misch_code = self.extract_misch_code(misch_full)
+        summary = {
+            "core_mean_gray": mean_val,
+            "core_std_gray": std_val,
+            "outer_shell_mean_gray": shell_mean,
+            "misch_code": misch_code,
+            "misch_class": misch_full,
+            "is_approximate": True,
+            "calibration_warning": MISCH_APPROXIMATE_DISCLAIMER,
+        }
+        return mean_val, summary
 
     @staticmethod
     def _classify_misch_density(hu: float) -> str:
+        """B4 & F12: Classify Misch bone quality and explicitly label it approximate."""
         if hu > 1250:
-            return "D1"
-        if hu >= 850:
-            return "D2"
-        if hu >= 350:
-            return "D3"
-        if hu >= 150:
-            return "D4"
-        return "D5"
+            code = "D1"
+        elif hu >= 850:
+            code = "D2"
+        elif hu >= 350:
+            code = "D3"
+        elif hu >= 150:
+            code = "D4"
+        else:
+            code = "D5"
+        return f"{code} ({MISCH_APPROXIMATE_DISCLAIMER})"
+
+    @staticmethod
+    def extract_misch_code(misch_str: Optional[str]) -> Optional[str]:
+        if not misch_str:
+            return None
+        return str(misch_str).split()[0].strip()
 
     @staticmethod
     def _suggest_implant(
@@ -471,14 +565,31 @@ class MeasurementEngine:
             return None, None, None
         return chosen_diam, chosen_len, 0.0
 
-    def _estimate_missing_tooth_site(self, fdi: str) -> np.ndarray:
+    def _estimate_missing_tooth_site_with_provenance(
+        self, fdi: str
+    ) -> Tuple[np.ndarray, str, bool]:
+        """B2: Estimate missing tooth site using segmented neighbors or mesiodistal width table."""
         info = get_tooth_label(fdi)
         arch = self._arch_for_fdi(fdi)
         if arch is None or not info:
-            return np.zeros(3, dtype=np.float64)
-        q, n = info.quadrant, info.tooth_number
-        if q in (1, 4):
-            t = (8 - n) / 7.0 * 0.48
-        else:
-            t = 0.52 + (n - 1) / 7.0 * 0.48
-        return arch.evaluate_at(t)
+            return np.zeros(3, dtype=np.float64), "approximate_width_table", True
+        jaw_type = "lower" if info.quadrant in (3, 4) else "upper"
+        seg_centroids = {
+            k: t_info.centroid_mm
+            for k, t_info in self.teeth.items()
+            if ((int(k) >= 31) == (jaw_type == "lower"))
+        }
+        site_map = compute_fdi_arc_positions_mm(
+            total_arc_length_mm=arch.total_arc_length,
+            jaw_type=jaw_type,
+            arch=arch,
+            segmented_centroids=seg_centroids,
+        )
+        site = site_map.get(str(fdi))
+        if site is not None:
+            return site.point_ras, site.source, site.is_approximate
+        return arch.evaluate_at(0.5), "approximate_width_table", True
+
+    def _estimate_missing_tooth_site(self, fdi: str) -> np.ndarray:
+        pt, _, _ = self._estimate_missing_tooth_site_with_provenance(fdi)
+        return pt
