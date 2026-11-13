@@ -1,12 +1,19 @@
 """Volume Rendering (VR) and DentalSegmentator 3D visualization module.
 
 Ports the 5-class anatomical surface presentation from gaudot/SlicerDentalSegmentator
-and provides interactive CBCT Volume Rendering (VR) presets, HU shift adjustment,
+and provides interactive CBCT Volume Rendering (VR) presets, non-cumulative HU shift
+adjustment (with 4-tuple vtkPiecewiseFunction and 6-tuple vtkColorTransferFunction buffers),
 and ROI cropping using 3D Slicer's VolumeRendering module.
 """
 
-from typing import Dict, Optional, Tuple
-import slicer
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import slicer  # type: ignore
+except ImportError:
+    slicer = None
 
 from .Utils import (
     set3DViewBackgroundColors,
@@ -37,10 +44,14 @@ class VRVisualizationLogic:
         "CT-Cardiac",
     )
 
+    def __init__(self) -> None:
+        # Cache baseline transfer function control points keyed by (prop_node_id, preset_name)
+        self._baseline_tf_cache: Dict[Tuple[str, str], Tuple[List[List[float]], List[List[float]]]] = {}
+
     @staticmethod
-    def _get_segment_ids(segmentation) -> list:
+    def _get_segment_ids(segmentation: Any) -> List[str]:
         try:
-            import vtk
+            import vtk  # type: ignore
 
             ids = vtk.vtkStringArray()
             segmentation.GetSegmentIDs(ids)
@@ -73,6 +84,8 @@ class VRVisualizationLogic:
         frontal_view: bool = True,
     ) -> None:
         """Configure 3D viewport presentation matching SlicerDentalSegmentator."""
+        if slicer is None:
+            return
         if switch_to_widescreen:
             setConventionalWideScreenView()
         if white_background:
@@ -87,14 +100,14 @@ class VRVisualizationLogic:
             for i in range(getattr(layoutManager, "threeDViewCount", 1)):
                 threeD = layoutManager.threeDWidget(i)
                 if i == 0 and threeD and hasattr(threeD, "threeDView"):
-                    threeD.threeDView().rotateToViewAxis(3)  # Anterior frontal view
+                    threeD.threeDView().rotateToViewAxis(3)
         slicer.util.resetThreeDViews()
 
     def apply_dental_segmentator_styling(
         self,
-        segmentationNode,
+        segmentationNode: Any,
         smoothing_factor: float = 0.5,
-        group_values: Optional[list] = None,
+        group_values: Optional[ list ] = None,
         configure_view: bool = True,
     ) -> None:
         """Apply DentalSegmentator colors, 3D opacities, and closed-surface smoothing."""
@@ -143,7 +156,8 @@ class VRVisualizationLogic:
         if configure_view:
             self.configure_3d_view()
 
-    def _apply_custom_dental_cbct_transfer_function(self, volumePropertyNode) -> None:
+    @staticmethod
+    def _apply_custom_dental_cbct_transfer_function(volumePropertyNode: Any) -> None:
         """Configure a CBCT-optimized bone + enamel transfer function (HU/gray-value)."""
         if not volumePropertyNode:
             return
@@ -179,76 +193,137 @@ class VRVisualizationLogic:
         volumePropertyNode.SetDiffuse(0.85)
         volumePropertyNode.SetSpecular(0.25)
 
-    def get_or_create_vr_display_node(self, volumeNode):
-        """Return existing or newly created vtkMRMLVolumeRenderingDisplayNode."""
-        if not volumeNode:
-            return None
+    def get_or_create_vr_display_node(self, volumeNode: Any) -> Tuple[Any, bool]:
+        """Return (vtkMRMLVolumeRenderingDisplayNode, created_new)."""
+        if slicer is None or not volumeNode:
+            return None, False
         volRenLogic = slicer.modules.volumerendering.logic()
         displayNode = volRenLogic.GetFirstVolumeRenderingDisplayNode(volumeNode)
         if not displayNode:
             displayNode = volRenLogic.CreateDefaultVolumeRenderingNodes(volumeNode)
-        return displayNode
+            return displayNode, True
+        return displayNode, False
+
+    @staticmethod
+    def _extract_tf_points(
+        volumePropertyNode: Any,
+    ) -> Tuple[List[List[float]], List[List[float]]]:
+        """Read 4-element scalar opacity points and 6-element color TF points."""
+        opacity_pts: List[List[float]] = []
+        color_pts: List[List[float]] = []
+        if not volumePropertyNode:
+            return opacity_pts, color_pts
+
+        opacity_tf = volumePropertyNode.GetScalarOpacity()
+        if opacity_tf:
+            n_op = opacity_tf.GetSize()
+            buf4 = [0.0, 0.0, 0.5, 0.0]
+            for i in range(n_op):
+                opacity_tf.GetNodeValue(i, buf4)
+                opacity_pts.append(list(buf4))
+
+        color_tf = volumePropertyNode.GetColor()
+        if color_tf:
+            n_col = color_tf.GetSize()
+            buf6 = [0.0, 0.0, 0.0, 0.0, 0.5, 0.0]
+            for i in range(n_col):
+                color_tf.GetNodeValue(i, buf6)
+                color_pts.append(list(buf6))
+
+        return opacity_pts, color_pts
+
+    @classmethod
+    def shift_transfer_function(
+        cls,
+        volumePropertyNode: Any,
+        shift_hu: float,
+        base_opacity_pts: Optional[List[List[float]]] = None,
+        base_color_pts: Optional[List[List[float]]] = None,
+    ) -> None:
+        """Shift scalar opacity (4-value) and color transfer function (6-value) points by shift_hu.
+
+        vtkPiecewiseFunction.GetNodeValue / SetNodeValue uses 4 values: [x, opacity, midpoint, sharpness].
+        vtkColorTransferFunction.GetNodeValue / SetNodeValue uses 6 values: [x, r, g, b, midpoint, sharpness].
+        """
+        if not volumePropertyNode:
+            return
+        if base_opacity_pts is None or base_color_pts is None:
+            curr_op, curr_col = cls._extract_tf_points(volumePropertyNode)
+            if base_opacity_pts is None:
+                base_opacity_pts = curr_op
+            if base_color_pts is None:
+                base_color_pts = curr_col
+
+        opacity_tf = volumePropertyNode.GetScalarOpacity()
+        if opacity_tf and base_opacity_pts:
+            for i, pt4 in enumerate(base_opacity_pts):
+                shifted4 = [float(pt4[0]) + float(shift_hu), float(pt4[1]), float(pt4[2]), float(pt4[3])]
+                opacity_tf.SetNodeValue(i, shifted4)
+
+        color_tf = volumePropertyNode.GetColor()
+        if color_tf and base_color_pts:
+            for i, pt6 in enumerate(base_color_pts):
+                shifted6 = [
+                    float(pt6[0]) + float(shift_hu),
+                    float(pt6[1]),
+                    float(pt6[2]),
+                    float(pt6[3]),
+                    float(pt6[4]),
+                    float(pt6[5]),
+                ]
+                color_tf.SetNodeValue(i, shifted6)
 
     def set_volume_rendering(
         self,
-        volumeNode,
+        volumeNode: Any,
         visible: bool = True,
         preset_name: str = "CT-Dental-CBCT",
         shift_hu: float = 0.0,
         crop_enabled: bool = False,
-    ):
-        """Enable/disable Volume Rendering for a CBCT volume with preset, HU shift, and ROI crop."""
-        if not volumeNode:
+    ) -> Any:
+        """Enable/disable Volume Rendering without resetting 3D view or ROI on slider ticks."""
+        if slicer is None or not volumeNode:
             return None
         volRenLogic = slicer.modules.volumerendering.logic()
-        displayNode = self.get_or_create_vr_display_node(volumeNode)
+        displayNode, created_new = self.get_or_create_vr_display_node(volumeNode)
         if not displayNode:
             return None
 
+        was_visible = bool(displayNode.GetVisibility()) if not created_new else False
+        was_cropping = bool(displayNode.GetCroppingEnabled()) if not created_new else False
+
         propNode = displayNode.GetVolumePropertyNode()
         if propNode:
-            if preset_name == "CT-Dental-CBCT":
-                self._apply_custom_dental_cbct_transfer_function(propNode)
-            else:
-                preset = volRenLogic.GetPresetByName(preset_name)
-                if preset:
-                    propNode.Copy(preset)
-                else:
+            prop_id = propNode.GetID() if hasattr(propNode, "GetID") else str(id(propNode))
+            cache_key = (prop_id, preset_name)
+            if cache_key not in self._baseline_tf_cache:
+                if preset_name == "CT-Dental-CBCT":
                     self._apply_custom_dental_cbct_transfer_function(propNode)
+                else:
+                    preset = volRenLogic.GetPresetByName(preset_name)
+                    if preset:
+                        propNode.Copy(preset)
+                    else:
+                        self._apply_custom_dental_cbct_transfer_function(propNode)
+                self._baseline_tf_cache[cache_key] = self._extract_tf_points(propNode)
 
-            if shift_hu != 0.0:
-                self.shift_transfer_function(propNode, shift_hu)
+            base_op, base_col = self._baseline_tf_cache[cache_key]
+            self.shift_transfer_function(
+                propNode,
+                shift_hu=shift_hu,
+                base_opacity_pts=base_op,
+                base_color_pts=base_col,
+            )
 
         displayNode.SetCroppingEnabled(bool(crop_enabled))
-        if crop_enabled:
+        roiNode = displayNode.GetROINode()
+        if crop_enabled and not was_cropping:
             volRenLogic.FitROIToVolume(displayNode)
             roiNode = displayNode.GetROINode()
-            if roiNode and roiNode.GetDisplayNode():
-                roiNode.GetDisplayNode().SetVisibility(True)
-        else:
-            roiNode = displayNode.GetROINode()
-            if roiNode and roiNode.GetDisplayNode():
-                roiNode.GetDisplayNode().SetVisibility(False)
+        if roiNode and roiNode.GetDisplayNode():
+            roiNode.GetDisplayNode().SetVisibility(bool(crop_enabled and visible))
 
         displayNode.SetVisibility(bool(visible))
-        if visible:
+        if visible and not was_visible:
             slicer.util.resetThreeDViews()
         return displayNode
-
-    @staticmethod
-    def shift_transfer_function(volumePropertyNode, shift_hu: float) -> None:
-        """Shift scalar opacity and color transfer function control points by shift_hu."""
-        if not volumePropertyNode or shift_hu == 0.0:
-            return
-        for tf in (volumePropertyNode.GetScalarOpacity(), volumePropertyNode.GetColor()):
-            if not tf:
-                continue
-            n = tf.GetSize()
-            vals = [0.0] * 6
-            pts = []
-            for i in range(n):
-                tf.GetNodeValue(i, vals)
-                pts.append(list(vals))
-            for i, p in enumerate(pts):
-                p[0] = p[0] + shift_hu
-                tf.SetNodeValue(i, p)
