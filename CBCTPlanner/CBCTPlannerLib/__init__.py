@@ -1,10 +1,45 @@
 """CBCTPlannerLib: Modular library for the SlicerCBCTPlanner 3D Slicer extension."""
 
+from .AdvancedTools import (
+    AUTOMATED_DENTAL_TOOLS_MODULES,
+    AirwayAnalysisResult,
+    TMJCondyleFrame,
+    UndoRedoManager,
+    UndoableCommand,
+    capture_slice_view_png_base64,
+    compute_angle_between_three_points_deg,
+    compute_occlusal_plane_from_segmentation,
+    compute_pharyngeal_airway_metrics,
+    compute_surface_to_surface_distance_mm,
+    compute_tmj_condyle_frames,
+    create_or_update_fdi_segmentation_overlays,
+    detect_automated_dental_tools_modules,
+    export_html_to_pdf,
+    export_reformatted_dicom_series,
+)
+from .CanalTracer import (
+    CanalProximityResult,
+    CanalTraceData,
+    CanalTracerLogic,
+)
+from .CrossSectionNavigator import (
+    CursorSettings,
+    CrossSectionNavigator,
+)
+from .ImplantPlanner import (
+    ImplantLibraryEntry,
+    ImplantPlannerLogic,
+    PlacedImplant,
+)
+from .PanoramicCurveLogic import PanoramicCurveLogic
 from .Utils import (
+    BoundedLRUCache,
+    CLINICAL_DISCLAIMER_TEXT,
     CUSTOM_DENTAL_LAYOUT_ID,
     CUSTOM_DENTAL_LAYOUT_XML,
     CUSTOM_DENTAL_LIGHTBOX_LAYOUT_ID,
     CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML,
+    SOFTWARE_VERSION,
     addInCollapsibleLayout,
     createButton,
     icon,
@@ -15,26 +50,50 @@ from .Utils import (
     setBoxAndTextVisibilityOnThreeDViews,
     setConventionalWideScreenView,
     setDentalFourUpLayout,
+    should_handle_navigation_shortcut,
     toRGB,
 )
 from .VRVisualization import (
     DENTAL_SEGMENT_PRESETS,
     VRVisualizationLogic,
 )
-from .PanoramicCurveLogic import PanoramicCurveLogic
-from .CrossSectionNavigator import CrossSectionNavigator
 
 __all__ = [
+    "AUTOMATED_DENTAL_TOOLS_MODULES",
+    "AirwayAnalysisResult",
+    "BoundedLRUCache",
+    "CLINICAL_DISCLAIMER_TEXT",
     "CUSTOM_DENTAL_LAYOUT_ID",
     "CUSTOM_DENTAL_LAYOUT_XML",
     "CUSTOM_DENTAL_LIGHTBOX_LAYOUT_ID",
     "CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML",
-    "DENTAL_SEGMENT_PRESETS",
-    "VRVisualizationLogic",
-    "PanoramicCurveLogic",
+    "CanalProximityResult",
+    "CanalTraceData",
+    "CanalTracerLogic",
     "CrossSectionNavigator",
+    "CursorSettings",
+    "DENTAL_SEGMENT_PRESETS",
+    "ImplantLibraryEntry",
+    "ImplantPlannerLogic",
+    "PanoramicCurveLogic",
+    "PlacedImplant",
+    "SOFTWARE_VERSION",
+    "TMJCondyleFrame",
+    "UndoRedoManager",
+    "UndoableCommand",
+    "VRVisualizationLogic",
     "addInCollapsibleLayout",
+    "capture_slice_view_png_base64",
+    "compute_angle_between_three_points_deg",
+    "compute_occlusal_plane_from_segmentation",
+    "compute_pharyngeal_airway_metrics",
+    "compute_surface_to_surface_distance_mm",
+    "compute_tmj_condyle_frames",
     "createButton",
+    "create_or_update_fdi_segmentation_overlays",
+    "detect_automated_dental_tools_modules",
+    "export_html_to_pdf",
+    "export_reformatted_dicom_series",
     "icon",
     "iconPath",
     "registerAndSetDentalLayout",
@@ -43,5 +102,6 @@ __all__ = [
     "setBoxAndTextVisibilityOnThreeDViews",
     "setConventionalWideScreenView",
     "setDentalFourUpLayout",
+    "should_handle_navigation_shortcut",
     "toRGB",
 ]

@@ -1,0 +1,126 @@
+{
+  "schema_version": "1.0",
+  "disclaimer": "Generic geometric cylinder library for research/planning simulation only. Contains no proprietary manufacturer data.",
+  "implants": [
+    {
+      "id": "generic_3.0x8.0",
+      "label": "Generic Ø3.0 × 8.0 mm (Narrow)",
+      "diameter_mm": 3.0,
+      "length_mm": 8.0,
+      "platform_diameter_mm": 3.0,
+      "apical_diameter_mm": 2.6,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    },
+    {
+      "id": "generic_3.0x10.0",
+      "label": "Generic Ø3.0 × 10.0 mm (Narrow)",
+      "diameter_mm": 3.0,
+      "length_mm": 10.0,
+      "platform_diameter_mm": 3.0,
+      "apical_diameter_mm": 2.6,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    },
+    {
+      "id": "generic_3.5x8.0",
+      "label": "Generic Ø3.5 × 8.0 mm",
+      "diameter_mm": 3.5,
+      "length_mm": 8.0,
+      "platform_diameter_mm": 3.5,
+      "apical_diameter_mm": 3.0,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    },
+    {
+      "id": "generic_3.5x10.0",
+      "label": "Generic Ø3.5 × 10.0 mm",
+      "diameter_mm": 3.5,
+      "length_mm": 10.0,
+      "platform_diameter_mm": 3.5,
+      "apical_diameter_mm": 3.0,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    },
+    {
+      "id": "generic_3.5x11.5",
+      "label": "Generic Ø3.5 × 11.5 mm",
+      "diameter_mm": 3.5,
+      "length_mm": 11.5,
+      "platform_diameter_mm": 3.5,
+      "apical_diameter_mm": 3.0,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    },
+    {
+      "id": "generic_4.0x8.0",
+      "label": "Generic Ø4.0 × 8.0 mm (Regular)",
+      "diameter_mm": 4.0,
+      "length_mm": 8.0,
+      "platform_diameter_mm": 4.0,
+      "apical_diameter_mm": 3.4,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    },
+    {
+      "id": "generic_4.0x10.0",
+      "label": "Generic Ø4.0 × 10.0 mm (Regular)",
+      "diameter_mm": 4.0,
+      "length_mm": 10.0,
+      "platform_diameter_mm": 4.0,
+      "apical_diameter_mm": 3.4,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    },
+    {
+      "id": "generic_4.0x11.5",
+      "label": "Generic Ø4.0 × 11.5 mm (Regular)",
+      "diameter_mm": 4.0,
+      "length_mm": 11.5,
+      "platform_diameter_mm": 4.0,
+      "apical_diameter_mm": 3.4,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    },
+    {
+      "id": "generic_4.0x13.0",
+      "label": "Generic Ø4.0 × 13.0 mm (Regular)",
+      "diameter_mm": 4.0,
+      "length_mm": 13.0,
+      "platform_diameter_mm": 4.0,
+      "apical_diameter_mm": 3.4,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    },
+    {
+      "id": "generic_4.5x10.0",
+      "label": "Generic Ø4.5 × 10.0 mm (Wide)",
+      "diameter_mm": 4.5,
+      "length_mm": 10.0,
+      "platform_diameter_mm": 4.5,
+      "apical_diameter_mm": 3.8,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    },
+    {
+      "id": "generic_4.5x11.5",
+      "label": "Generic Ø4.5 × 11.5 mm (Wide)",
+      "diameter_mm": 4.5,
+      "length_mm": 11.5,
+      "platform_diameter_mm": 4.5,
+      "apical_diameter_mm": 3.8,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    },
+    {
+      "id": "generic_5.0x10.0",
+      "label": "Generic Ø5.0 × 10.0 mm (Molar)",
+      "diameter_mm": 5.0,
+      "length_mm": 10.0,
+      "platform_diameter_mm": 5.0,
+      "apical_diameter_mm": 4.2,
+      "safety_radial_mm": 1.5,
+      "safety_apical_mm": 2.0
+    }
+  ]
+}
