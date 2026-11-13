@@ -1,14 +1,18 @@
 """Volume Rendering (VR) and DentalSegmentator 3D visualization module.
 
-Ports the 5-class anatomical surface presentation from gaudot/SlicerDentalSegmentator
-and provides interactive CBCT Volume Rendering (VR) presets, non-cumulative HU shift
-adjustment (with 4-tuple vtkPiecewiseFunction and 6-tuple vtkColorTransferFunction buffers),
-and ROI cropping using 3D Slicer's VolumeRendering module.
+Fixes B8 & O7:
+  - Always re-applies the selected VR preset when switching presets (`A -> B -> A`) so transfer
+    functions with different point counts are never corrupted by index-based overwrite.
+  - Caches only the current active preset's unshifted baseline points.
+  - Batches transfer function updates with `DisableModifiedEventOn/Off` / `StartModify/EndModify`.
+  - Detects non-HU CBCT intensity ranges (e.g. `min > -500` or `max > 10000`) and derives custom
+    CBCT bone/enamel transfer function points from volume intensity percentiles instead of HU constants.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
+import numpy as np
 
 try:
     import slicer  # type: ignore
@@ -45,8 +49,9 @@ class VRVisualizationLogic:
     )
 
     def __init__(self) -> None:
-        # Cache baseline transfer function control points keyed by (prop_node_id, preset_name)
-        self._baseline_tf_cache: Dict[Tuple[str, str], Tuple[List[List[float]], List[List[float]]]] = {}
+        # B8: Track only the currently active preset and its unshifted baseline per property node ID
+        self._active_preset_by_prop: Dict[str, str] = {}
+        self._active_baseline_by_prop: Dict[str, Tuple[List[List[float]], List[List[float]]]] = {}
 
     @staticmethod
     def _get_segment_ids(segmentation: Any) -> List[str]:
@@ -107,7 +112,7 @@ class VRVisualizationLogic:
         self,
         segmentationNode: Any,
         smoothing_factor: float = 0.5,
-        group_values: Optional[ list ] = None,
+        group_values: Optional[List[int]] = None,
         configure_view: bool = True,
     ) -> None:
         """Apply DentalSegmentator colors, 3D opacities, and closed-surface smoothing."""
@@ -127,71 +132,163 @@ class VRVisualizationLogic:
         if not group_values or len(group_values) != len(seg_ids):
             group_values = []
 
-        for index, seg_id in enumerate(seg_ids):
-            segment = segmentation.GetSegment(seg_id)
-            if segment is None:
-                continue
-            spec = DENTAL_SEGMENT_PRESETS.get(group_values[index]) if group_values else None
-            if spec is None:
-                spec = self._match_preset_by_name(segment.GetName() or "")
-            if spec is None and len(seg_ids) == len(DENTAL_SEGMENT_PRESETS):
-                spec = DENTAL_SEGMENT_PRESETS.get(index + 1)
-            if spec is None:
-                continue
+        was_modifying = displayNode.StartModify() if (displayNode and hasattr(displayNode, "StartModify")) else None
+        try:
+            for index, seg_id in enumerate(seg_ids):
+                segment = segmentation.GetSegment(seg_id)
+                if segment is None:
+                    continue
+                spec = DENTAL_SEGMENT_PRESETS.get(group_values[index]) if group_values else None
+                if spec is None:
+                    spec = self._match_preset_by_name(segment.GetName() or "")
+                if spec is None and len(seg_ids) == len(DENTAL_SEGMENT_PRESETS):
+                    spec = DENTAL_SEGMENT_PRESETS.get(index + 1)
+                if spec is None:
+                    continue
 
-            name, hex_color, opacity = spec
-            segment.SetName(name)
-            segment.SetColor(*toRGB(hex_color))
+                name, hex_color, opacity = spec
+                segment.SetName(name)
+                segment.SetColor(*toRGB(hex_color))
+                if displayNode:
+                    displayNode.SetSegmentVisibility(seg_id, True)
+                    if hasattr(displayNode, "SetSegmentVisibility3D"):
+                        displayNode.SetSegmentVisibility3D(seg_id, True)
+                    displayNode.SetSegmentOpacity3D(seg_id, opacity)
+
             if displayNode:
-                displayNode.SetSegmentVisibility(seg_id, True)
-                if hasattr(displayNode, "SetSegmentVisibility3D"):
-                    displayNode.SetSegmentVisibility3D(seg_id, True)
-                displayNode.SetSegmentOpacity3D(seg_id, opacity)
-
-        if displayNode:
-            displayNode.SetVisibility(True)
-            if hasattr(displayNode, "SetAllSegmentsVisibility"):
-                displayNode.SetAllSegmentsVisibility(True)
+                displayNode.SetVisibility(True)
+                if hasattr(displayNode, "SetAllSegmentsVisibility"):
+                    displayNode.SetAllSegmentsVisibility(True)
+        finally:
+            if displayNode and was_modifying is not None and hasattr(displayNode, "EndModify"):
+                displayNode.EndModify(was_modifying)
 
         if configure_view:
             self.configure_3d_view()
 
     @staticmethod
-    def _apply_custom_dental_cbct_transfer_function(volumePropertyNode: Any) -> None:
-        """Configure a CBCT-optimized bone + enamel transfer function (HU/gray-value)."""
+    def is_volume_hu_calibrated(volume_array: Optional[np.ndarray]) -> bool:
+        """B8: Return False when volume intensities are not HU-like (e.g. min > -500 or max > 10000)."""
+        if volume_array is None or volume_array.size == 0:
+            return True
+        arr = np.asarray(volume_array)
+        step = max(1, arr.size // 50000)
+        sample = arr.reshape(-1)[::step]
+        vmin = float(np.min(sample))
+        vmax = float(np.max(sample))
+        if vmin > -500.0 or vmax > 10000.0 or vmax <= 300.0:
+            return False
+        return True
+
+    @classmethod
+    def compute_cbct_transfer_control_points(
+        cls, volume_array: Optional[np.ndarray] = None
+    ) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float, float, float]]]:
+        """B8: Compute opacity `(x, alpha)` and color `(x, r, g, b)` control points.
+
+        Uses standard HU thresholds when `volume_array` is HU-like, or derives thresholds
+        from intensity percentiles (`p10, p55, p75, p90, p98, p99.5`) when `volume_array`
+        has uncalibrated gray values (e.g. `min > -500` or `max > 10000`).
+        """
+        if cls.is_volume_hu_calibrated(volume_array):
+            op_pts = [
+                (-1000.0, 0.0),
+                (200.0, 0.0),
+                (450.0, 0.18),
+                (900.0, 0.55),
+                (1600.0, 0.88),
+                (3000.0, 1.0),
+            ]
+            col_pts = [
+                (-1000.0, 0.0, 0.0, 0.0),
+                (200.0, 0.55, 0.25, 0.18),
+                (600.0, 0.88, 0.78, 0.58),
+                (1300.0, 0.96, 0.94, 0.86),
+                (2500.0, 1.0, 1.0, 1.0),
+            ]
+            return op_pts, col_pts
+
+        assert volume_array is not None
+        arr = np.asarray(volume_array)
+        step = max(1, arr.size // 50000)
+        sample = arr.reshape(-1)[::step].astype(np.float64)
+        p10, p55, p75, p90, p98, p995 = np.percentile(
+            sample, [10.0, 55.0, 75.0, 90.0, 98.0, 99.5]
+        )
+        # Ensure strictly increasing x values
+        xs = np.maximum.accumulate([p10, p55, p75, p90, p98, p995])
+        for i in range(1, len(xs)):
+            if xs[i] <= xs[i - 1]:
+                xs[i] = xs[i - 1] + 1.0
+
+        op_pts = [
+            (float(xs[0]), 0.0),
+            (float(xs[1]), 0.0),
+            (float(xs[2]), 0.18),
+            (float(xs[3]), 0.55),
+            (float(xs[4]), 0.88),
+            (float(xs[5]), 1.0),
+        ]
+        col_pts = [
+            (float(xs[0]), 0.0, 0.0, 0.0),
+            (float(xs[1]), 0.55, 0.25, 0.18),
+            (float(0.5 * (xs[2] + xs[3])), 0.88, 0.78, 0.58),
+            (float(xs[4]), 0.96, 0.94, 0.86),
+            (float(xs[5]), 1.0, 1.0, 1.0),
+        ]
+        return op_pts, col_pts
+
+    @classmethod
+    def _apply_custom_dental_cbct_transfer_function(
+        cls,
+        volumePropertyNode: Any,
+        volume_array: Optional[np.ndarray] = None,
+    ) -> None:
+        """Configure a CBCT-optimized bone + enamel transfer function (HU or percentile-adaptive)."""
         if not volumePropertyNode:
             return
-        opacityTF = volumePropertyNode.GetScalarOpacity()
-        colorTF = volumePropertyNode.GetColor()
-        gradientTF = volumePropertyNode.GetGradientOpacity()
+        was_mod = (
+            volumePropertyNode.StartModify()
+            if hasattr(volumePropertyNode, "StartModify")
+            else None
+        )
+        if hasattr(volumePropertyNode, "DisableModifiedEventOn"):
+            volumePropertyNode.DisableModifiedEventOn()
+        try:
+            op_spec, col_spec = cls.compute_cbct_transfer_control_points(volume_array)
+            opacityTF = volumePropertyNode.GetScalarOpacity()
+            colorTF = volumePropertyNode.GetColor()
+            gradientTF = volumePropertyNode.GetGradientOpacity()
 
-        if opacityTF:
-            opacityTF.RemoveAllPoints()
-            opacityTF.AddPoint(-1000.0, 0.0)
-            opacityTF.AddPoint(200.0, 0.0)
-            opacityTF.AddPoint(450.0, 0.18)
-            opacityTF.AddPoint(900.0, 0.55)
-            opacityTF.AddPoint(1600.0, 0.88)
-            opacityTF.AddPoint(3000.0, 1.0)
+            if opacityTF:
+                opacityTF.RemoveAllPoints()
+                for x_val, alpha in op_pts_iter(op_spec):
+                    opacityTF.AddPoint(float(x_val), float(alpha))
 
-        if colorTF:
-            colorTF.RemoveAllPoints()
-            colorTF.AddRGBPoint(-1000.0, 0.0, 0.0, 0.0)
-            colorTF.AddRGBPoint(200.0, 0.55, 0.25, 0.18)
-            colorTF.AddRGBPoint(600.0, 0.88, 0.78, 0.58)
-            colorTF.AddRGBPoint(1300.0, 0.96, 0.94, 0.86)
-            colorTF.AddRGBPoint(2500.0, 1.0, 1.0, 1.0)
+            if colorTF:
+                colorTF.RemoveAllPoints()
+                for x_val, r, g, b in col_spec:
+                    colorTF.AddRGBPoint(float(x_val), float(r), float(g), float(b))
 
-        if gradientTF:
-            gradientTF.RemoveAllPoints()
-            gradientTF.AddPoint(0.0, 0.0)
-            gradientTF.AddPoint(60.0, 0.8)
-            gradientTF.AddPoint(200.0, 1.0)
+            if gradientTF:
+                gradientTF.RemoveAllPoints()
+                gradientTF.AddPoint(0.0, 0.0)
+                gradientTF.AddPoint(60.0, 0.8)
+                gradientTF.AddPoint(200.0, 1.0)
 
-        volumePropertyNode.SetShade(True)
-        volumePropertyNode.SetAmbient(0.2)
-        volumePropertyNode.SetDiffuse(0.85)
-        volumePropertyNode.SetSpecular(0.25)
+            if hasattr(volumePropertyNode, "SetShade"):
+                volumePropertyNode.SetShade(True)
+            if hasattr(volumePropertyNode, "SetAmbient"):
+                volumePropertyNode.SetAmbient(0.2)
+            if hasattr(volumePropertyNode, "SetDiffuse"):
+                volumePropertyNode.SetDiffuse(0.85)
+            if hasattr(volumePropertyNode, "SetSpecular"):
+                volumePropertyNode.SetSpecular(0.25)
+        finally:
+            if hasattr(volumePropertyNode, "DisableModifiedEventOff"):
+                volumePropertyNode.DisableModifiedEventOff()
+            if was_mod is not None and hasattr(volumePropertyNode, "EndModify"):
+                volumePropertyNode.EndModify(was_mod)
 
     def get_or_create_vr_display_node(self, volumeNode: Any) -> Tuple[Any, bool]:
         """Return (vtkMRMLVolumeRenderingDisplayNode, created_new)."""
@@ -240,11 +337,7 @@ class VRVisualizationLogic:
         base_opacity_pts: Optional[List[List[float]]] = None,
         base_color_pts: Optional[List[List[float]]] = None,
     ) -> None:
-        """Shift scalar opacity (4-value) and color transfer function (6-value) points by shift_hu.
-
-        vtkPiecewiseFunction.GetNodeValue / SetNodeValue uses 4 values: [x, opacity, midpoint, sharpness].
-        vtkColorTransferFunction.GetNodeValue / SetNodeValue uses 6 values: [x, r, g, b, midpoint, sharpness].
-        """
+        """B8 & O7: Shift scalar opacity (4-value) and color TF (6-value) points with modified events disabled."""
         if not volumePropertyNode:
             return
         if base_opacity_pts is None or base_color_pts is None:
@@ -254,24 +347,109 @@ class VRVisualizationLogic:
             if base_color_pts is None:
                 base_color_pts = curr_col
 
-        opacity_tf = volumePropertyNode.GetScalarOpacity()
-        if opacity_tf and base_opacity_pts:
-            for i, pt4 in enumerate(base_opacity_pts):
-                shifted4 = [float(pt4[0]) + float(shift_hu), float(pt4[1]), float(pt4[2]), float(pt4[3])]
-                opacity_tf.SetNodeValue(i, shifted4)
+        was_mod = (
+            volumePropertyNode.StartModify()
+            if hasattr(volumePropertyNode, "StartModify")
+            else None
+        )
+        if hasattr(volumePropertyNode, "DisableModifiedEventOn"):
+            volumePropertyNode.DisableModifiedEventOn()
+        try:
+            opacity_tf = volumePropertyNode.GetScalarOpacity()
+            if opacity_tf and base_opacity_pts:
+                if opacity_tf.GetSize() != len(base_opacity_pts) and hasattr(opacity_tf, "RemoveAllPoints"):
+                    opacity_tf.RemoveAllPoints()
+                    for pt4 in base_opacity_pts:
+                        opacity_tf.AddPoint(
+                            float(pt4[0]) + float(shift_hu),
+                            float(pt4[1]),
+                            float(pt4[2]),
+                            float(pt4[3]),
+                        )
+                else:
+                    for i, pt4 in enumerate(base_opacity_pts):
+                        shifted4 = [
+                            float(pt4[0]) + float(shift_hu),
+                            float(pt4[1]),
+                            float(pt4[2]),
+                            float(pt4[3]),
+                        ]
+                        opacity_tf.SetNodeValue(i, shifted4)
 
-        color_tf = volumePropertyNode.GetColor()
-        if color_tf and base_color_pts:
-            for i, pt6 in enumerate(base_color_pts):
-                shifted6 = [
-                    float(pt6[0]) + float(shift_hu),
-                    float(pt6[1]),
-                    float(pt6[2]),
-                    float(pt6[3]),
-                    float(pt6[4]),
-                    float(pt6[5]),
-                ]
-                color_tf.SetNodeValue(i, shifted6)
+            color_tf = volumePropertyNode.GetColor()
+            if color_tf and base_color_pts:
+                if color_tf.GetSize() != len(base_color_pts) and hasattr(color_tf, "RemoveAllPoints"):
+                    color_tf.RemoveAllPoints()
+                    for pt6 in base_color_pts:
+                        color_tf.AddRGBPoint(
+                            float(pt6[0]) + float(shift_hu),
+                            float(pt6[1]),
+                            float(pt6[2]),
+                            float(pt6[3]),
+                            float(pt6[4]),
+                            float(pt6[5]),
+                        )
+                else:
+                    for i, pt6 in enumerate(base_color_pts):
+                        shifted6 = [
+                            float(pt6[0]) + float(shift_hu),
+                            float(pt6[1]),
+                            float(pt6[2]),
+                            float(pt6[3]),
+                            float(pt6[4]),
+                            float(pt6[5]),
+                        ]
+                        color_tf.SetNodeValue(i, shifted6)
+        finally:
+            if hasattr(volumePropertyNode, "DisableModifiedEventOff"):
+                volumePropertyNode.DisableModifiedEventOff()
+            if was_mod is not None and hasattr(volumePropertyNode, "EndModify"):
+                volumePropertyNode.EndModify(was_mod)
+
+    def apply_preset_and_shift(
+        self,
+        volumePropertyNode: Any,
+        preset_name: str = "CT-Dental-CBCT",
+        shift_hu: float = 0.0,
+        preset_provider: Optional[Any] = None,
+        volume_array: Optional[np.ndarray] = None,
+    ) -> None:
+        """B8: Always re-apply preset when `preset_name` changes (`A -> B -> A`), then apply `shift_hu`."""
+        if not volumePropertyNode:
+            return
+        prop_id = (
+            volumePropertyNode.GetID()
+            if hasattr(volumePropertyNode, "GetID")
+            else str(id(volumePropertyNode))
+        )
+        current_active = self._active_preset_by_prop.get(prop_id)
+        if current_active != preset_name or prop_id not in self._active_baseline_by_prop:
+            if preset_name == "CT-Dental-CBCT":
+                self._apply_custom_dental_cbct_transfer_function(
+                    volumePropertyNode, volume_array=volume_array
+                )
+            else:
+                preset = (
+                    preset_provider.GetPresetByName(preset_name)
+                    if (preset_provider and hasattr(preset_provider, "GetPresetByName"))
+                    else None
+                )
+                if preset is not None and hasattr(volumePropertyNode, "Copy"):
+                    volumePropertyNode.Copy(preset)
+                else:
+                    self._apply_custom_dental_cbct_transfer_function(
+                        volumePropertyNode, volume_array=volume_array
+                    )
+            self._active_preset_by_prop[prop_id] = preset_name
+            self._active_baseline_by_prop[prop_id] = self._extract_tf_points(volumePropertyNode)
+
+        base_op, base_col = self._active_baseline_by_prop[prop_id]
+        self.shift_transfer_function(
+            volumePropertyNode,
+            shift_hu=shift_hu,
+            base_opacity_pts=base_op,
+            base_color_pts=base_col,
+        )
 
     def set_volume_rendering(
         self,
@@ -294,25 +472,16 @@ class VRVisualizationLogic:
 
         propNode = displayNode.GetVolumePropertyNode()
         if propNode:
-            prop_id = propNode.GetID() if hasattr(propNode, "GetID") else str(id(propNode))
-            cache_key = (prop_id, preset_name)
-            if cache_key not in self._baseline_tf_cache:
-                if preset_name == "CT-Dental-CBCT":
-                    self._apply_custom_dental_cbct_transfer_function(propNode)
-                else:
-                    preset = volRenLogic.GetPresetByName(preset_name)
-                    if preset:
-                        propNode.Copy(preset)
-                    else:
-                        self._apply_custom_dental_cbct_transfer_function(propNode)
-                self._baseline_tf_cache[cache_key] = self._extract_tf_points(propNode)
-
-            base_op, base_col = self._baseline_tf_cache[cache_key]
-            self.shift_transfer_function(
-                propNode,
+            try:
+                vol_arr = slicer.util.arrayFromVolume(volumeNode)
+            except Exception:
+                vol_arr = None
+            self.apply_preset_and_shift(
+                volumePropertyNode=propNode,
+                preset_name=preset_name,
                 shift_hu=shift_hu,
-                base_opacity_pts=base_op,
-                base_color_pts=base_col,
+                preset_provider=volRenLogic,
+                volume_array=vol_arr,
             )
 
         displayNode.SetCroppingEnabled(bool(crop_enabled))
@@ -327,3 +496,7 @@ class VRVisualizationLogic:
         if visible and not was_visible:
             slicer.util.resetThreeDViews()
         return displayNode
+
+
+def op_pts_iter(pts: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    return pts

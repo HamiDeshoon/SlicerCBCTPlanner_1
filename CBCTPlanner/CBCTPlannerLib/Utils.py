@@ -1,9 +1,10 @@
-"""UI, layout, and 3D viewport utilities adapted from SlicerDentalSegmentator."""
+"""UI, layout, bounded LRU cache (B9), shortcut focus filter (B7), and 3D viewport utilities."""
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence, Tuple
+from typing import Any, Callable, Generic, Iterator, Optional, Sequence, Tuple, TypeVar
 
 try:
     import ctk  # type: ignore
@@ -13,6 +14,15 @@ except ImportError:
     ctk = None
     qt = None
     slicer = None
+
+K = TypeVar("K")
+V = TypeVar("V")
+
+SOFTWARE_VERSION = "2.0.0"
+CLINICAL_DISCLAIMER_TEXT = (
+    "NOT FOR DIAGNOSTIC USE — PLANNING AID ONLY. "
+    "All CBCT gray-value density figures and Misch classifications are approximate (uncalibrated HU)."
+)
 
 CUSTOM_DENTAL_LAYOUT_ID = 502
 CUSTOM_DENTAL_LIGHTBOX_LAYOUT_ID = 503
@@ -52,9 +62,6 @@ CUSTOM_DENTAL_LAYOUT_XML = """
 </layout>
 """
 
-# OnDemand3D / Romexis-style Multi-Slice Cross-Sectional Lightbox Layout:
-# Top row: Panoramic (Green), Axial (Red), 3D View
-# Bottom row: 3 consecutive Cross-Sectional slices (YellowMinus [-2mm], Yellow [0mm], YellowPlus [+2mm])
 CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML = """
 <layout type="vertical" split="true">
   <item splitSize="480">
@@ -107,6 +114,80 @@ CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML = """
   </item>
 </layout>
 """
+
+
+class BoundedLRUCache(Generic[K, V]):
+    """B9: Bounded Least-Recently-Used cache preventing unbounded memory growth during curve drags."""
+
+    def __init__(self, max_entries: int = 8) -> None:
+        self.max_entries = max(1, int(max_entries))
+        self._store: OrderedDict[K, V] = OrderedDict()
+
+    def __contains__(self, key: K) -> bool:
+        return key in self._store
+
+    def __len__(self) -> int:
+        return len(self._store)
+
+    def __iter__(self) -> Iterator[K]:
+        return iter(self._store)
+
+    def __getitem__(self, key: K) -> V:
+        val = self._store.pop(key)
+        self._store[key] = val
+        return val
+
+    def __setitem__(self, key: K, value: V) -> None:
+        if key in self._store:
+            self._store.pop(key)
+        self._store[key] = value
+        while len(self._store) > self.max_entries:
+            self._store.popitem(last=False)
+
+    def get(self, key: K, default: Optional[V] = None) -> Optional[V]:
+        if key in self._store:
+            return self[key]
+        return default
+
+    def clear(self) -> None:
+        self._store.clear()
+
+
+_INPUT_WIDGET_CLASS_TOKENS = (
+    "spinbox",
+    "slider",
+    "lineedit",
+    "textedit",
+    "plaintextedit",
+    "combobox",
+    "tablewidget",
+    "tableview",
+    "treeview",
+    "listview",
+    "abstractitemview",
+)
+
+
+def should_handle_navigation_shortcut(focused_widget: Any) -> bool:
+    """B7: Return False if `focused_widget` is an editable/interactive input control so arrow keys are not hijacked."""
+    if focused_widget is None:
+        return True
+    cur = focused_widget
+    depth = 0
+    while cur is not None and depth < 6:
+        cls_name = ""
+        if hasattr(cur, "metaObject"):
+            try:
+                cls_name = str(cur.metaObject().className()).lower()
+            except Exception:
+                cls_name = ""
+        if not cls_name:
+            cls_name = type(cur).__name__.lower()
+        if any(tok in cls_name for tok in _INPUT_WIDGET_CLASS_TOKENS):
+            return False
+        cur = cur.parent() if (hasattr(cur, "parent") and callable(cur.parent)) else None
+        depth += 1
+    return True
 
 
 def toRGB(hex_color: str) -> Tuple[float, float, float]:
