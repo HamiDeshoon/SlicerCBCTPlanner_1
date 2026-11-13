@@ -1,17 +1,13 @@
-"""CBCTPlannerLib: Modular library for the SlicerCBCTPlanner 3D Slicer extension.
-
-Provides:
-- Utils: UI helpers, 3D viewport styling, and color conversion utilities adapted from SlicerDentalSegmentator.
-- VRVisualization: DentalSegmentator 3D segmentation presets (colors, 3D opacities, surface smoothing) and CBCT Volume Rendering (VR) transfer functions.
-- PanoramicCurveLogic: Dental arch curve generation, parallel transport frame calculation, curved planar reformation (CPR), and panoramic projection.
-- CrossSectionNavigator: Synchronized orthogonal cross-sectional slice reslicing along the dental arch curve with real-time axial cross-section tick and plane indicators.
-"""
+"""CBCTPlannerLib: Modular library for the SlicerCBCTPlanner 3D Slicer extension."""
 
 from .Utils import (
+    CUSTOM_DENTAL_LAYOUT_ID,
+    CUSTOM_DENTAL_LAYOUT_XML,
     addInCollapsibleLayout,
     createButton,
     icon,
     iconPath,
+    registerAndSetDentalLayout,
     set3DViewBackgroundColors,
     setBoxAndTextVisibilityOnThreeDViews,
     setConventionalWideScreenView,
@@ -26,6 +22,8 @@ from .PanoramicCurveLogic import PanoramicCurveLogic
 from .CrossSectionNavigator import CrossSectionNavigator
 
 __all__ = [
+    "CUSTOM_DENTAL_LAYOUT_ID",
+    "CUSTOM_DENTAL_LAYOUT_XML",
     "DENTAL_SEGMENT_PRESETS",
     "VRVisualizationLogic",
     "PanoramicCurveLogic",
@@ -34,6 +32,7 @@ __all__ = [
     "createButton",
     "icon",
     "iconPath",
+    "registerAndSetDentalLayout",
     "set3DViewBackgroundColors",
     "setBoxAndTextVisibilityOnThreeDViews",
     "setConventionalWideScreenView",
