@@ -3,9 +3,9 @@ CBCT Dental Planner - 3D Slicer Scripted Loadable Extension Module.
 
 Implements a 5-step clinical workflow (Load -> Arch -> Panoramic -> Cross-sections -> Plan)
 backed by a single-source-of-truth MRML ParameterNode and VTKObservationMixin:
-  - Step 1 (Load): CBCT volume & optional segmentation selection, Custom Dental Layout
-    (Wide Panoramic top; Axial, Cross-Section, 3D bottom), 3-point occlusal plane alignment,
-    and DentalSegmentator 3D / debounced Volume Rendering (VR) controls.
+  - Step 1 (Load): CBCT volume & optional segmentation selection, Custom Dental Layouts
+    (Single Cross-Section vs 3-Slice Cross-Sectional Lightbox [-2, 0, +2 mm]), 3-point occlusal
+    plane alignment, and DentalSegmentator 3D / debounced Volume Rendering (VR) controls.
   - Step 2 (Arch): RAS Right-to-Left (+X -> -X) dental arch curve auto-fitting from segmentation
     (with user-edit protection and confirmation) or interactive Markups curve placement when
     unsegmented (never invents control points).
@@ -13,10 +13,12 @@ backed by a single-source-of-truth MRML ParameterNode and VTKObservationMixin:
     radiograph with Patient Right on screen left, non-blocking CLI execution with progress/cancel,
     and debounced curve-edit regeneration (low-res preview while dragging, full-res on release).
   - Step 4 (Cross-sections): Interactive draggable cross-section line on the Axial (Red) view
-    and vertical cursor line on the Panoramic (Green) view, continuous 1 mm arc-length slider
-    (with Left/Right 1 mm and PgUp/PgDn 5 mm shortcuts + Lock-to-Tooth FDI), optional Red-only
-    tick fan, and Yellow cross-section slab thickness reconstruction.
-  - Step 5 (Plan): Clickable 32-tooth Odontogram (click jumps to tooth, Ctrl+click toggles
+    and vertical/tilted cursor line on the Panoramic (Green) view, Multi-Slice Cross-Sectional
+    Lightbox (`YellowMinus` [-2 mm], `Yellow` [0 mm], `YellowPlus` [+2 mm]) with color-coded
+    Axial & Panoramic triplet lines, +-30° Cross-Section Tilt control, continuous 1 mm arc-length
+    slider (Left/Right 1 mm, PgUp/PgDn 5 mm, Lock-to-Tooth FDI), optional Red-only tick fan,
+    and cross-section slab thickness reconstruction.
+  - Step 5 (Plan): Clickable 32-tooth Odontogram (click jumps to tooth, Ctrl+Click toggles
     multi-select with incremental single-tooth analysis), honest measurements from segmentation
     or manual Markups rulers (shows "not measured" when unsegmented—never fabricates numbers),
     and HTML/CSV/JSON report export with embedded slice screenshots and HTML escaping.
@@ -90,6 +92,7 @@ from CBCTPlannerLib import (
     PanoramicCurveLogic,
     VRVisualizationLogic,
     registerAndSetDentalLayout,
+    registerAndSetDentalLightboxLayout,
 )
 from CBCTPlannerLib.core.arch_detector import (
     JAW_TOOTH_ORDER,
@@ -152,7 +155,8 @@ class CBCTPlanner(ScriptedLoadableModule):
             self.parent.helpText = (
                 "Dental CBCT Planner: 5-step workflow (Load -> Arch -> Panoramic -> "
                 "Cross-sections -> Plan) with DentalSegmentator 3D/VR styling, RAS Right-to-Left "
-                "arch curves, Curved Planar Reformation (CPR) panoramic view, draggable Axial and "
+                "arch curves, Curved Planar Reformation (CPR) panoramic view, 3-slice Cross-Sectional "
+                "Lightbox (-2, 0, +2 mm), +-30° Cross-Section Tilt control, draggable Axial and "
                 "Panoramic cross-section cursor lines, and honest segmentation/ruler morphometry."
             )
             self.parent.acknowledgementText = (
@@ -258,10 +262,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         step1Layout.addRow("Segmentation (Optional):", self.segmentationSelector)
 
         layoutBtnRow = qt.QHBoxLayout()
-        self.btnDentalLayout = qt.QPushButton("Dental Layout (Pano Top / Axial+CS+3D Bottom)")
-        self.btnDentalLayout.setToolTip("Switch to the registered custom Dental layout.")
+        self.btnDentalLightbox = qt.QPushButton("3-Slice Lightbox (-2 / 0 / +2 mm)")
+        self.btnDentalLightbox.setToolTip(
+            "Switch to OnDemand3D/Romexis-style 3-slice Cross-Sectional Lightbox (CS-, CS0, CS+ on bottom; Pano, Axial, 3D on top)."
+        )
+        self.btnDentalLayout = qt.QPushButton("Single CS Layout")
+        self.btnDentalLayout.setToolTip("Switch to single Cross-Section Dental layout (Wide Pano top; Axial, CS, 3D bottom).")
         self.btnStandardMpr = qt.QPushButton("Standard MPR")
         self.btnStandardMpr.setToolTip("Reset Axial (Red) and Sagittal (Yellow) views without clobbering Panoramic.")
+        layoutBtnRow.addWidget(self.btnDentalLightbox)
         layoutBtnRow.addWidget(self.btnDentalLayout)
         layoutBtnRow.addWidget(self.btnStandardMpr)
         step1Layout.addRow("Viewport Layout:", layoutBtnRow)
@@ -391,15 +400,16 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.panoProgressBar.setVisible(False)
         step3Layout.addRow(self.panoProgressBar)
 
-        # ==================== STEP 4: CROSS-SECTIONS ====================
+        # ==================== STEP 4: CROSS-SECTIONS, LIGHTBOX & TILT ====================
         self.step4Box = ctk.ctkCollapsibleButton()
-        self.step4Box.text = "Step 4: Cross-Sectional Slices & Axial / Panoramic Cursor"
+        self.step4Box.text = "Step 4: Multi-Slice Cross-Sectional Lightbox (-2/0/+2 mm) & +-30° Tilt"
         self.step4Box.collapsed = True
         self.layout.addWidget(self.step4Box)
         step4Layout = qt.QFormLayout(self.step4Box)
 
         self.step4HintLabel = qt.QLabel(
-            "Drag the cyan line in Axial (Red) or Panoramic (Green), or use the 1 mm arc-length slider (Left/Right: ±1 mm, PgUp/PgDn: ±5 mm)."
+            "Drag the cyan line in Axial (Red) or Panoramic (Green), adjust the +-30° mesiodistal tilt, "
+            "or inspect 3 simultaneous cross-sections (CS- Amber, CS0 Cyan, CS+ Emerald)."
         )
         self.step4HintLabel.setWordWrap(True)
         step4Layout.addRow(self.step4HintLabel)
@@ -422,6 +432,46 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         arcNavRow.addWidget(self.btnNextArcMm)
         step4Layout.addRow("Cursor Position (Arc mm):", arcNavRow)
 
+        # +-30° Cross-Section Tilt Control
+        tiltRow = qt.QHBoxLayout()
+        self.csTiltSlider = ctk.ctkSliderWidget()
+        self.csTiltSlider.minimum = -30.0
+        self.csTiltSlider.maximum = 30.0
+        self.csTiltSlider.singleStep = 1.0
+        self.csTiltSlider.pageStep = 5.0
+        self.csTiltSlider.value = 0.0
+        self.csTiltSlider.suffix = "°"
+        self.csTiltSlider.setToolTip(
+            "Lean the cross-section plane mesiodistally between -30° and +30° around the Buccal-Lingual axis."
+        )
+        self.btnResetTilt = qt.QPushButton("Reset 0°")
+        self.btnResetTilt.setToolTip("Reset cross-section tilt to 0° (perpendicular to occlusal plane).")
+        tiltRow.addWidget(self.csTiltSlider)
+        tiltRow.addWidget(self.btnResetTilt)
+        step4Layout.addRow("Cross-Section Tilt (+-30°):", tiltRow)
+
+        # Multi-Slice Lightbox (-2 mm, 0 mm, +2 mm) Controls
+        lightboxRow = qt.QHBoxLayout()
+        self.enableLightboxCheckBox = qt.QCheckBox("Enable 3-Slice Lightbox (CS- / CS0 / CS+)")
+        self.enableLightboxCheckBox.setChecked(True)
+        self.enableLightboxCheckBox.setToolTip(
+            "Synchronize YellowMinus (-step), Yellow (0), and YellowPlus (+step) cross-sections and show triplet lines on Axial/Pano."
+        )
+        self.lightboxStepSpin = qt.QDoubleSpinBox()
+        self.lightboxStepSpin.minimum = 0.5
+        self.lightboxStepSpin.maximum = 10.0
+        self.lightboxStepSpin.singleStep = 0.5
+        self.lightboxStepSpin.value = 2.0
+        self.lightboxStepSpin.suffix = " mm"
+        self.lightboxStepSpin.setToolTip("Arc-length spacing between CS-, CS0, and CS+ slices (default 2.0 mm -> -2, 0, +2 mm).")
+        self.btnActivateLightboxLayout = qt.QPushButton("Open 3-Slice Lightbox View")
+        self.btnActivateLightboxLayout.setToolTip("Switch viewport layout to show CS-, CS0, and CS+ side by side.")
+        lightboxRow.addWidget(self.enableLightboxCheckBox)
+        lightboxRow.addWidget(qt.QLabel("Step:"))
+        lightboxRow.addWidget(self.lightboxStepSpin)
+        lightboxRow.addWidget(self.btnActivateLightboxLayout)
+        step4Layout.addRow("Multi-Slice Lightbox:", lightboxRow)
+
         self.lockFdiCombo = qt.QComboBox()
         self.lockFdiCombo.addItem("Free Cursor (Unlocked)", "")
         for fdi in Q1_TEETH + Q2_TEETH + Q4_TEETH + Q3_TEETH:
@@ -443,7 +493,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.csSlabSpin.singleStep = 0.5
         self.csSlabSpin.value = 0.5
         self.csSlabSpin.suffix = " mm"
-        self.csSlabSpin.setToolTip("Slab thickness (MIP/Mean) of the Yellow Cross-Section slice view.")
+        self.csSlabSpin.setToolTip("Slab thickness (MIP/Mean) of the Cross-Section slice views.")
 
         self.tickSpacingSpin = qt.QDoubleSpinBox()
         self.tickSpacingSpin.minimum = 1.0
@@ -466,7 +516,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.showAxialTicksCheckBox.setToolTip("Display faint perpendicular tick lines along the arch in the Red slice view only.")
         step4Layout.addRow(self.showAxialTicksCheckBox)
 
-        self.csStatusLabel = qt.QLabel("Cursor: 0.0 mm | Buccal (B) Left / Lingual (L) Right in Yellow View")
+        self.csStatusLabel = qt.QLabel("Cursor: 0.0 mm | Tilt: 0° | Lightbox: -2.0 / 0.0 / +2.0 mm")
         step4Layout.addRow(self.csStatusLabel)
 
         # ==================== STEP 5: PLAN ====================
@@ -478,12 +528,11 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.step5HintLabel = qt.QLabel(
             "Click any tooth in the Odontogram to jump the Cross-Section view to that site; "
-            "Ctrl+Click (or double-click) to toggle inclusion in the treatment plan table."
+            "Ctrl+Click to toggle inclusion in the treatment plan table."
         )
         self.step5HintLabel.setWordWrap(True)
         step5Layout.addWidget(self.step5HintLabel)
 
-        # Interactive 32-Tooth Odontogram (2 arch rows, quadrant grouping Q1 | Q2 and Q4 | Q3)
         odontogramWidget = qt.QWidget()
         odontogramGrid = qt.QGridLayout(odontogramWidget)
         odontogramGrid.setContentsMargins(2, 2, 2, 2)
@@ -559,7 +608,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         exportRow = qt.QHBoxLayout()
         self.btnGenerateReport = qt.QPushButton("Generate Printable HTML Report (with Screenshots)")
-        self.btnGenerateReport.setToolTip("Export clinical report with embedded Panoramic, Axial, and Cross-Section screenshots.")
+        self.btnGenerateReport.setToolTip("Export clinical report with embedded Panoramic, Axial, and Cross-Section Lightbox screenshots.")
         self.btnExportPlan = qt.QPushButton("Export CSV / JSON")
         self.btnExportPlan.setToolTip("Export treatment plan table to CSV (with flattened RAS coordinates) and JSON.")
         exportRow.addWidget(self.btnGenerateReport)
@@ -568,9 +617,10 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.layout.addStretch()
 
-        # Connect signals consistently using Qt signal style
+        # Connect signals consistently
         self.volumeSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onVolumeNodeChanged)
         self.segmentationSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSegmentationNodeChanged)
+        self.btnDentalLightbox.clicked.connect(self.onSetDentalLightboxLayout)
         self.btnDentalLayout.clicked.connect(self.onSetDentalLayout)
         self.btnStandardMpr.clicked.connect(self.onSetStandardMpr)
         self.btnPlaceOcclusalPts.clicked.connect(self.onPlaceOcclusalPoints)
@@ -596,6 +646,11 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnPrevArcMm.clicked.connect(lambda: self.nudgeCursorMm(-1.0))
         self.btnNextArcMm.clicked.connect(lambda: self.nudgeCursorMm(1.0))
         self.arcMmSlider.valueChanged.connect(self.onArcSliderChanged)
+        self.csTiltSlider.valueChanged.connect(self.onTiltSliderChanged)
+        self.btnResetTilt.clicked.connect(lambda: self.csTiltSlider.setValue(0.0))
+        self.enableLightboxCheckBox.toggled.connect(self.onCsDisplayParamChanged)
+        self.lightboxStepSpin.valueChanged.connect(self.onCsDisplayParamChanged)
+        self.btnActivateLightboxLayout.clicked.connect(self.onSetDentalLightboxLayout)
         self.lockFdiCombo.currentIndexChanged.connect(self.onLockFdiChanged)
         self.csWidthSpin.valueChanged.connect(self.onCsDisplayParamChanged)
         self.csSlabSpin.valueChanged.connect(self.onCsDisplayParamChanged)
@@ -642,12 +697,16 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         cs_w = settings.value(self.SETTINGS_PREFIX + "csWidthMm", 24.0)
         cs_slab = settings.value(self.SETTINGS_PREFIX + "csSlabMm", 0.5)
         tick_sp = settings.value(self.SETTINGS_PREFIX + "tickSpacingMm", 2.0)
+        lb_step = settings.value(self.SETTINGS_PREFIX + "lightboxStepMm", 2.0)
+        cs_tilt = settings.value(self.SETTINGS_PREFIX + "csTiltDeg", 0.0)
         vr_preset = settings.value(self.SETTINGS_PREFIX + "vrPreset", "CT-Dental-CBCT")
         try:
             self.panoThicknessSpin.setValue(float(pano_th))
             self.csWidthSpin.setValue(float(cs_w))
             self.csSlabSpin.setValue(float(cs_slab))
             self.tickSpacingSpin.setValue(float(tick_sp))
+            self.lightboxStepSpin.setValue(float(lb_step))
+            self.csTiltSlider.setValue(float(cs_tilt))
             if vr_preset:
                 self.vrPresetCombo.setCurrentText(str(vr_preset))
         except Exception:
@@ -662,6 +721,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             settings.setValue(self.SETTINGS_PREFIX + "csWidthMm", self.csWidthSpin.value)
             settings.setValue(self.SETTINGS_PREFIX + "csSlabMm", self.csSlabSpin.value)
             settings.setValue(self.SETTINGS_PREFIX + "tickSpacingMm", self.tickSpacingSpin.value)
+            settings.setValue(self.SETTINGS_PREFIX + "lightboxStepMm", self.lightboxStepSpin.value)
+            settings.setValue(self.SETTINGS_PREFIX + "csTiltDeg", self.csTiltSlider.value)
             settings.setValue(self.SETTINGS_PREFIX + "vrPreset", self.vrPresetCombo.currentText)
         except Exception:
             pass
@@ -716,7 +777,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             curveNode = self.logic.get_curve_node_for_jaw(volNode, jaw) if (has_vol and self.logic) else None
             has_curve = curveNode is not None and curveNode.GetNumberOfControlPoints() >= 4
 
-            # Enable progressive workflow steps based on prerequisites
             self.step2Box.setEnabled(has_vol)
             self.step3Box.setEnabled(has_vol and has_curve)
             self.step4Box.setEnabled(has_vol and has_curve)
@@ -740,9 +800,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.arcMmSlider.maximum = max(1.0, round(total_len, 1))
                 cursor_mm = float(self._parameterNode.GetParameter("CursorArcMm") or 0.0)
                 self.arcMmSlider.value = min(self.arcMmSlider.maximum, max(0.0, cursor_mm))
-                self.csStatusLabel.setText(
-                    f"Cursor: {self.arcMmSlider.value:.1f} / {total_len:.1f} mm ({jaw} arch)"
-                )
             else:
                 self.step2HintLabel.setText(
                     f"No {jaw} arch curve yet. Click 'Auto-Fit Arch from Segmentation' or 'Place / Draw Arch Points on Axial'."
@@ -765,11 +822,20 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if self.selectedTeeth:
                 self.onRefreshAllSelectedTeeth()
 
+    def onSetDentalLightboxLayout(self) -> None:
+        volNode = self.volumeSelector.currentNode()
+        registerAndSetDentalLightboxLayout(volumeNode=volNode)
+        self.enableLightboxCheckBox.setChecked(True)
+        if volNode and self.logic:
+            self.logic.standardize_to_lpi(volNode)
+            self._syncCursorToViews()
+
     def onSetDentalLayout(self) -> None:
         registerAndSetDentalLayout()
         volNode = self.volumeSelector.currentNode()
         if volNode and self.logic:
             self.logic.standardize_to_lpi(volNode)
+            self._syncCursorToViews()
 
     def onSetStandardMpr(self) -> None:
         volNode = self.volumeSelector.currentNode()
@@ -956,7 +1022,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logger.error("Panoramic generation failed: %s", exc)
 
     # ------------------------------------------------------------------
-    # Step 4 Callbacks: Cross-Section Cursor & Axial/Pano Lines
+    # Step 4 Callbacks: Cross-Section Cursor, Lightbox (-2/0/+2) & +-30° Tilt
     # ------------------------------------------------------------------
     def nudgeCursorMm(self, delta_mm: float) -> None:
         new_val = max(
@@ -981,6 +1047,14 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._parameterNode.SetParameter("CursorArcMm", f"{arc_mm:.2f}")
         self._syncCursorToViews(arc_mm=arc_mm)
 
+    def onTiltSliderChanged(self, tilt_deg: float) -> None:
+        if self._updatingGUIFromParameterNode:
+            return
+        clamped = CrossSectionNavigator.clamp_tilt_deg(tilt_deg)
+        if self._parameterNode is not None:
+            self._parameterNode.SetParameter("CrossSectionTiltDeg", f"{clamped:.1f}")
+        self._syncCursorToViews()
+
     def onLockFdiChanged(self, _idx: int) -> None:
         fdi_str = self.lockFdiCombo.currentData
         if not fdi_str:
@@ -999,6 +1073,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 tick_spacing_mm=self.tickSpacingSpin.value,
                 show_all_ticks=self.showAxialTicksCheckBox.isChecked(),
                 slab_thickness_mm=self.csSlabSpin.value,
+                tilt_deg=self.csTiltSlider.value,
+                lightbox_enabled=self.enableLightboxCheckBox.isChecked(),
+                lightbox_step_mm=self.lightboxStepSpin.value,
             )
             if arc_mm is not None:
                 self.arcMmSlider.blockSignals(True)
@@ -1006,6 +1083,11 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.arcMmSlider.blockSignals(False)
 
     def onCsDisplayParamChanged(self, *_args: Any) -> None:
+        if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
+            self._parameterNode.SetParameter(
+                "LightboxEnabled", "true" if self.enableLightboxCheckBox.isChecked() else "false"
+            )
+            self._parameterNode.SetParameter("LightboxStepMm", f"{self.lightboxStepSpin.value:.1f}")
         self._syncCursorToViews(arc_mm=self.arcMmSlider.value)
 
     def _syncCursorToViews(self, arc_mm: Optional[float] = None) -> None:
@@ -1017,6 +1099,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not curveNode or curveNode.GetNumberOfControlPoints() < 4:
             return
         target_arc = float(self.arcMmSlider.value if arc_mm is None else arc_mm)
+        tilt_deg = float(self.csTiltSlider.value)
+        lb_enabled = bool(self.enableLightboxCheckBox.isChecked())
+        lb_step = float(self.lightboxStepSpin.value)
         panoNode = self._parameterNode.GetNodeReference("PanoramicVolume") if self._parameterNode else None
         site_lbl = f"#{self.activeToothFDI}" if self.activeToothFDI else None
         _, _, _, _, s_clamped, total_len = self.logic.navigator.update_cursor_at_arc_mm(
@@ -1027,12 +1112,19 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             tick_spacing_mm=self.tickSpacingSpin.value,
             show_all_ticks=self.showAxialTicksCheckBox.isChecked(),
             slab_thickness_mm=self.csSlabSpin.value,
+            tilt_deg=tilt_deg,
+            lightbox_enabled=lb_enabled,
+            lightbox_step_mm=lb_step,
             occlusal_normal=self.logic.get_occlusal_normal(),
             site_label=site_lbl,
             panoNode=panoNode,
         )
+        s_m, s_0, s_p = CrossSectionNavigator.compute_lightbox_offsets(
+            s_clamped, total_len, step_mm=lb_step
+        )
+        lb_text = f" | Lightbox: [{s_m:.1f}, {s_0:.1f}, {s_p:.1f}] mm" if lb_enabled else ""
         self.csStatusLabel.setText(
-            f"Cursor: {s_clamped:.1f} / {total_len:.1f} mm ({jaw} arch)"
+            f"Cursor: {s_clamped:.1f} / {total_len:.1f} mm ({jaw}) | Tilt: {tilt_deg:+.0f}°{lb_text}"
             + (f" | Site {site_lbl}" if site_lbl else "")
         )
 
@@ -1053,7 +1145,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self.activeJawCombo.currentText != target_jaw:
             self.activeJawCombo.setCurrentText(target_jaw)
 
-        # Jump cursor & cross-section to the clicked tooth
         arc_mm = self.logic.jump_to_tooth_site(
             fdi,
             volNode,
@@ -1061,6 +1152,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             tick_spacing_mm=self.tickSpacingSpin.value,
             show_all_ticks=self.showAxialTicksCheckBox.isChecked(),
             slab_thickness_mm=self.csSlabSpin.value,
+            tilt_deg=self.csTiltSlider.value,
+            lightbox_enabled=self.enableLightboxCheckBox.isChecked(),
+            lightbox_step_mm=self.lightboxStepSpin.value,
         )
         if arc_mm is not None:
             self.arcMmSlider.blockSignals(True)
@@ -1068,7 +1162,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.arcMmSlider.blockSignals(False)
 
         if ctrl_held:
-            # Multi-select toggle: only analyze the newly added tooth
             if is_checked:
                 self.selectedTeeth.add(fdi)
                 self.treatmentPlanByFDI[fdi] = self.logic.analyze_single_tooth(
@@ -1078,7 +1171,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.selectedTeeth.discard(fdi)
                 self.treatmentPlanByFDI.pop(fdi, None)
         else:
-            # Single-click: jump to tooth and include it in the plan (analyzing only if not yet cached)
             self.selectedTeeth.add(fdi)
             btn = self.toothButtons.get(fdi)
             if btn:
@@ -1171,6 +1263,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     tick_spacing_mm=self.tickSpacingSpin.value,
                     show_all_ticks=self.showAxialTicksCheckBox.isChecked(),
                     slab_thickness_mm=self.csSlabSpin.value,
+                    tilt_deg=self.csTiltSlider.value,
+                    lightbox_enabled=self.enableLightboxCheckBox.isChecked(),
+                    lightbox_step_mm=self.lightboxStepSpin.value,
                 )
 
     def onGeneratePrintableReport(self) -> None:
@@ -1200,7 +1295,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
 
 class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
-    """Core logic orchestrating ParameterNode state, VR, Arch Curves, Panoramic CPR, and Honest Morphometry."""
+    """Core logic orchestrating ParameterNode state, VR, Arch Curves, Panoramic CPR, Lightbox & Tilt, and Morphometry."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1228,6 +1323,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "CrossSectionWidthMm": "24.0",
             "SlabThicknessMm": "0.5",
             "TickSpacingMm": "2.0",
+            "CrossSectionTiltDeg": "0.0",
+            "LightboxEnabled": "true",
+            "LightboxStepMm": "2.0",
             "PanoThicknessMm": "18.0",
             "PanoProjectionMode": "Mean",
             "ShowAxialTicks": "true",
@@ -1321,7 +1419,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         normal = self.compute_occlusal_normal_from_3_points(pts)
         self.set_occlusal_normal(normal)
 
-        # Optional: offer to apply and harden a rotation transform aligning occlusal normal to +Z
         if ask_harden_transform and vtk is not None and getattr(slicer, "app", None) is not None:
             z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
             angle_rad = float(np.arccos(np.clip(np.dot(normal, z_axis), -1.0, 1.0)))
@@ -1353,7 +1450,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         return self.get_occlusal_normal()
 
     def standardize_to_lpi(self, volumeNode: Any) -> None:
-        """Reset Axial (Red) and Sagittal (Yellow) views to standard MPR without resetting Panoramic Green view."""
+        """Reset Axial (Red) and Cross-Section (Yellow/YellowMinus/YellowPlus) views without clobbering Panoramic."""
         if slicer is None or not volumeNode:
             return
         layoutManager = slicer.app.layoutManager() if getattr(slicer, "app", None) else None
@@ -1361,7 +1458,13 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             return
 
         pano_shown = self.navigator.is_panoramic_shown_in_green()
-        for slice_name, orient in (("Red", "Axial"), ("Yellow", "Sagittal"), ("Green", "Coronal")):
+        for slice_name, orient in (
+            ("Red", "Axial"),
+            ("Yellow", "Sagittal"),
+            ("YellowMinus", "Sagittal"),
+            ("YellowPlus", "Sagittal"),
+            ("Green", "Coronal"),
+        ):
             if slice_name == "Green" and pano_shown:
                 continue
             sw = layoutManager.sliceWidget(slice_name)
@@ -1415,7 +1518,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     def extract_arch_points_from_segmentation(
         self, segmentationNode: Any, volumeNode: Any, jaw: str
     ) -> Optional[np.ndarray]:
-        """Extract 3D tooth/jawbone coordinates in RAS from a segmentation node (using vtk_to_numpy when available)."""
+        """Extract 3D tooth/jawbone coordinates in RAS from a segmentation node."""
         if not segmentationNode:
             return None
         segmentation = segmentationNode.GetSegmentation()
@@ -1463,7 +1566,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     pts = pts[::step]
                 return pts
 
-        # Fallback to binary labelmap voxel centroids if closed surface wasn't built yet
         if volumeNode is not None:
             mask, is_5class = self._extract_combined_label_mask(volumeNode, segmentationNode)
             if mask is not None:
@@ -1519,7 +1621,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
 
         pts_cloud = self.extract_arch_points_from_segmentation(segmentationNode, volumeNode, jaw_cap)
         if pts_cloud is None or len(pts_cloud) < 4:
-            # Do NOT invent control points: start empty and enter Markups place mode
             curveNode = self.start_interactive_arch_placement(volumeNode, jaw=jaw_cap)
             if getattr(slicer, "app", None) is not None:
                 slicer.util.showStatusMessage(
@@ -1580,7 +1681,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         curveNode = self.get_curve_node_for_jaw(volumeNode, jaw)
         if not curveNode or curveNode.GetNumberOfControlPoints() < 2:
             return None
-        pts, arc_s, _, _, _ = self.panoramic.get_curve_points_and_frames(
+        _, arc_s, _, _, _ = self.panoramic.get_curve_points_and_frames(
             curveNode, num_samples=100, occlusal_normal=self.get_occlusal_normal()
         )
         total_len = float(arc_s[-1])
@@ -1598,12 +1699,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         tick_spacing_mm: float = 2.0,
         show_all_ticks: bool = True,
         slab_thickness_mm: float = 0.5,
+        tilt_deg: float = 0.0,
+        lightbox_enabled: bool = True,
+        lightbox_step_mm: float = 2.0,
     ) -> Optional[float]:
-        """Jump Cross-Section (Yellow), Axial line (Red), and Pano line (Green) to tooth `fdi`.
-
-        Never touches the Green slice background/orientation when a Panoramic volume is shown.
-        Returns the tooth's `arc_mm` along the arch, or None if no arch curve exists yet.
-        """
+        """Jump Cross-Section Lightbox (`YellowMinus`, `Yellow`, `YellowPlus`), Axial lines, and Pano lines to `fdi`."""
         jaw = "Lower" if fdi >= 31 else "Upper"
         curveNode = self.get_curve_node_for_jaw(volumeNode, jaw)
         if not curveNode or curveNode.GetNumberOfControlPoints() < 2:
@@ -1624,6 +1724,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             tick_spacing_mm=tick_spacing_mm,
             show_all_ticks=show_all_ticks,
             slab_thickness_mm=slab_thickness_mm,
+            tilt_deg=tilt_deg,
+            lightbox_enabled=lightbox_enabled,
+            lightbox_step_mm=lightbox_step_mm,
             occlusal_normal=self.get_occlusal_normal(),
             site_label=f"Tooth #{fdi}",
             panoNode=panoNode,
@@ -1636,7 +1739,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     def _extract_combined_label_mask(
         self, volumeNode: Any, segmentationNode: Any
     ) -> Tuple[Optional[np.ndarray], bool]:
-        """Convert a Slicer vtkMRMLSegmentationNode into a (Z, Y, X) uint16 mask aligned to volumeNode."""
         if slicer is None or not volumeNode or not segmentationNode:
             return None, False
         segmentation = segmentationNode.GetSegmentation()
@@ -1705,7 +1807,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         return None
 
     def create_or_focus_manual_rulers_for_tooth(self, fdi: int, volumeNode: Any) -> None:
-        """Create draggable Markups Line rulers on the current Cross-Section slice for manual measurement."""
         if slicer is None or not volumeNode:
             return
         frame_info = self.get_tooth_arc_mm_and_frame(fdi, volumeNode)
@@ -1749,11 +1850,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         segmentationNode: Any = None,
         engine: Optional[MeasurementEngine] = None,
     ) -> Dict[str, Any]:
-        """Compute honest clinical metrics for a single tooth `fdi`.
-
-        Never invents or fabricates numbers: if no segmentation and no manual ruler exist,
-        numerical fields are `None` (rendered as `'not measured'`).
-        """
         is_lower = int(fdi) >= 31
         jaw = "lower" if is_lower else "upper"
         frame_info = self.get_tooth_arc_mm_and_frame(int(fdi), volumeNode) if volumeNode else None
@@ -1788,7 +1884,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 if any(v is not None for v in (height_mm, w_crest_mm, nerve_clearance_mm, mean_hu)):
                     source = "segmentation"
 
-        # Check manual Markups rulers (override or supply measurements when unsegmented)
         manual_h = self._read_manual_ruler_length(f"Tooth_{fdi}_HeightRuler")
         manual_w = self._read_manual_ruler_length(f"Tooth_{fdi}_WidthRuler")
         manual_n = self._read_manual_ruler_length(f"Tooth_{fdi}_NerveRuler")
@@ -1859,7 +1954,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         volumeNode: Any,
         segmentationNode: Any = None,
     ) -> List[Dict[str, Any]]:
-        """Analyze selected teeth honestly (no hardcoded fallback values)."""
         engine = (
             self._build_measurement_engine(volumeNode, segmentationNode)
             if (volumeNode is not None and segmentationNode is not None)
@@ -1875,7 +1969,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     # ------------------------------------------------------------------
     @staticmethod
     def _capture_slice_screenshot_base64(slice_name: str) -> Optional[str]:
-        """Capture a PNG screenshot of a Slicer slice view and return base64 data URI."""
         if slicer is None or qt is None or not getattr(slicer, "app", None):
             return None
         try:
@@ -1897,7 +1990,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     def export_treatment_plan_files(
         plan_data: Sequence[Dict[str, Any]], out_dir: Path
     ) -> Tuple[Path, Path]:
-        """Export treatment plan to JSON and CSV with flattened pos_r_mm/pos_a_mm/pos_s_mm columns."""
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
         out_json = out_path / "treatment_plan.json"
@@ -1962,7 +2054,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         out_dir: Path,
         capture_screenshots: bool = True,
     ) -> Path:
-        """Generate HTML diagnostic report with HTML-escaped fields, explicit units, 'not measured' support, and slice screenshots."""
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
         raw_vol_name = volumeNode.GetName() if (volumeNode and hasattr(volumeNode, "GetName")) else "CBCT_Scan"
@@ -2014,7 +2105,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             for label, s_name in (
                 ("Panoramic View (Green)", "Green"),
                 ("Axial View (Red)", "Red"),
-                ("Cross-Section View (Yellow)", "Yellow"),
+                ("Cross-Section CS- (-2 mm)", "YellowMinus"),
+                ("Cross-Section CS0 (0 mm)", "Yellow"),
+                ("Cross-Section CS+ (+2 mm)", "YellowPlus"),
             ):
                 uri = self._capture_slice_screenshot_base64(s_name)
                 if uri:
@@ -2033,8 +2126,8 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "table{width:100%;border-collapse:collapse;margin-top:16px;font-size:13px;}"
             "th,td{border:1px solid #cbd5e1;padding:8px;text-align:center;}"
             "th{background:#0f172a;color:#fff;}"
-            ".shots{display:flex;gap:12px;margin-top:16px;}"
-            ".shot-card{flex:1;border:1px solid #cbd5e1;padding:8px;text-align:center;}"
+            ".shots{display:flex;gap:12px;margin-top:16px;flex-wrap:wrap;}"
+            ".shot-card{flex:1;min-width:180px;border:1px solid #cbd5e1;padding:8px;text-align:center;}"
             ".shot-card img{max-width:100%;height:auto;margin-top:6px;}"
             "</style></head><body>"
             f"<h1>CBCT Implant Planning Report — {escaped_vol_name}</h1>"

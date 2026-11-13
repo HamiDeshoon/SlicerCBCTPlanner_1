@@ -1,5 +1,5 @@
 """
-Unit tests for SlicerCBCTPlanner (Phases 0, 1, 2, 3, and 4).
+Unit tests for SlicerCBCTPlanner (Phases 0, 1, 2, 3, 4 + Lightbox & +-30° Tilt Upgrade).
 Runnable outside 3D Slicer using standard Python + NumPy:
     python3 -m unittest discover -s tests
 """
@@ -7,6 +7,7 @@ Runnable outside 3D Slicer using standard Python + NumPy:
 from __future__ import annotations
 
 import csv
+import math
 import sys
 import tempfile
 import unittest
@@ -25,9 +26,10 @@ from CBCTPlanner import (
     NOT_MEASURED,
     CBCTPlannerLogic,
     format_metric,
-    sort_teeth_anatomically,
 )
 from CBCTPlannerLib import (
+    CUSTOM_DENTAL_LIGHTBOX_LAYOUT_ID,
+    CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML,
     CrossSectionNavigator,
     PanoramicCurveLogic,
     VRVisualizationLogic,
@@ -123,8 +125,6 @@ class _MockCurveNode:
 
 class TestSlicerCBCTPlanner(unittest.TestCase):
     def setUp(self) -> None:
-        # Standard horseshoe dental arch in RAS:
-        # Patient Right (+X, posterior -Y) -> Anterior midline (0, +Y) -> Patient Left (-X, posterior -Y)
         self.ras_arch_pts = np.array(
             [
                 [28.0, -22.0, 0.0],
@@ -145,7 +145,6 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertIs(
             CBCTPlanner.fit_dental_arch_from_points,
             fit_dental_arch_from_points,
-            "CBCTPlanner must use the single fit_dental_arch_from_points from core.arch_detector",
         )
         with patch.dict(sys.modules, {"skimage": None, "nibabel": None, "pydicom": None, "SimpleITK": None}):
             arch = DentalArch(self.ras_arch_pts, jaw_type="lower", ras_convention=True)
@@ -153,10 +152,10 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
 
     def test_phase1_ras_right_to_left_orientation_and_fdi_side_mapping(self) -> None:
         """In Slicer RAS (+X = Patient Right), arch starts at +X and ends at -X; Q1/Q4 map to +X, Q2/Q3 to -X."""
-        shuffled = self.ras_arch_pts[::-1].copy()  # Start with -X first
+        shuffled = self.ras_arch_pts[::-1].copy()
         fitted = fit_dental_arch_from_points(shuffled, num_control_points=11, ras_convention=True)
-        self.assertGreater(fitted[0, 0], 0.0, "Start of RAS arch must be Patient Right (+X)")
-        self.assertLess(fitted[-1, 0], 0.0, "End of RAS arch must be Patient Left (-X)")
+        self.assertGreater(fitted[0, 0], 0.0)
+        self.assertLess(fitted[-1, 0], 0.0)
 
         arch = DentalArch(fitted, jaw_type="lower", ras_convention=True)
         logic = CBCTPlannerLogic()
@@ -165,31 +164,26 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
             t_r = logic.fdi_to_normalized_arch_t(right_fdi)
             pt_r = arch.evaluate_at(t_r)
             self.assertLess(t_r, 0.5)
-            self.assertGreater(pt_r[0], 0.0, f"FDI {right_fdi} must map to Patient Right (+X in RAS)")
+            self.assertGreater(pt_r[0], 0.0)
 
         for left_fdi in (21, 26, 28, 31, 36, 38):
             t_l = logic.fdi_to_normalized_arch_t(left_fdi)
             pt_l = arch.evaluate_at(t_l)
             self.assertGreater(t_l, 0.5)
-            self.assertLess(pt_l[0], 0.0, f"FDI {left_fdi} must map to Patient Left (-X in RAS)")
+            self.assertLess(pt_l[0], 0.0)
 
     def test_phase1_frame_normal_points_buccal_and_yellow_slice_orientation(self) -> None:
         """Verify N = T x Up points Buccal everywhere and Yellow slice has Buccal-Left / Lingual-Right / Superior-Up."""
         arch = DentalArch(self.ras_arch_pts, jaw_type="lower", ras_convention=True)
-
-        # 1. Right molar (t = 0.1): Buccal is toward Patient Right (+X)
         f_right = arch.get_frame(0.1)
-        self.assertGreater(f_right.normal[0], 0.5, f"Right molar buccal normal must point +X, got {f_right.normal}")
+        self.assertGreater(f_right.normal[0], 0.5)
 
-        # 2. Anterior midline (t = 0.5): Buccal/Labial is toward Anterior (+Y)
         f_mid = arch.get_frame(0.5)
-        self.assertGreater(f_mid.normal[1], 0.8, f"Anterior labial normal must point +Y, got {f_mid.normal}")
+        self.assertGreater(f_mid.normal[1], 0.8)
 
-        # 3. Left molar (t = 0.9): Buccal is toward Patient Left (-X)
         f_left = arch.get_frame(0.9)
-        self.assertLess(f_left.normal[0], -0.5, f"Left molar buccal normal must point -X, got {f_left.normal}")
+        self.assertLess(f_left.normal[0], -0.5)
 
-        # 4. Yellow Cross-Section slice axes: Screen Left = +N (Buccal), Screen Right = -N (Lingual), Screen Up = +B
         for frame in (f_right, f_mid, f_left):
             screen_right, screen_up, slice_normal = CrossSectionNavigator.compute_yellow_slice_axes(
                 frame.tangent, frame.normal, frame.binormal
@@ -201,7 +195,6 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
 
     def test_phase1_occlusal_plane_3_points(self) -> None:
         """Verify 3-point occlusal plane normal computation and frame alignment."""
-        # Tilted plane: z = 0.1 * y
         p1 = [20.0, -10.0, -1.0]
         p2 = [0.0, 20.0, 2.0]
         p3 = [-20.0, -10.0, -1.0]
@@ -221,7 +214,6 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertEqual(len(base_op[0]), 4)
         self.assertEqual(len(base_col[0]), 6)
 
-        # Shift by +200 HU, then by +350 HU relative to baseline (must not accumulate to +550 HU!)
         VRVisualizationLogic.shift_transfer_function(prop, 200.0, base_op, base_col)
         self.assertAlmostEqual(prop.GetScalarOpacity()._pts[1][0], 700.0)
         self.assertAlmostEqual(prop.GetColor()._pts[1][0], 700.0)
@@ -236,9 +228,8 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
             self.ras_arch_pts[0], self.ras_arch_pts[-1], occlusal_normal=(0.0, 0.0, 1.0)
         )
         det = float(np.linalg.det(dir_mat[:3, :3]))
-        self.assertAlmostEqual(det, 1.0, places=6, msg="CPR direction matrix must be right-handed (det = +1)")
+        self.assertAlmostEqual(det, 1.0, places=6)
 
-        # Patient Right (arc_mm = 0) -> X_RAS = 0 (Screen Left); Patient Left (arc_mm = 95) -> X_RAS = -95 (Screen Right)
         self.assertEqual(PanoramicCurveLogic.pano_x(0.0), 0.0)
         self.assertEqual(PanoramicCurveLogic.pano_x(95.0), -95.0)
         self.assertEqual(PanoramicCurveLogic.arc_mm(-95.0, max_arc_mm=100.0), 95.0)
@@ -266,7 +257,6 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
             self.assertIn("pos_r_mm", reader[0])
             self.assertNotIn("pos_ras", reader[0])
 
-            # Test HTML escaping on malicious volume name
             class _FakeVol:
                 def GetName(self) -> str:
                     return "<script>alert('xss')</script>"
@@ -281,24 +271,18 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
 
     def test_phase1_measurement_engine_on_synthetic_segmented_cbct(self) -> None:
         """Verify MeasurementEngine computes real physical metrics from a segmented volume."""
-        # Create a 40x40x40 volume with 1.0 mm isotropic spacing in RAS
         img = np.full((40, 40, 40), -500.0, dtype=np.float32)
         mask = np.zeros((40, 40, 40), dtype=np.uint16)
-
-        # Mandibular bone block (label 2 in DentalSegmentator 5-class) from Z=5..25, Y=15..23 (8 mm wide), X=5..35
         mask[5:25, 15:23, 5:35] = 2
-        img[5:25, 15:23, 5:35] = 950.0  # D2 bone density
-
-        # Mandibular canal (label 5 in DentalSegmentator 5-class) at Z=7..9
+        img[5:25, 15:23, 5:35] = 950.0
         mask[7:9, 18:20, 5:35] = 5
 
-        affine = np.eye(4, dtype=np.float64)
         vol = CBCTVolume(
             image=img,
             spacing=(1.0, 1.0, 1.0),
             origin=(0.0, 0.0, 0.0),
             direction=np.eye(3),
-            affine=affine,
+            affine=np.eye(4, dtype=np.float64),
         )
         arch_pts = np.array(
             [[32.0, 19.0, 24.0], [25.0, 19.0, 24.0], [15.0, 19.0, 24.0], [8.0, 19.0, 24.0]],
@@ -311,7 +295,6 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         meas = engine.measure_implant_site("46")
         self.assertIsNotNone(meas)
         assert meas is not None
-        # Crest Z is 24, canal top Z is 8 -> height = 24 - 8 = 16.0 mm
         self.assertAlmostEqual(meas.bone_height_mm or 0.0, 16.0, delta=1.0)
         self.assertAlmostEqual(meas.mean_density_hu or 0.0, 950.0, delta=10.0)
         self.assertEqual(meas.misch_density_class, "D2")
@@ -322,12 +305,54 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         mock_curve = _MockCurveNode(self.ras_arch_pts, mtime=42)
         frames1 = pano_logic.get_curve_points_and_frames(mock_curve, num_samples=50)
         frames2 = pano_logic.get_curve_points_and_frames(mock_curve, num_samples=50)
-        self.assertIs(frames1, frames2, "Expected MTime cache hit on unchanged curve")
+        self.assertIs(frames1, frames2)
 
-        # Project anterior midline point (0, 20, 0) -> should be near half of total curve length
         total_len = float(frames1[1][-1])
         arc_mid = pano_logic.project_point_to_curve_arc_mm(mock_curve, [0.0, 20.0, 0.0])
         self.assertAlmostEqual(arc_mid, total_len * 0.5, delta=3.0)
+
+    def test_lightbox_offsets_and_cross_section_tilt_30_deg(self) -> None:
+        """Verify 3-slice lightbox (-2, 0, +2 mm) offsets, layout XML, and +-30° cross-section tilt math."""
+        self.assertEqual(CUSTOM_DENTAL_LIGHTBOX_LAYOUT_ID, 503)
+        self.assertIn('singletontag="YellowMinus"', CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML)
+        self.assertIn('singletontag="Yellow"', CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML)
+        self.assertIn('singletontag="YellowPlus"', CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML)
+
+        # 1. Lightbox offsets (-2, 0, +2 mm) and boundary clamping
+        s_m, s_0, s_p = CrossSectionNavigator.compute_lightbox_offsets(50.0, 100.0, step_mm=2.0)
+        self.assertEqual((s_m, s_0, s_p), (48.0, 50.0, 52.0))
+        s_m_edge, s_0_edge, s_p_edge = CrossSectionNavigator.compute_lightbox_offsets(1.0, 100.0, step_mm=2.0)
+        self.assertEqual((s_m_edge, s_0_edge, s_p_edge), (0.0, 1.0, 3.0))
+
+        # 2. Clamping beyond +-30°
+        self.assertEqual(CrossSectionNavigator.clamp_tilt_deg(45.0), 30.0)
+        self.assertEqual(CrossSectionNavigator.clamp_tilt_deg(-60.0), -30.0)
+
+        # 3. Frame orthogonality & det = +1 under +-30° tilt
+        arch = DentalArch(self.ras_arch_pts, jaw_type="lower", ras_convention=True)
+        f_mid = arch.get_frame(0.5)
+        for deg in (-30.0, -15.0, 0.0, 15.0, 30.0):
+            t_tilt, n_tilt, b_tilt = CrossSectionNavigator.apply_cross_section_tilt(
+                f_mid.tangent, f_mid.normal, f_mid.binormal, tilt_deg=deg
+            )
+            # N (Buccal-Lingual) must remain invariant
+            np.testing.assert_allclose(n_tilt, f_mid.normal, atol=1e-6)
+            # Orthonormal check
+            self.assertAlmostEqual(float(np.dot(t_tilt, b_tilt)), 0.0, places=6)
+            self.assertAlmostEqual(float(np.dot(t_tilt, n_tilt)), 0.0, places=6)
+            self.assertAlmostEqual(float(np.dot(b_tilt, n_tilt)), 0.0, places=6)
+            # Angle between B_tilt and B must equal |deg|
+            cos_angle = float(np.clip(np.dot(b_tilt, f_mid.binormal), -1.0, 1.0))
+            self.assertAlmostEqual(math.degrees(math.acos(cos_angle)), abs(deg), places=4)
+            # Yellow slice right-handedness (det = +1)
+            sr, su, sn = CrossSectionNavigator.compute_yellow_slice_axes(t_tilt, n_tilt, b_tilt)
+            det = float(np.linalg.det(np.column_stack([sr, su, sn])))
+            self.assertAlmostEqual(det, 1.0, places=5)
+
+        # 4. Panoramic tilted line endpoints pivot around center X = pano_x(arc_mm)
+        b_pt, t_pt = CrossSectionNavigator.compute_pano_cursor_endpoints(40.0, pano_height_mm=50.0, tilt_deg=20.0)
+        self.assertAlmostEqual(0.5 * (b_pt[0] + t_pt[0]), PanoramicCurveLogic.pano_x(40.0), places=6)
+        self.assertNotAlmostEqual(b_pt[0], t_pt[0])
 
 
 if __name__ == "__main__":
