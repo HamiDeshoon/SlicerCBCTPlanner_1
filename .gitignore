@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# CMake / Slicer build directories
+build/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Model weights, large DICOM/NIfTI volumes, and temporary test outputs
+*.nii
+*.nii.gz
+*.nrrd
+*.seg.nrrd
+*.dcm
+*.mrb
+*.pth
+*.pt
+*.onnx
+Resources/ML/
