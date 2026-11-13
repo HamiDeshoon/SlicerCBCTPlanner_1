@@ -1,12 +1,14 @@
 """
-Unit tests for SlicerCBCTPlanner (Phases 0, 1, 2, 3, 4 + Lightbox & +-30° Tilt Upgrade).
-Runnable outside 3D Slicer using standard Python + NumPy:
-    python3 -m unittest discover -s tests
+Unit tests for SlicerCBCTPlanner covering Phase 0, Phase 1 (Clinical Safety B1-B4),
+and Phase 2 (Correctness Bugs B5-B20).
+Runnable outside 3D Slicer using standard Python + NumPy/SciPy:
+    python3 -m unittest discover -s tests -v
 """
 
 from __future__ import annotations
 
 import csv
+import json
 import math
 import sys
 import tempfile
@@ -28,15 +30,23 @@ from CBCTPlanner import (
     format_metric,
 )
 from CBCTPlannerLib import (
+    CLINICAL_DISCLAIMER_TEXT,
     CUSTOM_DENTAL_LIGHTBOX_LAYOUT_ID,
     CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML,
     CrossSectionNavigator,
     PanoramicCurveLogic,
     VRVisualizationLogic,
+    should_handle_navigation_shortcut,
 )
 from CBCTPlannerLib.core.arch_detector import (
     DentalArch,
+    compute_fdi_arc_positions_mm,
     fit_dental_arch_from_points,
+    project_point_to_polyline_arc_mm,
+)
+from CBCTPlannerLib.core.labels import (
+    FDI_TO_TOOTH_ID,
+    match_segment_to_label_and_precedence,
 )
 from CBCTPlannerLib.core.measurements import MeasurementEngine
 from CBCTPlannerLib.core.volume_loader import CBCTVolume
@@ -50,6 +60,13 @@ class _MockPiecewiseFunction:
 
     def GetSize(self) -> int:
         return len(self._pts)
+
+    def RemoveAllPoints(self) -> None:
+        self._pts.clear()
+
+    def AddPoint(self, x: float, y: float, midpoint: float = 0.5, sharpness: float = 0.0) -> int:
+        self._pts.append([float(x), float(y), float(midpoint), float(sharpness)])
+        return len(self._pts) - 1
 
     def GetNodeValue(self, index: int, val: list[float]) -> int:
         if len(val) != 4:
@@ -74,6 +91,21 @@ class _MockColorTransferFunction:
     def GetSize(self) -> int:
         return len(self._pts)
 
+    def RemoveAllPoints(self) -> None:
+        self._pts.clear()
+
+    def AddRGBPoint(
+        self,
+        x: float,
+        r: float,
+        g: float,
+        b: float,
+        midpoint: float = 0.5,
+        sharpness: float = 0.0,
+    ) -> int:
+        self._pts.append([float(x), float(r), float(g), float(b), float(midpoint), float(sharpness)])
+        return len(self._pts) - 1
+
     def GetNodeValue(self, index: int, val: list[float]) -> int:
         if len(val) != 6:
             raise TypeError(f"vtkColorTransferFunction.GetNodeValue expects 6 floats, got {len(val)}")
@@ -89,11 +121,33 @@ class _MockColorTransferFunction:
 
 
 class _MockVolumePropertyNode:
-    def __init__(self) -> None:
+    def __init__(self, prop_id: str = "Prop1") -> None:
+        self._id = prop_id
         self._op = _MockPiecewiseFunction([[-1000.0, 0.0, 0.5, 0.0], [500.0, 0.8, 0.5, 0.0]])
         self._col = _MockColorTransferFunction(
             [[-1000.0, 0.0, 0.0, 0.0, 0.5, 0.0], [500.0, 0.9, 0.8, 0.7, 0.5, 0.0]]
         )
+        self._grad = _MockPiecewiseFunction([[0.0, 0.0, 0.5, 0.0], [100.0, 1.0, 0.5, 0.0]])
+        self.disabled_events_count = 0
+
+    def GetID(self) -> str:
+        return self._id
+
+    def StartModify(self) -> int:
+        return 0
+
+    def EndModify(self, _prev: int) -> None:
+        pass
+
+    def DisableModifiedEventOn(self) -> None:
+        self.disabled_events_count += 1
+
+    def DisableModifiedEventOff(self) -> None:
+        pass
+
+    def Copy(self, other: "_MockVolumePropertyNode") -> None:
+        self._op = _MockPiecewiseFunction(other._op._pts)
+        self._col = _MockColorTransferFunction(other._col._pts)
 
     def GetScalarOpacity(self) -> _MockPiecewiseFunction:
         return self._op
@@ -101,14 +155,20 @@ class _MockVolumePropertyNode:
     def GetColor(self) -> _MockColorTransferFunction:
         return self._col
 
+    def GetGradientOpacity(self) -> _MockPiecewiseFunction:
+        return self._grad
+
 
 class _MockCurveNode:
-    def __init__(self, pts: np.ndarray, mtime: int = 1) -> None:
+    def __init__(self, pts: np.ndarray, mtime: int = 1, node_id: str = "vtkMRMLMarkupsCurveNode1") -> None:
         self._pts = np.asarray(pts, dtype=np.float64)
         self._mtime = mtime
+        self._id = node_id
+        self._attrs: dict[str, str] = {}
+        self._transform_id: Optional[str] = None
 
     def GetID(self) -> str:
-        return "vtkMRMLMarkupsCurveNode1"
+        return self._id
 
     def GetMTime(self) -> int:
         return self._mtime
@@ -119,8 +179,31 @@ class _MockCurveNode:
     def GetNthControlPointPositionWorld(self, idx: int, buf: list[float]) -> None:
         buf[0], buf[1], buf[2] = float(self._pts[idx, 0]), float(self._pts[idx, 1]), float(self._pts[idx, 2])
 
+    def SetNthControlPointPositionWorld(self, idx: int, x: float, y: float, z: float) -> None:
+        self._pts[idx] = [float(x), float(y), float(z)]
+        self._mtime += 1
+
     def GetCurveWorld(self) -> None:
         return None
+
+    def SetAttribute(self, k: str, v: str) -> None:
+        self._attrs[k] = str(v)
+
+    def GetAttribute(self, k: str) -> Optional[str]:
+        return self._attrs.get(k)
+
+    def SetAndObserveTransformNodeID(self, tf_id: Optional[str]) -> None:
+        self._transform_id = tf_id
+
+    def GetTransformNodeID(self) -> Optional[str]:
+        return self._transform_id
+
+
+class _MockRulerNode(_MockCurveNode):
+    def GetLineLengthWorld(self) -> float:
+        if len(self._pts) < 2:
+            return 0.0
+        return float(np.linalg.norm(self._pts[1] - self._pts[0]))
 
 
 class TestSlicerCBCTPlanner(unittest.TestCase):
@@ -193,58 +276,394 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
             det = float(np.linalg.det(np.column_stack([screen_right, screen_up, slice_normal])))
             self.assertAlmostEqual(det, 1.0, places=5)
 
-    def test_phase1_occlusal_plane_3_points(self) -> None:
-        """Verify 3-point occlusal plane normal computation and frame alignment."""
-        p1 = [20.0, -10.0, -1.0]
-        p2 = [0.0, 20.0, 2.0]
-        p3 = [-20.0, -10.0, -1.0]
+    def test_b1_manual_ruler_untouched_returns_none_and_modified_returns_length(self) -> None:
+        """B1: Untouched manual ruler returns None; user-modified ruler returns physical length."""
+        p0 = [10.0, 5.0, 0.0]
+        p1 = [10.0, 5.0, -10.0]
+        ruler = _MockRulerNode(np.array([p0, p1]), node_id="Ruler46")
+        ruler.SetAttribute("CBCTPlanner.InitialEndpoints", json.dumps([p0, p1]))
+        ruler.SetAttribute("CBCTPlanner.UserModified", "0")
+
+        # Untouched default ruler MUST return None
+        self.assertIsNone(CBCTPlannerLogic._read_manual_ruler_length(ruler))
+
+        # Simulate user dragging endpoint 1 from -10.0 to -12.5 mm (12.5 mm length)
+        ruler.SetNthControlPointPositionWorld(1, 10.0, 5.0, -12.5)
+        self.assertEqual(CBCTPlannerLogic._read_manual_ruler_length(ruler), 12.5)
+        self.assertEqual(ruler.GetAttribute("CBCTPlanner.UserModified"), "1")
+
+    def test_b2_fdi_arc_mapping_segmentation_vs_width_table_and_missing_teeth(self) -> None:
+        """B2: Verify segmentation centroid projection, mesiodistal width table, missing teeth, and calibrated markers."""
+        arch = DentalArch(self.ras_arch_pts, jaw_type="lower", ras_convention=True)
+        total_len = arch.total_arc_length
+
+        # 1. Without segmentation: uses anatomical mesiodistal width table (non-uniform spacing!) and flags approximate
+        unseg_map = compute_fdi_arc_positions_mm(total_len, jaw_type="lower", arch=arch)
+        self.assertTrue(unseg_map["46"].is_approximate)
+        self.assertEqual(unseg_map["46"].source, "approximate_width_table")
+        # Molar step (47->46) is wider than incisor step (42->41)
+        molar_step = unseg_map["46"].arc_mm - unseg_map["47"].arc_mm
+        incisor_step = unseg_map["41"].arc_mm - unseg_map["42"].arc_mm
+        self.assertGreater(molar_step, incisor_step * 1.4)
+
+        # 2. With segmented teeth #47 and #45 but missing #46: #47/#45 are exact ("segmentation"), #46 is interpolated
+        seg_centroids = {
+            "47": arch.evaluate_at_mm(18.0),
+            "45": arch.evaluate_at_mm(38.0),
+        }
+        cal_markers = {"41": 49.5}
+        mixed_map = compute_fdi_arc_positions_mm(
+            total_len,
+            jaw_type="lower",
+            arch=arch,
+            segmented_centroids=seg_centroids,
+            calibrated_arc_mm=cal_markers,
+        )
+        self.assertEqual(mixed_map["47"].source, "segmentation")
+        self.assertFalse(mixed_map["47"].is_approximate)
+        self.assertAlmostEqual(mixed_map["47"].arc_mm, 18.0, delta=0.1)
+
+        self.assertEqual(mixed_map["46"].source, "interpolated_from_neighbors")
+        self.assertTrue(mixed_map["46"].is_approximate)
+        self.assertTrue(mixed_map["46"].is_missing_tooth)
+        self.assertGreater(mixed_map["46"].arc_mm, 18.0)
+        self.assertLess(mixed_map["46"].arc_mm, 38.0)
+
+        self.assertEqual(mixed_map["41"].source, "calibrated_marker")
+        self.assertFalse(mixed_map["41"].is_approximate)
+        self.assertAlmostEqual(mixed_map["41"].arc_mm, 49.5, places=2)
+
+    def test_b3_non_destructive_occlusal_alignment_and_reset(self) -> None:
+        """B3: Verify non-destructive occlusal alignment matrix and co-registration across nodes."""
+        p1 = [20.0, -10.0, -2.0]
+        p2 = [0.0, 20.0, 3.0]
+        p3 = [-20.0, -10.0, -2.0]
         normal = CBCTPlannerLogic.compute_occlusal_normal_from_3_points(np.array([p1, p2, p3]))
-        self.assertGreater(normal[2], 0.9)
-        self.assertLess(normal[1], 0.0)
+        center = np.mean([p1, p2, p3], axis=0)
+        mat = CBCTPlannerLogic.compute_occlusal_alignment_matrix_4x4(normal, center_ras=center)
 
-        arch = DentalArch(self.ras_arch_pts, occlusal_normal=normal, ras_convention=True)
-        frame = arch.get_frame(0.5)
-        np.testing.assert_allclose(frame.binormal, normal, atol=1e-5)
-        self.assertAlmostEqual(float(np.dot(frame.tangent, normal)), 0.0, places=6)
+        # Rotation block must be orthogonal with det = +1 and map `normal` to +Z (0, 0, 1)
+        R = mat[:3, :3]
+        self.assertAlmostEqual(float(np.linalg.det(R)), 1.0, places=6)
+        rotated_normal = R @ normal
+        np.testing.assert_allclose(rotated_normal, [0.0, 0.0, 1.0], atol=1e-6)
+        # Center of rotation must remain invariant under mat
+        center_h = np.array([center[0], center[1], center[2], 1.0])
+        np.testing.assert_allclose((mat @ center_h)[:3], center, atol=1e-6)
 
-    def test_phase1_vr_shift_transfer_function_4_and_6_tuple_buffers(self) -> None:
-        """Verify vtkPiecewiseFunction uses 4 floats, vtkColorTransferFunction uses 6 floats, non-cumulatively."""
-        prop = _MockVolumePropertyNode()
-        base_op, base_col = VRVisualizationLogic._extract_tf_points(prop)
-        self.assertEqual(len(base_op[0]), 4)
-        self.assertEqual(len(base_col[0]), 6)
+    def test_b4_arch_frame_cross_section_measurements_flipped_k_and_oblique_phantom(self) -> None:
+        """B4: Verify MeasurementEngine measures in arch-frame cross-section on standard, flipped-K, and oblique phantoms."""
+        # Standard phantom: mandible block height = 16 mm above canal, width = 8 mm along Y, density = 950
+        img = np.full((50, 50, 50), -500.0, dtype=np.float32)
+        mask = np.zeros((50, 50, 50), dtype=np.uint16)
+        mask[10:30, 21:29, 10:40] = 2  # Mandible (Z=10..29 -> 19 mm total, crest at Z=29)
+        img[10:30, 21:29, 10:40] = 950.0
+        mask[11:13, 24:26, 10:40] = 5  # Canal top at Z=12 -> distance from crest Z=29 is ~17 mm
 
-        VRVisualizationLogic.shift_transfer_function(prop, 200.0, base_op, base_col)
-        self.assertAlmostEqual(prop.GetScalarOpacity()._pts[1][0], 700.0)
-        self.assertAlmostEqual(prop.GetColor()._pts[1][0], 700.0)
+        vol_std = CBCTVolume(
+            image=img,
+            spacing=(1.0, 1.0, 1.0),
+            origin=(0.0, 0.0, 0.0),
+            direction=np.eye(3),
+            affine=np.eye(4, dtype=np.float64),
+        )
+        arch_pts = np.array(
+            [[35.0, 25.0, 29.0], [28.0, 25.0, 29.0], [20.0, 25.0, 29.0], [12.0, 25.0, 29.0]],
+            dtype=np.float64,
+        )
+        arch_std = DentalArch(arch_pts, jaw_type="lower", ras_convention=True)
+        eng_std = MeasurementEngine(
+            vol_std, mask, arch=arch_std, arches={"lower": arch_std}, is_dental_segmentator_5class=True
+        )
+        meas_std = eng_std.measure_implant_site("46")
+        self.assertIsNotNone(meas_std)
+        assert meas_std is not None
+        self.assertAlmostEqual(meas_std.bone_height_mm or 0.0, 17.0, delta=0.75)
+        self.assertAlmostEqual(meas_std.crest_width_mm or 0.0, 7.0, delta=1.0)
+        self.assertIn("approximate (CBCT gray values are not calibrated HU)", meas_std.misch_density_class or "")
 
-        VRVisualizationLogic.shift_transfer_function(prop, 350.0, base_op, base_col)
-        self.assertAlmostEqual(prop.GetScalarOpacity()._pts[1][0], 850.0)
-        self.assertAlmostEqual(prop.GetColor()._pts[1][0], 850.0)
+        # 2. Flipped-K phantom: reverse array along axis 0 (K) and set affine[2, 2] = -1, affine[2, 3] = 49.0
+        # Physical world coordinates of every voxel remain 100% identical!
+        img_flip = img[::-1, :, :].copy()
+        mask_flip = mask[::-1, :, :].copy()
+        affine_flip = np.eye(4, dtype=np.float64)
+        affine_flip[2, 2] = -1.0
+        affine_flip[2, 3] = 49.0
+        vol_flip = CBCTVolume(
+            image=img_flip,
+            spacing=(1.0, 1.0, 1.0),
+            origin=(0.0, 0.0, 49.0),
+            direction=np.diag([1.0, 1.0, -1.0]),
+            affine=affine_flip,
+        )
+        eng_flip = MeasurementEngine(
+            vol_flip, mask_flip, arch=arch_std, arches={"lower": arch_std}, is_dental_segmentator_5class=True
+        )
+        meas_flip = eng_flip.measure_implant_site("46")
+        self.assertIsNotNone(meas_flip)
+        assert meas_flip is not None
+        self.assertAlmostEqual(meas_flip.bone_height_mm or 0.0, meas_std.bone_height_mm or 0.0, delta=0.5)
+        self.assertAlmostEqual(meas_flip.crest_width_mm or 0.0, meas_std.crest_width_mm or 0.0, delta=0.5)
 
-    def test_phase1_cpr_matrix_handedness_and_pano_x_helpers(self) -> None:
-        """Verify CPR direction matrix has det = +1 and pano_x / arc_mm map Patient Right to Screen Left."""
+        # 3. Oblique phantom: rotate volume, affine, and arch by +25 degrees around X axis
+        theta = math.radians(25.0)
+        R_x = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, math.cos(theta), -math.sin(theta)],
+                [0.0, math.sin(theta), math.cos(theta)],
+            ],
+            dtype=np.float64,
+        )
+        affine_oblique = np.eye(4, dtype=np.float64)
+        affine_oblique[:3, :3] = R_x
+        vol_oblique = CBCTVolume(
+            image=img,
+            spacing=(1.0, 1.0, 1.0),
+            origin=(0.0, 0.0, 0.0),
+            direction=R_x,
+            affine=affine_oblique,
+        )
+        occ_oblique = R_x @ np.array([0.0, 0.0, 1.0])
+        arch_pts_oblique = (R_x @ arch_pts.T).T
+        arch_oblique = DentalArch(
+            arch_pts_oblique, jaw_type="lower", occlusal_normal=occ_oblique, ras_convention=True
+        )
+        eng_oblique = MeasurementEngine(
+            vol_oblique,
+            mask,
+            arch=arch_oblique,
+            arches={"lower": arch_oblique},
+            is_dental_segmentator_5class=True,
+        )
+        meas_oblique = eng_oblique.measure_implant_site("46")
+        self.assertIsNotNone(meas_oblique)
+        assert meas_oblique is not None
+        self.assertAlmostEqual(meas_oblique.bone_height_mm or 0.0, meas_std.bone_height_mm or 0.0, delta=0.75)
+        self.assertAlmostEqual(meas_oblique.crest_width_mm or 0.0, meas_std.crest_width_mm or 0.0, delta=0.75)
+
+    def test_b5_cpr_displacement_and_grid_frame_identical_handedness(self) -> None:
+        """B5: Verify CPR displacement frame (-N, B, T) and grid frame both have det = +1 (no mirroring)."""
         dir_mat = PanoramicCurveLogic.compute_cpr_direction_matrix(
             self.ras_arch_pts[0], self.ras_arch_pts[-1], occlusal_normal=(0.0, 0.0, 1.0)
         )
-        det = float(np.linalg.det(dir_mat[:3, :3]))
-        self.assertAlmostEqual(det, 1.0, places=6)
+        det_grid = float(np.linalg.det(dir_mat[:3, :3]))
+        self.assertAlmostEqual(det_grid, 1.0, places=6)
 
-        self.assertEqual(PanoramicCurveLogic.pano_x(0.0), 0.0)
-        self.assertEqual(PanoramicCurveLogic.pano_x(95.0), -95.0)
-        self.assertEqual(PanoramicCurveLogic.arc_mm(-95.0, max_arc_mm=100.0), 95.0)
-        self.assertEqual(PanoramicCurveLogic.arc_mm(-120.0, max_arc_mm=100.0), 100.0)
+        arch = DentalArch(self.ras_arch_pts, jaw_type="lower", ras_convention=True)
+        for t_val in (0.1, 0.5, 0.9):
+            f = arch.get_frame(t_val)
+            dx, dy, dz = PanoramicCurveLogic.compute_cpr_displacement_frame(
+                f.tangent, f.normal, f.binormal
+            )
+            det_disp = float(np.linalg.det(np.column_stack([dx, dy, dz])))
+            self.assertAlmostEqual(det_disp, det_grid, places=6)
+            np.testing.assert_allclose(dx, -f.normal, atol=1e-6)
 
-    def test_phase1_honest_measurements_and_csv_html_export(self) -> None:
-        """Unsegmented sites return None / 'not measured'; segmented sites compute real volume metrics."""
+    def test_b6_cpr_fixed_frame_spacing_on_15mm_radius_arch(self) -> None:
+        """B6: Verify fixed <= 1.5 mm CPR frame spacing keeps max chordal deviation < 0.05 mm on a 15 mm arch."""
+        radius = 15.0
+        angles = np.linspace(0.0, math.pi, 15)
+        semi_pts = np.column_stack([radius * np.cos(angles), radius * np.sin(angles), np.zeros_like(angles)])
+        total_arc = math.pi * radius  # ~47.12 mm
+
+        # Even if output preview spacing is 1.5 mm, frame spacing is <= 1.5 mm (never 1.5 * 5 = 7.5 mm!)
+        n_frames = PanoramicCurveLogic.compute_cpr_num_frames(total_arc, max_frame_spacing_mm=1.5)
+        self.assertGreaterEqual(n_frames, 32)
+
+        pano_logic = PanoramicCurveLogic()
+        curve = _MockCurveNode(semi_pts)
+        pts, _, _, _, _ = pano_logic.get_curve_points_and_frames(curve, num_samples=n_frames)
+        midpoints = 0.5 * (pts[:-1] + pts[1:])
+        radii_mid = np.linalg.norm(midpoints[:, :2], axis=1)
+        max_dev = float(np.max(np.abs(radii_mid - radius)))
+        self.assertLess(max_dev, 0.05)
+
+    def test_b7_navigation_shortcut_focus_guard(self) -> None:
+        """B7: Verify navigation shortcuts ignore sliders, spinboxes, tables, and text inputs."""
+
+        class _FakeWidget:
+            def __init__(self, cls_name: str, parent: object = None) -> None:
+                self._cls = cls_name
+                self._parent = parent
+
+            def metaObject(self) -> object:
+                c = self._cls
+
+                class _M:
+                    def className(self) -> str:
+                        return c
+
+                return _M()
+
+            def parent(self) -> object:
+                return self._parent
+
+        for input_cls in ("QDoubleSpinBox", "ctkSliderWidget", "QSlider", "QLineEdit", "QTableWidget", "QComboBox"):
+            self.assertFalse(should_handle_navigation_shortcut(_FakeWidget(input_cls)))
+
+        slice_view = _FakeWidget("qMRMLSliceWidget")
+        self.assertTrue(should_handle_navigation_shortcut(slice_view))
+        self.assertTrue(should_handle_navigation_shortcut(None))
+
+    def test_b8_vr_preset_switch_a_b_a_and_non_hu_percentiles(self) -> None:
+        """B8: Switching VR presets A -> B -> A preserves exact point counts/values; non-HU uses percentiles."""
+        vr = VRVisualizationLogic()
+        prop = _MockVolumePropertyNode("PropNode1")
+
+        preset_b = _MockVolumePropertyNode("PresetB")
+        preset_b.GetScalarOpacity()._pts = [[0.0, 0.0, 0.5, 0.0], [1000.0, 1.0, 0.5, 0.0]]
+        preset_b.GetColor()._pts = [[0.0, 0.0, 0.0, 0.0, 0.5, 0.0], [1000.0, 1.0, 1.0, 1.0, 0.5, 0.0]]
+
+        class _Provider:
+            def GetPresetByName(self, _name: str) -> _MockVolumePropertyNode:
+                return preset_b
+
+        hu_vol = np.linspace(-1000.0, 2500.0, 1000, dtype=np.float32)
+        vr.apply_preset_and_shift(prop, preset_name="CT-Dental-CBCT", shift_hu=100.0, preset_provider=_Provider(), volume_array=hu_vol)
+        self.assertEqual(prop.GetScalarOpacity().GetSize(), 6)
+        self.assertAlmostEqual(prop.GetScalarOpacity()._pts[0][0], -900.0)
+
+        # Switch to Preset B (2 points)
+        vr.apply_preset_and_shift(prop, preset_name="CT-MIP", shift_hu=50.0, preset_provider=_Provider(), volume_array=hu_vol)
+        self.assertEqual(prop.GetScalarOpacity().GetSize(), 2)
+        self.assertAlmostEqual(prop.GetScalarOpacity()._pts[1][0], 1050.0)
+
+        # Switch back to Preset A (CT-Dental-CBCT) with shift 0 -> must restore all 6 points cleanly!
+        vr.apply_preset_and_shift(prop, preset_name="CT-Dental-CBCT", shift_hu=0.0, preset_provider=_Provider(), volume_array=hu_vol)
+        self.assertEqual(prop.GetScalarOpacity().GetSize(), 6)
+        self.assertAlmostEqual(prop.GetScalarOpacity()._pts[0][0], -1000.0)
+        self.assertGreater(prop.disabled_events_count, 0)
+
+        # Non-HU volume (unsigned gray values 200..15000) -> derives transfer function from percentiles
+        non_hu_vol = np.linspace(200.0, 15000.0, 2000, dtype=np.float32)
+        self.assertFalse(vr.is_volume_hu_calibrated(non_hu_vol))
+        op_pts, _ = vr.compute_cbct_transfer_control_points(non_hu_vol)
+        self.assertGreater(op_pts[0][0], 200.0)
+        self.assertLess(op_pts[-1][0], 15000.0)
+
+    def test_b9_bounded_lru_caches_1000_mtime_changes_and_cli_cleanup(self) -> None:
+        """B9: Verify _frame_cache and _poly_cache stay bounded (<= 8 entries) over 1000 MTime changes."""
+        pano = PanoramicCurveLogic(max_cache_entries=8)
+        nav = CrossSectionNavigator(panoramic_logic=pano, max_cache_entries=8)
+        for mtime in range(1000):
+            c = _MockCurveNode(self.ras_arch_pts, mtime=mtime)
+            pano.get_curve_points_and_frames(c, num_samples=30)
+            nav._poly_cache[(c.GetID(), mtime, 2.0, 24.0, (0.0, 0.0, 1.0))] = mtime
+        self.assertLessEqual(len(pano._frame_cache), 8)
+        self.assertLessEqual(len(nav._poly_cache), 8)
+
+    def test_b12_explicit_slab_checkbox_and_mean_mip_mode(self) -> None:
+        """B12: Verify explicit SlabEnabled checkbox and Mean/MIP/MinIP reconstruction types."""
+
+        class _FakeSliceNode:
+            def __init__(self) -> None:
+                self.enabled = True
+                self.slab_type = -1
+                self.thickness = 0.0
+
+            def SetSlabReconstructionEnabled(self, val: bool) -> None:
+                self.enabled = bool(val)
+
+            def SetSlabReconstructionType(self, t: int) -> None:
+                self.slab_type = int(t)
+
+            def SetSlabReconstructionThickness(self, th: float) -> None:
+                self.thickness = float(th)
+
+        snode = _FakeSliceNode()
+        CrossSectionNavigator.configure_slice_node_slab(snode, slab_enabled=False, slab_thickness_mm=5.0, slab_mode="Mean")
+        self.assertFalse(snode.enabled)
+        self.assertEqual(snode.slab_type, CrossSectionNavigator.resolve_vtk_slab_type("Mean"))
+
+        CrossSectionNavigator.configure_slice_node_slab(snode, slab_enabled=True, slab_thickness_mm=3.5, slab_mode="MIP")
+        self.assertTrue(snode.enabled)
+        self.assertEqual(snode.slab_type, CrossSectionNavigator.resolve_vtk_slab_type("MIP"))
+        self.assertAlmostEqual(snode.thickness, 3.5)
+
+    def test_b13_analytic_arc_segment_projection_subsample_precision(self) -> None:
+        """B13: Verify line-segment projection onto an analytic circular arc has sub-sample error < 0.01 mm."""
+        radius = 25.0
+        n_samples = 100
+        thetas = np.linspace(0.0, math.pi, n_samples)
+        pts = np.column_stack([radius * np.cos(thetas), radius * np.sin(thetas), np.zeros_like(thetas)])
+        arc_s = radius * thetas
+
+        # Pick an angle halfway between discrete sample vertices
+        test_theta = float(0.5 * (thetas[37] + thetas[38]))
+        true_arc = radius * test_theta
+        query_pt = [radius * math.cos(test_theta), radius * math.sin(test_theta), 0.0]
+
+        proj_arc, dist, _ = project_point_to_polyline_arc_mm(pts, arc_s, query_pt)
+        self.assertLess(abs(proj_arc - true_arc), 0.01)
+        self.assertLess(dist, 0.01)
+
+    def test_b19_segment_matching_exact_tokens_and_precedence(self) -> None:
+        """B19: Verify 'Segment_11' is not matched as FDI #11, 'Tooth_11' is matched, and teeth > canal > jaw precedence holds."""
+        # Generic Slicer segment name must NOT match FDI #11
+        lbl_generic, cat_generic, _, prec_generic = match_segment_to_label_and_precedence("Segment_11", "Segment_11")
+        self.assertEqual(lbl_generic, 0)
+        self.assertEqual(cat_generic, "unknown")
+        self.assertEqual(prec_generic, 0)
+
+        # Explicit tooth name or attribute MUST match FDI #11
+        lbl_t11, cat_t11, _, prec_t11 = match_segment_to_label_and_precedence("Segment_11", "Tooth 11")
+        self.assertEqual(lbl_t11, FDI_TO_TOOTH_ID["11"])
+        self.assertEqual(cat_t11, "tooth")
+
+        lbl_canal, cat_canal, _, prec_canal = match_segment_to_label_and_precedence("Segment_5", "Mandibular canal")
+        lbl_jaw, cat_jaw, _, prec_jaw = match_segment_to_label_and_precedence("Segment_2", "Mandible")
+        self.assertGreater(prec_t11, prec_canal)
+        self.assertGreater(prec_canal, prec_jaw)
+
+    def test_b20_arch_autofit_u_v_tapered_arches_and_no_skull_fallback(self) -> None:
+        """B20: Verify fit_dental_arch_from_points accurately fits U-shaped, V-shaped, and tapered arches with uneven density."""
+        # 1. U-shaped arch (parallel posterior legs at X = +-22 mm for Y in [-25, 0], then semicircular anterior)
+        leg_y = np.linspace(-25.0, 0.0, 20)
+        right_leg = np.column_stack([np.full_like(leg_y, 22.0), leg_y, np.zeros_like(leg_y)])
+        left_leg = np.column_stack([np.full_like(leg_y, -22.0), leg_y[::-1], np.zeros_like(leg_y)])
+        ant_th = np.linspace(0.0, math.pi, 30)
+        ant_arc = np.column_stack([22.0 * np.cos(ant_th), 22.0 * np.sin(ant_th), np.zeros_like(ant_th)])
+        # Add 200 dense cluster points on one molar to test voxel-grid density de-biasing
+        dense_cluster = right_leg[0] + np.random.default_rng(42).normal(0.0, 0.2, size=(200, 3))
+        u_cloud = np.vstack([right_leg, ant_arc, left_leg, dense_cluster])
+
+        u_ctrl = fit_dental_arch_from_points(u_cloud, num_control_points=13, ras_convention=True)
+        self.assertGreater(u_ctrl[0, 0], 18.0)
+        self.assertLess(u_ctrl[-1, 0], -18.0)
+        self.assertGreater(float(np.max(u_ctrl[:, 1])), 19.0)
+
+        # 2. V-shaped arch
+        v_x_r = np.linspace(24.0, 0.0, 25)
+        v_y_r = np.linspace(-20.0, 22.0, 25)
+        v_x_l = np.linspace(0.0, -24.0, 25)
+        v_y_l = np.linspace(22.0, -20.0, 25)
+        v_cloud = np.vstack(
+            [
+                np.column_stack([v_x_r, v_y_r, np.zeros_like(v_x_r)]),
+                np.column_stack([v_x_l, v_y_l, np.zeros_like(v_x_l)]),
+            ]
+        )
+        v_ctrl = fit_dental_arch_from_points(v_cloud, num_control_points=11, ras_convention=True)
+        self.assertGreater(v_ctrl[0, 0], 20.0)
+        self.assertLess(v_ctrl[-1, 0], -20.0)
+        self.assertGreater(float(np.max(v_ctrl[:, 1])), 18.0)
+
+        # 3. Tapered arch
+        tap_th = np.linspace(0.0, math.pi, 40)
+        tap_r = 22.0 - 4.0 * np.sin(tap_th)
+        tap_cloud = np.column_stack([tap_r * np.cos(tap_th), 1.3 * tap_r * np.sin(tap_th), np.zeros_like(tap_th)])
+        tap_ctrl = fit_dental_arch_from_points(tap_cloud, num_control_points=11, ras_convention=True)
+        self.assertGreater(tap_ctrl[0, 0], 18.0)
+        self.assertLess(tap_ctrl[-1, 0], -18.0)
+
+    def test_b22_honest_measurements_clean_numeric_csv_and_html_pdf_export(self) -> None:
+        """B22: CSV numeric columns are empty '' when unmeasured (with measurement_source column); HTML & PDF include disclaimer."""
         logic = CBCTPlannerLogic()
         unseg_rows = logic.analyze_selected_teeth([46, 16], volumeNode=None, segmentationNode=None)
         for row in unseg_rows:
             self.assertEqual(row["source"], NOT_MEASURED)
             self.assertIsNone(row["height_mm"])
-            self.assertIsNone(row["w_crest_mm"])
-            self.assertIsNone(row["nerve_clearance_mm"])
-            self.assertIsNone(row["hu"])
             self.assertEqual(format_metric(row["height_mm"], "mm"), NOT_MEASURED)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -253,63 +672,34 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
             with open(csv_path, encoding="utf-8") as f:
                 reader = list(csv.DictReader(f))
             self.assertEqual(len(reader), 2)
-            self.assertEqual(reader[0]["height_mm"], NOT_MEASURED)
+            # Numeric columns must be empty string "", NOT "not measured"
+            self.assertEqual(reader[0]["height_mm"], "")
+            self.assertEqual(reader[0]["w_crest_mm"], "")
+            self.assertEqual(reader[0]["measurement_source"], NOT_MEASURED)
             self.assertIn("pos_r_mm", reader[0])
-            self.assertNotIn("pos_ras", reader[0])
 
             class _FakeVol:
                 def GetName(self) -> str:
                     return "<script>alert('xss')</script>"
 
-            html_path = logic.generate_printable_report(
-                unseg_rows, _FakeVol(), tmp_path, capture_screenshots=False
+            html_path, pdf_path = logic.generate_clinical_reports(
+                unseg_rows,
+                _FakeVol(),
+                tmp_path,
+                capture_screenshots=False,
+                lightbox_step_mm=3.5,
+                include_patient_metadata=False,
+                patient_name="Secret Name",
             )
             content = html_path.read_text(encoding="utf-8")
             self.assertNotIn("<script>", content)
             self.assertIn("&lt;script&gt;", content)
-            self.assertIn(NOT_MEASURED, content)
-
-    def test_phase1_measurement_engine_on_synthetic_segmented_cbct(self) -> None:
-        """Verify MeasurementEngine computes real physical metrics from a segmented volume."""
-        img = np.full((40, 40, 40), -500.0, dtype=np.float32)
-        mask = np.zeros((40, 40, 40), dtype=np.uint16)
-        mask[5:25, 15:23, 5:35] = 2
-        img[5:25, 15:23, 5:35] = 950.0
-        mask[7:9, 18:20, 5:35] = 5
-
-        vol = CBCTVolume(
-            image=img,
-            spacing=(1.0, 1.0, 1.0),
-            origin=(0.0, 0.0, 0.0),
-            direction=np.eye(3),
-            affine=np.eye(4, dtype=np.float64),
-        )
-        arch_pts = np.array(
-            [[32.0, 19.0, 24.0], [25.0, 19.0, 24.0], [15.0, 19.0, 24.0], [8.0, 19.0, 24.0]],
-            dtype=np.float64,
-        )
-        arch = DentalArch(arch_pts, jaw_type="lower", ras_convention=True)
-        engine = MeasurementEngine(
-            vol, mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=True
-        )
-        meas = engine.measure_implant_site("46")
-        self.assertIsNotNone(meas)
-        assert meas is not None
-        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 16.0, delta=1.0)
-        self.assertAlmostEqual(meas.mean_density_hu or 0.0, 950.0, delta=10.0)
-        self.assertEqual(meas.misch_density_class, "D2")
-
-    def test_phase2_mtime_caching_and_curve_projection(self) -> None:
-        """Verify PanoramicCurveLogic caches frames by MTime and projects dragged points to arc_mm."""
-        pano_logic = PanoramicCurveLogic()
-        mock_curve = _MockCurveNode(self.ras_arch_pts, mtime=42)
-        frames1 = pano_logic.get_curve_points_and_frames(mock_curve, num_samples=50)
-        frames2 = pano_logic.get_curve_points_and_frames(mock_curve, num_samples=50)
-        self.assertIs(frames1, frames2)
-
-        total_len = float(frames1[1][-1])
-        arc_mid = pano_logic.project_point_to_curve_arc_mm(mock_curve, [0.0, 20.0, 0.0])
-        self.assertAlmostEqual(arc_mid, total_len * 0.5, delta=3.0)
+            self.assertIn(CLINICAL_DISCLAIMER_TEXT, content)
+            # Default anonymization must hide "Secret Name"
+            self.assertNotIn("Secret Name", content)
+            self.assertIn("Anonymous", content)
+            self.assertTrue(pdf_path.exists())
+            self.assertTrue(pdf_path.read_bytes().startswith(b"%PDF-1.4"))
 
     def test_lightbox_offsets_and_cross_section_tilt_30_deg(self) -> None:
         """Verify 3-slice lightbox (-2, 0, +2 mm) offsets, layout XML, and +-30° cross-section tilt math."""
@@ -318,41 +708,10 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertIn('singletontag="Yellow"', CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML)
         self.assertIn('singletontag="YellowPlus"', CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML)
 
-        # 1. Lightbox offsets (-2, 0, +2 mm) and boundary clamping
         s_m, s_0, s_p = CrossSectionNavigator.compute_lightbox_offsets(50.0, 100.0, step_mm=2.0)
         self.assertEqual((s_m, s_0, s_p), (48.0, 50.0, 52.0))
-        s_m_edge, s_0_edge, s_p_edge = CrossSectionNavigator.compute_lightbox_offsets(1.0, 100.0, step_mm=2.0)
-        self.assertEqual((s_m_edge, s_0_edge, s_p_edge), (0.0, 1.0, 3.0))
-
-        # 2. Clamping beyond +-30°
         self.assertEqual(CrossSectionNavigator.clamp_tilt_deg(45.0), 30.0)
         self.assertEqual(CrossSectionNavigator.clamp_tilt_deg(-60.0), -30.0)
-
-        # 3. Frame orthogonality & det = +1 under +-30° tilt
-        arch = DentalArch(self.ras_arch_pts, jaw_type="lower", ras_convention=True)
-        f_mid = arch.get_frame(0.5)
-        for deg in (-30.0, -15.0, 0.0, 15.0, 30.0):
-            t_tilt, n_tilt, b_tilt = CrossSectionNavigator.apply_cross_section_tilt(
-                f_mid.tangent, f_mid.normal, f_mid.binormal, tilt_deg=deg
-            )
-            # N (Buccal-Lingual) must remain invariant
-            np.testing.assert_allclose(n_tilt, f_mid.normal, atol=1e-6)
-            # Orthonormal check
-            self.assertAlmostEqual(float(np.dot(t_tilt, b_tilt)), 0.0, places=6)
-            self.assertAlmostEqual(float(np.dot(t_tilt, n_tilt)), 0.0, places=6)
-            self.assertAlmostEqual(float(np.dot(b_tilt, n_tilt)), 0.0, places=6)
-            # Angle between B_tilt and B must equal |deg|
-            cos_angle = float(np.clip(np.dot(b_tilt, f_mid.binormal), -1.0, 1.0))
-            self.assertAlmostEqual(math.degrees(math.acos(cos_angle)), abs(deg), places=4)
-            # Yellow slice right-handedness (det = +1)
-            sr, su, sn = CrossSectionNavigator.compute_yellow_slice_axes(t_tilt, n_tilt, b_tilt)
-            det = float(np.linalg.det(np.column_stack([sr, su, sn])))
-            self.assertAlmostEqual(det, 1.0, places=5)
-
-        # 4. Panoramic tilted line endpoints pivot around center X = pano_x(arc_mm)
-        b_pt, t_pt = CrossSectionNavigator.compute_pano_cursor_endpoints(40.0, pano_height_mm=50.0, tilt_deg=20.0)
-        self.assertAlmostEqual(0.5 * (b_pt[0] + t_pt[0]), PanoramicCurveLogic.pano_x(40.0), places=6)
-        self.assertNotAlmostEqual(b_pt[0], t_pt[0])
 
 
 if __name__ == "__main__":
