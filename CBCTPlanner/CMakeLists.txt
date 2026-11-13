@@ -9,6 +9,13 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/VRVisualization.py
   ${MODULE_NAME}Lib/PanoramicCurveLogic.py
   ${MODULE_NAME}Lib/CrossSectionNavigator.py
+  ${MODULE_NAME}Lib/core/__init__.py
+  ${MODULE_NAME}Lib/core/arch_detector.py
+  ${MODULE_NAME}Lib/core/labels.py
+  ${MODULE_NAME}Lib/core/mask_centerline.py
+  ${MODULE_NAME}Lib/core/measurements.py
+  ${MODULE_NAME}Lib/core/tooth_localizer.py
+  ${MODULE_NAME}Lib/core/volume_loader.py
   )
 
 set(MODULE_PYTHON_RESOURCES
