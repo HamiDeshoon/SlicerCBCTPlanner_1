@@ -144,6 +144,8 @@ from CBCTPlannerLib.core.arch_detector import (
 from CBCTPlannerLib.core.labels import (
     ANATOMICAL_MESIODISTAL_WIDTHS_MM,
     FDI_TO_TOOTH_ID,
+    LOWER_JAW_ID,
+    UPPER_JAW_ID,
     MANDIBULAR_TEETH_IDS,
     MAXILLARY_TEETH_IDS,
     match_segment_to_label_and_precedence,
@@ -2601,8 +2603,28 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                         tz, ty, tx = np.where(mask == tid)
                         if len(tx) > 0:
                             centroids.append(vol.voxel_to_world([tx.mean(), ty.mean(), tz.mean()]))
-                    if len(centroids) >= 4:
-                        return np.array(centroids, dtype=np.float64)
+                      pts_list = list(centroids)
+                      jaw_ids = (
+                          (LOWER_JAW_ID, UPPER_JAW_ID)
+                          if jaw_low.startswith("sh")
+                          else ((UPPER_JAW_ID,) if jaw_low.startswith("up") else (LOWER_JAW_ID,))
+                      )
+                      jz, jy, jx = np.where(np.isin(mask, jaw_ids))
+                      if len(jx) > 0:
+                          step = max(1, len(jx) // 4000)
+                          jaw_vox = np.column_stack([jx[::step], jy[::step], jz[::step]])
+                          jaw_world = vol.voxel_to_world(jaw_vox)
+                          if len(centroids) > 0:
+                              min_tooth_a = float(np.min(np.asarray(centroids, dtype=np.float64)[:, 1]))
+                              post_jaw = jaw_world[jaw_world[:, 1] < min_tooth_a]
+                              if len(post_jaw) > 0:
+                                  post_step = max(1, len(post_jaw) // 80)
+                                  pts_list.extend(post_jaw[::post_step].tolist())
+                          else:
+                              jaw_step = max(1, len(jaw_world) // 120)
+                         pts_list.extend(jaw_world[::jaw_step].tolist())
+                    if len(pts_list >= 4:
+                        return np.array(pts_list, dtype=np.float64)
         return None
 
     def auto_fit_arch_for_jaw(
