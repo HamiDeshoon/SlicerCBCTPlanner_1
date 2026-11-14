@@ -330,7 +330,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.segmentationSelector.setToolTip(
             "Optional: Select a DentalSegmentator or ToothFairy3 segmentation node for automated measurements and 3D styling."
         )
-        step1Layout.addRow("Segmentation (Optional):", self.segmentationSelector)
+        step1Layout.addRow("Segmentation (Optional):", self.segmentationSelector); self.btnLoadExternalMask = qt.QPushButton("Load AI Mask (.nii.gz/.nrrd)"); self.btnFlipSIOrientation = qt.QPushButton("Flip S-I Orientation (ToothFairy)"); self.panoFlipVerticalCheck = qt.QCheckBox("Flip OPG Vertically (S-I)"); maskRow = qt.QHBoxLayout(); maskRow.addWidget(self.btnLoadExternalMask); maskRow.addWidget(self.btnFlipSIOrientation); maskRow.addWidget(self.panoFlipVerticalCheck); step1Layout.addRow("AI Mask & Orientation:", maskRow)
 
         layoutBtnRow = qt.QHBoxLayout()
         self.btnDentalLightbox = qt.QPushButton("3-Slice Lightbox (-2 / 0 / +2 mm)")
@@ -465,15 +465,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.panoThicknessSpin.minimum = 2.0
         self.panoThicknessSpin.maximum = 45.0
         self.panoThicknessSpin.singleStep = 1.0
-        self.panoThicknessSpin.value = 18.0
+        self.panoThicknessSpin.value = 25.0
         self.panoThicknessSpin.suffix = " mm"
         self.panoThicknessSpin.setToolTip("Buccolingual slab thickness for panoramic projection.")
 
         self.panoHeightSpin = qt.QDoubleSpinBox()
         self.panoHeightSpin.minimum = 20.0
-        self.panoHeightSpin.maximum = 120.0
+        self.panoHeightSpin.maximum = 220.0
         self.panoHeightSpin.singleStep = 5.0
-        self.panoHeightSpin.value = 50.0
+        self.panoHeightSpin.value = 120.0
         self.panoHeightSpin.suffix = " mm"
         self.panoHeightSpin.setToolTip("Inferior-superior vertical height of the panoramic radiograph (F3).")
 
@@ -851,7 +851,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.volumeSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onVolumeNodeChanged)
         self.segmentationSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSegmentationNodeChanged)
-        self.btnDentalLightbox.clicked.connect(self.onSetDentalLightboxLayout)
+        self.btnDentalLightbox.clicked.connect(self.onSetDentalLightboxLayout); self.btnLoadExternalMask.clicked.connect(self.onLoadExternalMask); self.btnFlipSIOrientation.clicked.connect(self.onFlipSIOrientation)
         self.btnDentalLayout.clicked.connect(self.onSetDentalLayout)
         self.btnStandardMpr.clicked.connect(self.onSetStandardMpr)
         self.btnPlaceOcclusalPts.clicked.connect(self.onPlaceOcclusalPoints)
@@ -1193,6 +1193,27 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if self.selectedTeeth:
                 self.onRefreshAllSelectedTeeth()
 
+    def onLoadExternalMask(self) -> None:
+        path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), "Load Pre-computed AI Mask", "", "Mask Volumes (*.nii.gz *.nii *.nrrd *.seg.nrrd);;All Files (*)")
+        if not path: return
+        segNode = slicer.util.loadSegmentation(path) if path.endswith(".seg.nrrd") else None
+        if segNode is None:
+            lbl = slicer.util.loadLabelVolume(path)
+            segNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+            slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(lbl, segNode)
+            slicer.mrmlScene.RemoveNode(lbl)
+        self.segmentationSelector.setCurrentNode(segNode)
+
+    def onFlipSIOrientation(self) -> None:
+        m = vtk.vtkMatrix4x4(); m.SetElement(2, 2, -1.0)
+        t = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "_TempFlipSI")
+        t.SetMatrixTransformToParent(m)
+        for n in (self.volumeSelector.currentNode(), self.segmentationSelector.currentNode()):
+            if n is not None:
+                n.SetAndObserveTransformNodeID(t.GetID())
+                slicer.vtkMRMLTransformLogic().hardenTransform(n)
+        slicer.mrmlScene.RemoveNode(t); slicer.util.resetSliceViews()
+
     def onSetDentalLightboxLayout(self) -> None:
         volNode = self.volumeSelector.currentNode()
         registerAndSetDentalLightboxLayout(volumeNode=volNode)
@@ -1453,7 +1474,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 on_complete=_on_done,
                 on_progress=_on_progress,
                 parameterNode=self._parameterNode,
-                force_fit=False,
+                force_fit=False, flip_vertical=self.panoFlipVerticalCheck.checked,
             )
         except Exception as exc:
             self.panoProgressBar.setVisible(False)

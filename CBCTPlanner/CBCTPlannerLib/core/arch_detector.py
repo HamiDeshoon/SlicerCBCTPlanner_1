@@ -387,7 +387,7 @@ class DentalArch:
         radii = np.linalg.norm(pts - centroid, axis=1)
         median_radius = float(np.median(radii))
         if median_radius > 1e-6:
-            in_band = radii < 1.45 * median_radius
+            in_band = radii < 2.6 * median_radius
             if in_band.sum() >= 8:
                 pts = pts[in_band]
 
@@ -396,7 +396,8 @@ class DentalArch:
         mean_z = float(np.mean(z_indices))
         step = max(1, len(ordered_indices) // 16)
         sub_indices = ordered_indices[::step]
-
+        if ordered_indices[-1] not in sub_indices:
+            sub_indices.append(ordered_indices[-1])
         sub_pts = pts[sub_indices]
         vox_pts = np.column_stack([sub_pts[:, 0], sub_pts[:, 1], np.full(len(sub_pts), mean_z)])
         ones = np.ones((len(vox_pts), 1), dtype=np.float64)
