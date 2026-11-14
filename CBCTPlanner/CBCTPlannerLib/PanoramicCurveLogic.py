@@ -280,7 +280,7 @@ class PanoramicCurveLogic:
                 pts[i] = buf
         return pts
 
-    def 50.0(
+    def get_curve_points_and_frames(
         self,
         curveNode: Any,
         num_samples: int = 200,
@@ -681,6 +681,7 @@ class PanoramicCurveLogic:
         on_progress: Optional[Callable[[int], None]] = None,
         parameterNode: Any = None,
         force_fit: bool = False,
+      flip_vertical: bool = False,
     ) -> Tuple[Optional[Any], Any]:
         """O1, B5, B6, B10, F3: Generate Curved Planar Reformatted (CPR) Panoramic Radiograph in-process.
 
@@ -722,6 +723,7 @@ class PanoramicCurveLogic:
                 spacing_mm=spacing_mm,
                 buccolingual_offset_mm=buccolingual_offset_mm,
                 projection_mode=projection_mode,
+              flip_vertical=flip_vertical,
             )
             self.last_generation_elapsed_sec = time.perf_counter() - t0
             panoNode = self._populate_panoramic_node_from_array(
