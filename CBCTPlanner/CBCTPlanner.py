@@ -144,6 +144,8 @@ from CBCTPlannerLib.core.arch_detector import (
 from CBCTPlannerLib.core.labels import (
     ANATOMICAL_MESIODISTAL_WIDTHS_MM,
     FDI_TO_TOOTH_ID,
+    LOWER_JAW_ID,
+    UPPER_JAW_ID,
     MANDIBULAR_TEETH_IDS,
     MAXILLARY_TEETH_IDS,
     match_segment_to_label_and_precedence,
@@ -331,6 +333,36 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "Optional: Select a DentalSegmentator or ToothFairy3 segmentation node for automated measurements and 3D styling."
         )
         step1Layout.addRow("Segmentation (Optional):", self.segmentationSelector); self.btnLoadExternalMask = qt.QPushButton("Load AI Mask (.nii.gz/.nrrd)"); self.btnFlipSIOrientation = qt.QPushButton("Flip S-I Orientation (ToothFairy)"); self.panoFlipVerticalCheck = qt.QCheckBox("Flip OPG Vertically (S-I)"); maskRow = qt.QHBoxLayout(); maskRow.addWidget(self.btnLoadExternalMask); maskRow.addWidget(self.btnFlipSIOrientation); maskRow.addWidget(self.panoFlipVerticalCheck); step1Layout.addRow("AI Mask & Orientation:", maskRow)
+        self.nnunetBox = ctk.ctkCollapsibleButton()
+        self.nnunetBox.text = "AI Segmentation (nnU-Net ToothFairy3)"
+        self.nnunetBox.collapsed = False
+        step1Layout.addRow(self.nnunetBox)
+        nnunetLayout = qt.QFormLayout(self.nnunetBox)
+
+        modelRow = qt.QHBoxLayout()
+        self.nnunetModelPathEdit = qt.QLineEdit()
+        self.nnunetModelPathEdit.setPlaceholderText("Path to nnU-Net model folder or checkpoint (.pth)")
+        self.btnBrowseNNUNetModel = qt.QPushButton("Browse...")
+        modelRow.addWidget(self.nnunetModelPathEdit)
+        modelRow.addWidget(self.btnBrowseNNUNetModel)
+        nnunetLayout.addRow("Model / Checkpoint:", modelRow)
+
+        self.nnunetDeviceCombo = qt.QComboBox()
+        self.nnunetDeviceCombo.addItems([
+            "Auto (GPU FP32 / CPU INT8)",
+            "CPU (INT8 Quantized)",
+            "GPU (FP32 Full Precision)",
+        ])
+        nnunetLayout.addRow("Compute & Precision:", self.nnunetDeviceCombo)
+
+        self.nnunetFoldCombo = qt.QComboBox()
+        self.nnunetFoldCombo.addItems(["0", "all", "1", "2", "3", "4"])
+        nnunetLayout.addRow("Fold:", self.nnunetFoldCombo)
+
+        self.btnRunNNUNetInference = qt.QPushButton("Run nnU-Net Inference & Auto-Plan (ToothFairy3)")
+        self.btnApplyMaskPipeline = qt.QPushButton("Apply Mask to Full Planning Pipeline")
+        nnunetLayout.addRow(self.btnRunNNUNetInference)
+        nnunetLayout.addRow(self.btnApplyMaskPipeline)
 
         layoutBtnRow = qt.QHBoxLayout()
         self.btnDentalLightbox = qt.QPushButton("3-Slice Lightbox (-2 / 0 / +2 mm)")
@@ -851,6 +883,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.volumeSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onVolumeNodeChanged)
         self.segmentationSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSegmentationNodeChanged)
+        self.btnBrowseNNUNetModel.clicked.connect(self.onBrowseNNUNetModelClicked)
+        self.btnRunNNUNetInference.clicked.connect(self.onRunNNUNetInferenceClicked)
+        self.btnApplyMaskPipeline.clicked.connect(self.onApplyMaskPipelineClicked)
         self.btnDentalLightbox.clicked.connect(self.onSetDentalLightboxLayout); self.btnLoadExternalMask.clicked.connect(self.onLoadExternalMask); self.btnFlipSIOrientation.clicked.connect(self.onFlipSIOrientation)
         self.btnDentalLayout.clicked.connect(self.onSetDentalLayout)
         self.btnStandardMpr.clicked.connect(self.onSetStandardMpr)
@@ -1192,6 +1227,88 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.updateGUIFromParameterNode()
             if self.selectedTeeth:
                 self.onRefreshAllSelectedTeeth()
+    def onBrowseNNUNetModelClicked(self) -> None:
+        path = qt.QFileDialog.getExistingDirectory(self.parent, "Select nnU-Net ToothFairy3 Model Folder")
+        if not path:
+            path = qt.QFileDialog.getOpenFileName(
+                self.parent, "Select nnU-Net Checkpoint", "", "PyTorch Checkpoints (*.pth *.pt);;All Files (*)"
+            )
+        if path:
+            self.nnunetModelPathEdit.setText(path)
+
+    def onRunNNUNetInferenceClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        if volNode is None:
+            slicer.util.warningDisplay("Please select an input CBCT volume first.")
+            return
+        model_path = self.nnunetModelPathEdit.text.strip()
+        if not model_path:
+            slicer.util.warningDisplay("Please specify a ToothFairy3 nnU-Net model folder or checkpoint.")
+            return
+        device_label = self.nnunetDeviceCombo.currentText
+        if "CPU" in device_label and "Auto" not in device_label:
+            device_mode = "cpu_int8"
+        elif "GPU" in device_label and "Auto" not in device_label:
+            device_mode = "gpu_fp32"
+        else:
+            device_mode = "auto"
+        fold = self.nnunetFoldCombo.currentText.strip() or "0"
+        try:
+            from CBCTPlannerLib.AdvancedTools import run_nnunet_toothfairy3_inference
+            def _progress(pct, msg):
+                if hasattr(self, "globalStatusLabel"):
+                    self.globalStatusLabel.setText(f"[{pct}%] {msg}")
+            segNode = run_nnunet_toothfairy3_inference(
+                volNode,
+                model_path,
+                device_mode=device_mode,
+                fold=fold,
+                progress_callback=_progress,
+            )
+            if segNode is not None:
+                self.segmentationSelector.setCurrentNode(segNode)
+                self.onApplyMaskPipelineClicked()
+        except Exception as exc:
+            slicer.util.errorDisplay(f"nnU-Net ToothFairy3 inference failed:\n{exc}")
+
+    def onApplyMaskPipelineClicked(self) -> None:
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        if segNode is None or volNode is None:
+            slicer.util.warningDisplay("Please select both a CBCT volume and a ToothFairy3 segmentation.")
+            return
+        from CBCTPlannerLib.core.labels import LABELS_BY_ID, match_segment_to_label_and_precedence
+        segmentation = segNode.GetSegmentation()
+        detected_teeth = []
+        for idx in range(segmentation.GetNumberOfSegments()):
+            seg = segmentation.GetNthSegment(idx)
+            sid = segmentation.GetNthSegmentID(idx)
+            label_id, category, _, _ = match_segment_to_label_and_precedence(seg.GetName(), sid)
+            info = LABELS_BY_ID.get(label_id)
+            if info is not None:
+                seg.SetName(info.name)
+                r, g, b = (float(c) / 255.0 if max(info.color) > 1.0 else float(c) for c in info.color)
+                seg.SetColor(r, g, b)
+                seg.SetTag("CBCTPlanner.LabelID", str(info.id))
+                seg.SetTag("CBCTPlanner.Category", info.category)
+                if info.category == "tooth" or (11 <= info.id <= 48):
+                    seg.SetTag("CBCTPlanner.FDI", str(info.id))
+                    detected_teeth.append(str(info.id))
+        if detected_teeth and hasattr(self, "selectedTeeth"):
+            for fdi in detected_teeth:
+                if fdi not in self.selectedTeeth:
+                    self.selectedTeeth.append(fdi)
+        if hasattr(self, "onAutoFitArchClicked"):
+            self.onAutoFitArchClicked()
+        if hasattr(self, "onGeneratePanoramicClicked"):
+            self.onGeneratePanoramicClicked()
+        if hasattr(self, "onExtractCanalsClicked"):
+            self.onExtractCanalsClicked()
+        if hasattr(self, "onRefreshAllSelectedTeeth"):
+            self.onRefreshAllSelectedTeeth()
+        if hasattr(self, "globalStatusLabel"):
+            self.globalStatusLabel.setText("ToothFairy3 mask-driven planning pipeline complete.")
+
 
     def onLoadExternalMask(self) -> None:
         path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), "Load Pre-computed AI Mask", "", "Mask Volumes (*.nii.gz *.nii *.nrrd *.seg.nrrd);;All Files (*)")
@@ -2486,8 +2603,28 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                         tz, ty, tx = np.where(mask == tid)
                         if len(tx) > 0:
                             centroids.append(vol.voxel_to_world([tx.mean(), ty.mean(), tz.mean()]))
-                    if len(centroids) >= 4:
-                        return np.array(centroids, dtype=np.float64)
+                      pts_list = list(centroids)
+                      jaw_ids = (
+                          (LOWER_JAW_ID, UPPER_JAW_ID)
+                          if jaw_low.startswith("sh")
+                          else ((UPPER_JAW_ID,) if jaw_low.startswith("up") else (LOWER_JAW_ID,))
+                      )
+                      jz, jy, jx = np.where(np.isin(mask, jaw_ids))
+                      if len(jx) > 0:
+                          step = max(1, len(jx) // 4000)
+                          jaw_vox = np.column_stack([jx[::step], jy[::step], jz[::step]])
+                          jaw_world = vol.voxel_to_world(jaw_vox)
+                          if len(centroids) > 0:
+                              min_tooth_a = float(np.min(np.asarray(centroids, dtype=np.float64)[:, 1]))
+                              post_jaw = jaw_world[jaw_world[:, 1] < min_tooth_a]
+                              if len(post_jaw) > 0:
+                                  post_step = max(1, len(post_jaw) // 80)
+                                  pts_list.extend(post_jaw[::post_step].tolist())
+                          else:
+                              jaw_step = max(1, len(jaw_world) // 120)
+                         pts_list.extend(jaw_world[::jaw_step].tolist())
+                    if len(pts_list >= 4:
+                        return np.array(pts_list, dtype=np.float64)
         return None
 
     def auto_fit_arch_for_jaw(

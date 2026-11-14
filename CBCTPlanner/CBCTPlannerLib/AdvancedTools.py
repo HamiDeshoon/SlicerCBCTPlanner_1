@@ -651,3 +651,217 @@ def export_reformatted_dicom_series(
         fallback_path = out_path / f"{series_description}.npy"
         np.save(str(fallback_path), arr)
         return [fallback_path]
+
+
+def run_nnunet_toothfairy3_inference(
+    volumeNode,
+    model_dir_or_ckpt: str,
+    device_mode: str = "auto",
+    fold: str = "0",
+    step_size: float = 0.5,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+):
+    """Run ToothFairy3 nnU-Net inference with CPU INT8 dynamic quantization or GPU FP32."""
+    import json
+    import shutil
+    import tempfile
+    import torch
+    from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+    from .core.labels import LABELS_BY_ID, match_segment_to_label_and_precedence, remap_toothfairy3_array
+
+    def _report(pct: int, msg: str) -> None:
+        if progress_callback is not None:
+            progress_callback(pct, msg)
+        if slicer is not None and hasattr(slicer, "app"):
+            slicer.app.processEvents()
+
+    if volumeNode is None:
+        raise ValueError("Input volumeNode is required for nnU-Net inference.")
+    if not model_dir_or_ckpt:
+        raise ValueError("Model folder or checkpoint path is required.")
+
+    raw_path = Path(model_dir_or_ckpt).expanduser()
+    checkpoint_name = "checkpoint_final.pth"
+    model_folder = raw_path
+    if raw_path.is_file():
+        checkpoint_name = raw_path.name
+        if raw_path.parent.name.startswith("fold_"):
+            model_folder = raw_path.parent.parent
+            if not fold:
+                fold = raw_path.parent.name.replace("fold_", "")
+        else:
+            model_folder = raw_path.parent
+
+    if not model_folder.exists():
+        raise FileNotFoundError(f"nnU-Net model folder not found: {model_folder}")
+
+    dataset_labels = None
+    dataset_json_path = model_folder / "dataset.json"
+    if dataset_json_path.exists():
+        try:
+            with open(dataset_json_path, "r", encoding="utf-8") as fh:
+                dataset_labels = json.load(fh).get("labels")
+        except Exception:
+            dataset_labels = None
+
+    mode = (device_mode or "auto").strip().lower()
+    if mode in ("gpu_fp32", "gpu", "cuda", "fp32"):
+        if not torch.cuda.is_available():
+            raise RuntimeError("GPU FP32 mode requested, but CUDA is not available.")
+        use_gpu = True
+    elif mode in ("cpu_int8", "cpu", "int8"):
+        use_gpu = False
+    else:
+        use_gpu = bool(torch.cuda.is_available())
+
+    fold_str = str(fold).strip()
+    if fold_str.lower() == "all":
+        fold_dirs = sorted(
+            p.name.replace("fold_", "")
+            for p in model_folder.glob("fold_*")
+            if p.is_dir()
+        )
+        use_folds = tuple(int(f) if f.isdigit() else f for f in fold_dirs) if fold_dirs else "all"
+    else:
+        use_folds = (int(fold_str) if fold_str.isdigit() else fold_str,)
+
+    _report(10, "Initializing ToothFairy3 nnU-Net predictor...")
+    if not use_gpu:
+        device = torch.device("cpu")
+        supported = getattr(torch.backends.quantized, "supported_engines", [])
+        if "fbgemm" in supported:
+            torch.backends.quantized.engine = "fbgemm"
+        elif "qnnpack" in supported:
+            torch.backends.quantized.engine = "qnnpack"
+        perform_on_device = False
+    else:
+        device = torch.device("cuda")
+        perform_on_device = True
+
+    predictor = nnUNetPredictor(
+        tile_step_size=float(step_size),
+        use_gaussian=True,
+        use_mirroring=True,
+        perform_everything_on_device=perform_on_device,
+        device=device,
+        verbose=False,
+        verbose_preprocessing=False,
+        allow_tqdm=False,
+    )
+    predictor.initialize_from_trained_model_folder(
+        str(model_folder),
+        use_folds=use_folds,
+        checkpoint_name=checkpoint_name,
+    )
+
+    if not use_gpu:
+        _report(25, "Applying CPU INT8 dynamic quantization...")
+        predictor.network.eval()
+        try:
+            predictor.network = torch.ao.quantization.quantize_dynamic(
+                predictor.network,
+                {torch.nn.Linear, torch.nn.Conv3d, torch.nn.ConvTranspose3d},
+                dtype=torch.qint8,
+            )
+        except Exception:
+            predictor.network = torch.ao.quantization.quantize_dynamic(
+                predictor.network,
+                {torch.nn.Linear},
+                dtype=torch.qint8,
+            )
+    else:
+        _report(25, "Preparing GPU FP32 full-precision network...")
+        predictor.network = predictor.network.float()
+        predictor.network.eval()
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="cbct_tf3_"))
+    pred_label_node = None
+    try:
+        in_dir = tmp_dir / "in"
+        out_dir = tmp_dir / "out"
+        in_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        _report(40, "Exporting CBCT volume with NIfTI RAS/LPS header...")
+        in_file = in_dir / "case_0000.nii.gz"
+        if not slicer.util.saveNode(volumeNode, str(in_file)):
+            raise RuntimeError("Failed to export volumeNode to temporary NIfTI file.")
+
+        _report(55, "Running ToothFairy3 nnU-Net inference...")
+        if use_gpu:
+            with torch.cuda.amp.autocast(enabled=False):
+                predictor.predict_from_files(
+                    str(in_dir),
+                    str(out_dir),
+                    save_probabilities=False,
+                    overwrite=True,
+                    num_processes_preprocessing=1,
+                    num_processes_segmentation_export=1,
+                    folder_with_segs_from_prev_stage=None,
+                    num_parts=1,
+                    part_id=0,
+                )
+        else:
+            predictor.predict_from_files(
+                str(in_dir),
+                str(out_dir),
+                save_probabilities=False,
+                overwrite=True,
+                num_processes_preprocessing=1,
+                num_processes_segmentation_export=1,
+                folder_with_segs_from_prev_stage=None,
+                num_parts=1,
+                part_id=0,
+            )
+
+        pred_files = sorted(out_dir.glob("*.nii.gz")) + sorted(out_dir.glob("*.nii"))
+        if not pred_files:
+            raise RuntimeError("nnU-Net inference completed but produced no output mask.")
+
+        _report(80, "Remapping ToothFairy3 labels to canonical IDs...")
+        pred_label_node = slicer.util.loadLabelVolume(str(pred_files[0]))
+        if pred_label_node is None:
+            raise RuntimeError(f"Failed to load predicted mask: {pred_files[0]}")
+
+        mask_arr = slicer.util.arrayFromVolume(pred_label_node)
+        remapped_arr = remap_toothfairy3_array(mask_arr, dataset_labels=dataset_labels)
+        slicer.util.updateVolumeFromArray(pred_label_node, remapped_arr.astype(np.int32))
+
+        _report(90, "Populating ToothFairy3 segmentation node...")
+        seg_node = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLSegmentationNode",
+            f"{volumeNode.GetName()}_ToothFairy3",
+        )
+        seg_node.CreateDefaultDisplayNodes()
+        seg_node.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+        slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(pred_label_node, seg_node)
+
+        segmentation = seg_node.GetSegmentation()
+        for idx in range(segmentation.GetNumberOfSegments()):
+            segment = segmentation.GetNthSegment(idx)
+            seg_id = segmentation.GetNthSegmentID(idx)
+            seg_name = segment.GetName()
+            label_id, category, _, _ = match_segment_to_label_and_precedence(seg_name, seg_id)
+            info = LABELS_BY_ID.get(label_id)
+            if info is not None:
+                segment.SetName(info.name)
+                r, g, b = (
+                    float(c) / 255.0 if max(info.color) > 1.0 else float(c)
+                    for c in info.color
+                )
+                segment.SetColor(r, g, b)
+                segment.SetTag("CBCTPlanner.LabelID", str(info.id))
+                segment.SetTag("CBCTPlanner.Category", info.category)
+                if info.category == "tooth" or (11 <= info.id <= 48):
+                    segment.SetTag("CBCTPlanner.FDI", str(info.id))
+
+        _report(100, "ToothFairy3 nnU-Net segmentation complete.")
+        return seg_node
+    finally:
+        if pred_label_node is not None and slicer is not None:
+            try:
+                slicer.mrmlScene.RemoveNode(pred_label_node)
+            except Exception:
+                pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
