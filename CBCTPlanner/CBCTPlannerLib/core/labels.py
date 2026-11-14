@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import numpy as np
 from typing import Dict, List, Optional, Tuple
 
 
@@ -247,6 +248,12 @@ def match_segment_to_label_and_precedence(
             return FDI_TO_TOOTH_ID[fdi_code], "tooth", False, SEGMENT_PRECEDENCE["tooth"]
 
     # 4. Canal / Nerve (precedence 3)
+    if "incisive" in name_low:
+        if "right" in name_low:
+            return RIGHT_INCISIVE_CANAL_ID, "canal", False, SEGMENT_PRECEDENCE["canal"]
+        return LEFT_INCISIVE_CANAL_ID, "canal", False, SEGMENT_PRECEDENCE["canal"]
+    if "lingual" in name_low:
+        return LINGUAL_CANAL_ID, "canal", False, SEGMENT_PRECEDENCE["canal"]
     if "canal" in name_low or "nerve" in name_low or "ian" in name_low or "alveolar" in name_low:
         if "left" in name_low and "incisive" not in name_low:
             return LEFT_IAN_ID, "canal", False, SEGMENT_PRECEDENCE["canal"]
@@ -265,5 +272,68 @@ def match_segment_to_label_and_precedence(
         return DENTALSEGMENTATOR_MAXILLA_ID, "jaw", True, SEGMENT_PRECEDENCE["jaw"]
     if "mandible" in name_low or "lower jaw" in name_low:
         return DENTALSEGMENTATOR_MANDIBLE_ID, "jaw", True, SEGMENT_PRECEDENCE["jaw"]
+    # 7. Generic Segment_<N> / Label_<N> / TF3_<N> or trailing integer matching canonical ToothFairy3 ID
+    for candidate in (name_clean, sid_clean):
+        if not candidate:
+            continue
+        m_num = re.match(r"^(?:segment|label|tf3|toothfairy3?)[_\-\s]*(\d+)$", candidate, re.IGNORECASE)
+        if not m_num:
+            m_num = re.search(r"(?:^|[_\-\s])(\d+)$", candidate)
+        if m_num:
+            cand_id = int(m_num.group(1))
+            info = LABELS_BY_ID.get(cand_id)
+            if info is not None:
+                return info.id, info.category, False, SEGMENT_PRECEDENCE.get(info.category, 1)
 
     return 0, "unknown", False, SEGMENT_PRECEDENCE["unknown"]
+
+_FDI_TOOTH_ORDER = [
+    11, 12, 13, 14, 15, 16, 17, 18,
+    21, 22, 23, 24, 25, 26, 27, 28,
+    31, 32, 33, 34, 35, 36, 37, 38,
+    41, 42, 43, 44, 45, 46, 47, 48,
+]
+
+CONSECUTIVE_TF3_TO_CANONICAL_ID: Dict[int, int] = {
+    **{i: i for i in range(1, 11)},
+    **{11 + idx: fdi for idx, fdi in enumerate(_FDI_TOOTH_ORDER)},
+    43: LINGUAL_CANAL_ID,
+    44: LEFT_INCISIVE_CANAL_ID,
+    45: RIGHT_INCISIVE_CANAL_ID,
+    **{46 + idx: 100 + fdi for idx, fdi in enumerate(_FDI_TOOTH_ORDER)},
+}
+
+
+def remap_toothfairy3_array(mask: np.ndarray, dataset_labels: Optional[Dict] = None) -> np.ndarray:
+    """Remap consecutive nnU-Net ToothFairy3 class indices (1..77) to canonical IDs."""
+    arr = np.asarray(mask)
+    if arr.size == 0:
+        return arr
+    unique_vals = np.unique(arr)
+    unique_vals = unique_vals[unique_vals > 0]
+    if unique_vals.size == 0:
+        return arr
+
+    use_consecutive = False
+    if isinstance(dataset_labels, dict) and dataset_labels:
+        int_vals = [int(v) for v in dataset_labels.values() if isinstance(v, (int, float, str)) and str(v).isdigit()]
+        if int_vals and max(int_vals) <= 77 and any(v > 48 for v in int_vals):
+            use_consecutive = True
+
+    max_val = int(unique_vals.max())
+    if not use_consecutive:
+        if max_val <= 77 and np.any(unique_vals > 48):
+            use_consecutive = True
+
+    if not use_consecutive:
+        return arr
+
+    out = np.zeros(arr.shape, dtype=np.int32)
+    for src_id, dst_id in CONSECUTIVE_TF3_TO_CANONICAL_ID.items():
+        if src_id in unique_vals:
+            out[arr == src_id] = dst_id
+    for v in unique_vals:
+        iv = int(v)
+        if iv not in CONSECUTIVE_TF3_TO_CANONICAL_ID:
+            out[arr == iv] = iv
+    return out
