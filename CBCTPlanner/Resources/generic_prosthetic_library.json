@@ -1,0 +1,76 @@
+{
+  "schema_version": "1.0",
+  "disclaimer": "Generic abutment and crown library for prosthetic-driven implant planning simulation. Contains no proprietary manufacturer data.",
+  "abutments": [
+    {
+      "id": "ti_base_straight_4.0x4.5",
+      "label": "Generic Straight Ti-Base Ø4.0 × 4.5 mm (1.0 mm GH)",
+      "diameter_mm": 4.0,
+      "height_mm": 4.5,
+      "gingival_height_mm": 1.0,
+      "angle_deg": 0.0
+    },
+    {
+      "id": "ti_base_straight_4.5x5.0",
+      "label": "Generic Straight Ti-Base Ø4.5 × 5.0 mm (2.0 mm GH)",
+      "diameter_mm": 4.5,
+      "height_mm": 5.0,
+      "gingival_height_mm": 2.0,
+      "angle_deg": 0.0
+    },
+    {
+      "id": "ti_base_angled_15deg_4.0",
+      "label": "Generic Angled Abutment 15° Ø4.0 × 4.5 mm",
+      "diameter_mm": 4.0,
+      "height_mm": 4.5,
+      "gingival_height_mm": 1.5,
+      "angle_deg": 15.0
+    },
+    {
+      "id": "ti_base_angled_25deg_4.0",
+      "label": "Generic Angled Abutment 25° Ø4.0 × 4.5 mm",
+      "diameter_mm": 4.0,
+      "height_mm": 4.5,
+      "gingival_height_mm": 1.5,
+      "angle_deg": 25.0
+    }
+  ],
+  "crowns": [
+    {
+      "id": "crown_incisor",
+      "label": "Generic Anatomic Incisor Crown",
+      "tooth_numbers": [1, 2],
+      "mesiodistal_mm": 8.0,
+      "buccolingual_mm": 7.0,
+      "cervical_diameter_mm": 5.0,
+      "height_mm": 10.5
+    },
+    {
+      "id": "crown_canine",
+      "label": "Generic Anatomic Canine Crown",
+      "tooth_numbers": [3],
+      "mesiodistal_mm": 7.5,
+      "buccolingual_mm": 8.0,
+      "cervical_diameter_mm": 5.5,
+      "height_mm": 10.5
+    },
+    {
+      "id": "crown_premolar",
+      "label": "Generic Anatomic Premolar Crown",
+      "tooth_numbers": [4, 5],
+      "mesiodistal_mm": 7.0,
+      "buccolingual_mm": 9.0,
+      "cervical_diameter_mm": 5.2,
+      "height_mm": 8.5
+    },
+    {
+      "id": "crown_molar",
+      "label": "Generic Anatomic Molar Crown",
+      "tooth_numbers": [6, 7, 8],
+      "mesiodistal_mm": 10.5,
+      "buccolingual_mm": 10.5,
+      "cervical_diameter_mm": 7.0,
+      "height_mm": 8.0
+    }
+  ]
+}

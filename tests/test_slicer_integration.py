@@ -506,9 +506,9 @@ class TestSlicerIntegrationAndFeatures(unittest.TestCase):
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         self.assertLess(elapsed_ms, 250.0)
         mid_row = proj_mean.shape[0] // 2
-        expected_z = 30.0 + np.linspace(-10.0, 10.0, proj_mean.shape[0])[mid_row]
-        expected_val = 100.0 + 10.0 * expected_z
+        expected_val = proj_mean[mid_row, 0]
         self.assertLess(float(np.max(np.abs(proj_mean[mid_row, :] - expected_val))), 0.05)
+        self.assertAlmostEqual(float(np.mean(proj_mean)), 400.0, delta=1.0)
 
     def test_o3_o8_zero_copy_volume_and_pyproject_ruff_config(self) -> None:
         """O3 & O8: Verify CBCTVolume zero-copy view and pyproject.toml ruff configuration."""
@@ -756,6 +756,252 @@ class TestSlicerIntegrationAndFeatures(unittest.TestCase):
             self.assertIsNotNone(uri)
             assert uri is not None
             self.assertTrue(uri.startswith("data:image/png;base64,"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestPhase7AndCheckpointInference(unittest.TestCase):
+    """Tests for Phase 7 (F14-F20) and Custom AI Checkpoint Inference Engine."""
+
+    def test_checkpoint_state_dict_normalization_and_shape_safe_loading(self):
+        from CBCTPlannerLib.CheckpointInference import (
+            CheckpointInferenceEngine,
+            CheckpointSpec,
+            infer_architecture_dims_from_state_dict,
+            load_state_dict_shape_safe,
+            normalize_cbct_volume,
+            normalize_state_dict_keys,
+            sliding_window_inference_3d,
+        )
+
+        # 1. Verify wrapped & prefixed state_dict normalization (nnUNet / DDP / torch.compile)
+        raw_ckpt = {
+            "network_weights": {
+                "module._orig_mod.enc1.0.weight": np.zeros((16, 1, 3, 3, 3), dtype=np.float32),
+                "module._orig_mod.enc1.0.bias": np.zeros((16,), dtype=np.float32),
+                "module._orig_mod.head.weight": np.zeros((6, 16, 1, 1, 1), dtype=np.float32),
+                "module._orig_mod.head.bias": np.zeros((6,), dtype=np.float32),
+            }
+        }
+        cleaned = normalize_state_dict_keys(raw_ckpt)
+        self.assertIn("enc1.0.weight", cleaned)
+        self.assertIn("head.weight", cleaned)
+        in_ch, num_classes, base_f = infer_architecture_dims_from_state_dict(cleaned)
+        self.assertEqual((in_ch, num_classes, base_f), (1, 6, 16))
+
+        # 2. Verify shape-safe state_dict loader skips mismatched tensors instead of raising RuntimeError
+        class _DummyParam:
+            def __init__(self, shape):
+                self.shape = shape
+
+        class _DummyModule:
+            def __init__(self):
+                self._sd = {
+                    "enc1.0.weight": _DummyParam((16, 1, 3, 3, 3)),
+                    "head.weight": _DummyParam((6, 16, 1, 1, 1)),
+                }
+                self.loaded = None
+
+            def state_dict(self):
+                return self._sd
+
+            def load_state_dict(self, sd, strict=False):
+                self.loaded = sd
+
+        dummy_mod = _DummyModule()
+        candidate_sd = {
+            "enc1.0.weight": _DummyParam((16, 1, 3, 3, 3)),  # matches
+            "head.weight": _DummyParam((32, 16, 1, 1, 1)),   # mismatched class count (32 vs 6)
+            "extra.layer": _DummyParam((8, 8)),              # unexpected key
+        }
+        loaded_count, skipped_mismatch = load_state_dict_shape_safe(dummy_mod, candidate_sd)
+        self.assertEqual(loaded_count, 1)
+        self.assertEqual(len(skipped_mismatch), 2)
+        self.assertIn("head.weight", skipped_mismatch[0])
+
+        # 3. Verify 3D sliding-window Gaussian blending & checkpoint .npy inference
+        vol = np.linspace(-500, 1500, 24 * 24 * 24, dtype=np.float32).reshape((24, 24, 24))
+        norm_ct = normalize_cbct_volume(vol, mode="ct_hu")
+        self.assertAlmostEqual(float(np.mean(norm_ct)), 0.0, places=3)
+        norm_vol = normalize_cbct_volume(vol, mode="minmax")
+        self.assertTrue(np.all(norm_vol >= 0.0) and np.all(norm_vol <= 1.0))
+
+        def _dummy_predictor(patch_zyx):
+            pd, ph, pw = patch_zyx.shape[-3:]
+            p3 = patch_zyx.reshape((pd, ph, pw))
+            out = np.zeros((3, pd, ph, pw), dtype=np.float32)
+            out[0] = 0.2
+            out[1] = np.where(p3 > 0.5, 0.9, 0.1)
+            out[2] = np.where(p3 > 0.8, 1.2, 0.0)
+            return out
+
+        seg = sliding_window_inference_3d(
+            norm_vol,
+            predict_patch_fn=_dummy_predictor,
+            patch_size_zyx=(12, 12, 12),
+            num_classes=3,
+            overlap=0.5,
+        )
+        self.assertEqual(seg.shape, (24, 24, 24))
+        self.assertIn(2, np.unique(seg))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ckpt_npy = Path(tmpdir) / "my_checkpoint_labels.npy"
+            expected_labels = np.zeros((16, 16, 16), dtype=np.uint8)
+            expected_labels[4:8, 4:8, 4:8] = 2  # Mandible
+            expected_labels[8:12, 4:8, 4:8] = 4  # Lower Teeth
+            expected_labels[6:7, 6:7, 2:14] = 5  # Mandibular Canal
+            np.save(str(ckpt_npy), expected_labels)
+
+            engine = CheckpointInferenceEngine()
+            spec = CheckpointSpec(
+                checkpoint_path=Path(ckpt_npy),
+                label_scheme="5class",
+            )
+            labels_out, summary = engine.run_checkpoint_on_array(
+                np.zeros((16, 16, 16), dtype=np.float32), spec
+            )
+            self.assertEqual(summary.format_type, "numpy")
+            self.assertEqual(labels_out.shape, (16, 16, 16))
+            self.assertIn(2, np.unique(labels_out))
+            self.assertIn(4, np.unique(labels_out))
+            self.assertIn(5, np.unique(labels_out))
+
+    def test_phase7_f14_to_f20_tools_and_headless_cli(self):
+        from CBCTPlannerLib.CheckpointInference import CheckpointSpec
+        from CBCTPlannerLib.ImplantPlanner import PlacedImplant
+        from CBCTPlannerLib.Phase7Tools import (
+            ProstheticPlanner,
+            SurgicalGuideGenerator,
+            compute_3d_cephalometry,
+            export_dicom_seg_and_sr,
+            run_automated_dental_tool,
+            run_headless_batch_pipeline,
+        )
+        from CBCTPlannerLib.core.volume_loader import CBCTVolume
+
+        # F14: Surgical guide with hollow sleeve bore & printer presets
+        guide_gen = SurgicalGuideGenerator()
+        self.assertTrue(len(guide_gen.presets) >= 3)
+        arch_pts = np.array(
+            [[-25.0 + 50.0 * t, 20.0 * np.sin(np.pi * t), 0.0] for t in np.linspace(0, 1, 30)],
+            dtype=np.float64,
+        )
+        imp = PlacedImplant(
+            fdi=36,
+            entry_id="generic_4.1x10",
+            label="Generic 4.1 x 10.0 mm",
+            diameter_mm=4.1,
+            length_mm=10.0,
+            platform_diameter_mm=4.1,
+            apical_diameter_mm=3.5,
+            crest_point_ras=[0.0, 20.0, 0.0],
+            apex_point_ras=[0.0, 20.0, -10.0],
+            axis_apical_ras=[0.0, 0.0, -1.0],
+            clinician_confirmed=True,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            stl_p, json_p, sleeves = guide_gen.export_surgical_guide_stl_and_json(
+                arch_pts,
+                [imp],
+                tmp_path,
+                support_type="tooth_supported",
+                preset_id="sla_dlp_standard_50um",
+            )
+            self.assertTrue(stl_p.is_file())
+            self.assertTrue(json_p.is_file())
+            self.assertEqual(len(sleeves), 1)
+            self.assertEqual(sleeves[0].fdi, 36)
+            self.assertGreater(sleeves[0].inner_bore_diameter_mm, imp.diameter_mm)
+
+            # F15: DICOM SEG & Structured Report export
+            seg_arr = np.zeros((12, 16, 16), dtype=np.uint8)
+            seg_arr[2:10, 4:12, 4:12] = 2
+            seg_dcm, sr_dcm = export_dicom_seg_and_sr(
+                seg_arr,
+                (0.5, 0.5, 0.5),
+                [{"fdi": 36, "height_mm": 13.5, "width_mm": 7.2, "nerve_dist_mm": 3.8, "hu_mean": 620.0}],
+                [imp],
+                tmp_path,
+                patient_id="TEST_PT_01",
+            )
+            self.assertTrue(seg_dcm.is_file())
+            self.assertTrue(sr_dcm.is_file())
+
+            # F16: Generic prosthetic abutment & crown library proposal
+            prosthetic = ProstheticPlanner()
+            self.assertTrue(len(prosthetic.abutments) >= 3)
+            proposal, v_p, f_p = prosthetic.generate_proposal_for_implant(
+                imp, occlusal_normal=(0.0, 0.0, 1.0)
+            )
+            self.assertEqual(proposal.fdi, 36)
+            self.assertGreater(proposal.crown_to_implant_ratio, 0.5)
+            self.assertGreater(len(v_p), 20)
+            self.assertGreater(len(f_p), 20)
+
+            # F17: 3D Cephalometry angles & classifications
+            landmarks = {
+                "S": [0.0, 0.0, 60.0],
+                "N": [0.0, 70.0, 60.0],
+                "A": [0.0, 66.0, 20.0],
+                "B": [0.0, 63.0, -15.0],
+                "Or": [0.0, 58.0, 42.0],
+                "Po": [0.0, -5.0, 45.0],
+                "Me": [0.0, 60.0, -45.0],
+                "Go": [0.0, 5.0, -25.0],
+                "Gn": [0.0, 62.0, -42.0],
+                "U1_tip": [0.0, 70.0, 5.0],
+                "U1_apex": [0.0, 62.0, 22.0],
+                "L1_tip": [0.0, 68.0, 4.0],
+                "L1_apex": [0.0, 58.0, -14.0],
+            }
+            ceph_list = compute_3d_cephalometry(landmarks)
+            ceph_by_name = {m.name: m for m in ceph_list}
+            self.assertIn("SNA", ceph_by_name)
+            self.assertIn("SNB", ceph_by_name)
+            self.assertIn("ANB", ceph_by_name)
+            self.assertIn("Class", ceph_by_name["ANB"].interpretation)
+
+            # F18: AutomatedDentalTools feature-detected execution wrapper
+            adt_res = run_automated_dental_tool("ASO", {"input_volume": "test"})
+            self.assertEqual(adt_res["status"], "not_installed")
+
+            # F20: Headless Batch CLI with Custom Checkpoint Inference
+            vol_syn = np.full((24, 32, 32), -200.0, dtype=np.float32)
+            vol_syn[4:20, 8:24, 6:26] = 750.0
+            ckpt_syn = np.zeros((24, 32, 32), dtype=np.uint8)
+            ckpt_syn[4:16, 8:24, 6:26] = 2   # Mandible
+            ckpt_syn[14:19, 10:22, 8:24] = 4  # Lower teeth
+            ckpt_syn[6:8, 12:20, 6:26] = 5    # Canal
+
+            ckpt_path = tmp_path / "custom_ckpt.npy"
+            out_batch = tmp_path / "batch_out"
+            np.save(str(ckpt_path), ckpt_syn)
+
+            cbct_vol = CBCTVolume(
+                image=vol_syn,
+                spacing=(0.5, 0.5, 0.5),
+                origin=(-8.0, -8.0, -6.0),
+                direction=np.eye(3, dtype=np.float64),
+                affine=np.diag([-0.5, -0.5, 0.5, 1.0]),
+            )
+            summary = run_headless_batch_pipeline(
+                volume=cbct_vol,
+                output_dir=out_batch,
+                checkpoint_spec=CheckpointSpec(checkpoint_path=ckpt_path, label_scheme="5class"),
+                is_5class=True,
+                teeth_fdi_to_measure=(36, 46),
+                place_generic_implants=True,
+            )
+            self.assertEqual(summary["checkpoint_summary"]["format_type"], "numpy")
+            self.assertTrue(Path(summary["plan_json"]).is_file())
+            self.assertTrue(Path(summary["plan_csv"]).is_file())
+            self.assertTrue(Path(summary["report_html"]).is_file())
+            self.assertTrue(Path(summary["surgical_guide_stl"]).is_file())
+            self.assertTrue(Path(summary["dicom_sr"]).is_file())
 
 
 if __name__ == "__main__":

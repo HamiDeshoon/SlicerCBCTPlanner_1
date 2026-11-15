@@ -543,7 +543,7 @@ class PanoramicCurveLogic:
         spacing_mm: float = 0.5,
         buccolingual_offset_mm: float = 0.0,
         projection_mode: str = "Mean",
-      flip_vertical: bool = False,
+        flip_vertical: bool = False,
     ) -> np.ndarray:
         """O1, B5, B6, F3: Pure in-process panoramic CPR slab sampler using `scipy.ndimage.map_coordinates`.
 
@@ -574,7 +574,8 @@ class PanoramicCurveLogic:
         # B5: Right-handed displacement axis disp_x = -N
         disp_x_cols = -n_cols
         v_offsets = np.linspace(-0.5 * float(height_mm), 0.5 * float(height_mm), dim_y)
-      if flip_vertical: v_offsets = v_offsets[::-1]
+        if flip_vertical:
+            v_offsets = v_offsets[::-1]
         u_offsets = (
             np.linspace(-0.5 * float(slab_thickness_mm), 0.5 * float(slab_thickness_mm), n_layers)
             + float(buccolingual_offset_mm)
@@ -681,7 +682,7 @@ class PanoramicCurveLogic:
         on_progress: Optional[Callable[[int], None]] = None,
         parameterNode: Any = None,
         force_fit: bool = False,
-      flip_vertical: bool = False,
+        flip_vertical: bool = False,
     ) -> Tuple[Optional[Any], Any]:
         """O1, B5, B6, B10, F3: Generate Curved Planar Reformatted (CPR) Panoramic Radiograph in-process.
 
@@ -723,7 +724,7 @@ class PanoramicCurveLogic:
                 spacing_mm=spacing_mm,
                 buccolingual_offset_mm=buccolingual_offset_mm,
                 projection_mode=projection_mode,
-              flip_vertical=flip_vertical,
+                flip_vertical=flip_vertical,
             )
             self.last_generation_elapsed_sec = time.perf_counter() - t0
             panoNode = self._populate_panoramic_node_from_array(
