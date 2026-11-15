@@ -653,6 +653,56 @@ def export_reformatted_dicom_series(
         return [fallback_path]
 
 
+
+def ensure_nnunet_kaggle_trainer() -> None:
+    """Register custom nnUNetTrainerKaggle into nnunetv2 package tree and environment to prevent missing trainer errors."""
+    try:
+        import os
+        import sys
+        import types
+        from pathlib import Path
+        import nnunetv2
+
+        trainer_dir = Path(nnunetv2.__file__).parent / "training" / "nnUNetTrainer"
+        target_py = trainer_dir / "nnUNetTrainerKaggle.py"
+        trainer_src = (
+            "import os\n"
+            "import torch\n"
+            "from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer\n\n"
+            "class nnUNetTrainerKaggle(nnUNetTrainer):\n"
+            "    def configure_rotation_dummyDA_mirroring_and_inital_patch_size(self):\n"
+            "        rotation_for_DA, do_dummy_2d_data_aug, initial_patch_size, mirror_axes = (\n"
+            "            super().configure_rotation_dummyDA_mirroring_and_inital_patch_size()\n"
+            "        )\n"
+            "        self.inference_allowed_mirroring_axes = None\n"
+            "        return rotation_for_DA, do_dummy_2d_data_aug, initial_patch_size, None\n"
+        )
+        if trainer_dir.exists():
+            try:
+                target_py.write_text(trainer_src, encoding="utf-8")
+            except Exception:
+                pass
+        os.environ["nnUNet_extTrainer"] = str(trainer_dir)
+        try:
+            from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+
+            class nnUNetTrainerKaggle(nnUNetTrainer):
+                def configure_rotation_dummyDA_mirroring_and_inital_patch_size(self):
+                    res = super().configure_rotation_dummyDA_mirroring_and_inital_patch_size()
+                    self.inference_allowed_mirroring_axes = None
+                    return res[0], res[1], res[2], None
+
+            mod = types.ModuleType("nnunetv2.training.nnUNetTrainer.nnUNetTrainerKaggle")
+            mod.nnUNetTrainerKaggle = nnUNetTrainerKaggle
+            sys.modules["nnunetv2.training.nnUNetTrainer.nnUNetTrainerKaggle"] = mod
+            import nnunetv2.training.nnUNetTrainer as tr_pkg
+            setattr(tr_pkg, "nnUNetTrainerKaggle", nnUNetTrainerKaggle)
+        except Exception:
+            pass
+    except Exception as exc:
+        print(f"Warning: Could not auto-register nnUNetTrainerKaggle: {exc}")
+
+
 def run_nnunet_toothfairy3_inference(
     volumeNode,
     model_dir_or_ckpt: str,
@@ -726,6 +776,7 @@ def run_nnunet_toothfairy3_inference(
         use_folds = (int(fold_str) if fold_str.isdigit() else fold_str,)
 
     _report(10, "Initializing ToothFairy3 nnU-Net predictor...")
+    ensure_nnunet_kaggle_trainer()
     if not use_gpu:
         device = torch.device("cpu")
         supported = getattr(torch.backends.quantized, "supported_engines", [])
