@@ -698,3 +698,251 @@ def compute_fdi_arc_positions_mm(
             is_missing_tooth=is_missing,
         )
     return results
+
+
+@dataclass
+class ArchFitResult:
+    """Result of fitting a dental arch directly from a label mask."""
+
+    points_ras: np.ndarray
+    arc_length_mm: float
+    residual_rms_mm: float
+    n_points_used: int
+    method: str  # "fdi_centroids" | "principal_curve"
+    accepted: bool = True
+    reason: str = ""
+
+
+def _polyline_arc_length(points: np.ndarray) -> float:
+    if len(points) < 2:
+        return 0.0
+    return float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
+
+
+def _spline_through_ordered(
+    ordered: np.ndarray, num_control_points: int, smoothing: float
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Fit a smooth spline through `ordered` and resample `num_control_points` by arc length."""
+    points = np.asarray(ordered, dtype=np.float64)
+    diffs = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    keep = np.concatenate([[True], diffs > 1e-6])
+    points = points[keep]
+    if len(points) < 4:
+        return points, points
+    chord = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
+    total = float(chord[-1])
+    if total <= 1e-6:
+        return points, points
+    u_norm = chord / total
+
+    try:
+        from scipy import interpolate  # type: ignore
+
+        k = min(3, len(points) - 1)
+        tck, _ = interpolate.splprep(
+            [points[:, 0], points[:, 1], points[:, 2]],
+            u=u_norm,
+            s=float(smoothing) * len(points),
+            k=k,
+        )
+        u_dense = np.linspace(0.0, 1.0, 400)
+        dense = np.column_stack(interpolate.splev(u_dense, tck))
+        dense_s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(dense, axis=0), axis=1))])
+        target_s = np.linspace(0.0, float(dense_s[-1]), num_control_points)
+        target_u = np.interp(target_s, dense_s, u_dense)
+        ctrl = np.column_stack(interpolate.splev(target_u, tck))
+        return ctrl, dense
+    except ImportError:
+        target_s = np.linspace(0.0, total, num_control_points)
+        ctrl = np.column_stack([np.interp(target_s, chord, points[:, dimension]) for dimension in range(3)])
+        return ctrl, points
+
+
+def _rms_to_polyline(points: np.ndarray, polyline: np.ndarray, max_points: int = 1500) -> float:
+    if len(points) == 0 or len(polyline) < 2:
+        return float("inf")
+    sample = points
+    if len(sample) > max_points:
+        step = max(1, len(sample) // max_points)
+        sample = sample[::step]
+    poly = np.asarray(polyline, dtype=np.float64)
+    p0 = poly[:-1]
+    seg = poly[1:] - p0
+    seg_len_sq = np.sum(seg * seg, axis=1)
+    safe = np.where(seg_len_sq > 1e-12, seg_len_sq, 1.0)
+    min_dists = np.empty(len(sample), dtype=np.float64)
+    for start in range(0, len(sample), 250):
+        chunk = sample[start : start + 250]
+        rel = chunk[:, None, :] - p0[None, :, :]
+        t = np.sum(rel * seg[None, :, :], axis=2) / safe[None, :]
+        t = np.clip(t, 0.0, 1.0)
+        proj = p0[None, :, :] + t[:, :, None] * seg[None, :, :]
+        dist_sq = np.sum((proj - chunk[:, None, :]) ** 2, axis=2)
+        min_dists[start : start + len(chunk)] = np.sqrt(np.min(dist_sq, axis=1))
+    return float(np.sqrt(np.mean(min_dists**2)))
+
+
+def _order_cloud_as_horseshoe(points_xy: np.ndarray) -> np.ndarray:
+    """Order a dense XY cloud from one posterior end, around the arch, to the other."""
+    centroid = np.asarray(points_xy, dtype=np.float64).mean(axis=0)
+    angles = np.arctan2(points_xy[:, 1] - centroid[1], points_xy[:, 0] - centroid[0])
+    order = np.argsort(angles)
+    sorted_angles = angles[order]
+    gaps = np.diff(np.concatenate([sorted_angles, [sorted_angles[0] + 2.0 * np.pi]]))
+    cut = int(np.argmax(gaps))
+    return np.roll(order, -(cut + 1))
+
+
+def _monotonic_descending_x(points: np.ndarray) -> bool:
+    if len(points) < 4:
+        return False
+    dx = np.diff(points[:, 0])
+    return float(np.mean(dx <= 0.0)) >= 0.7
+
+
+def fit_arch_from_label_mask(
+    mask_zyx: np.ndarray,
+    affine: np.ndarray,
+    *,
+    jaw: str,
+    is_5class: bool,
+    num_control_points: int = 11,
+) -> Optional[ArchFitResult]:
+    """Fit a dental arch curve directly from tooth voxels (no mesh extraction).
+
+    Preferred path uses per-FDI centroids when at least six labelled teeth exist;
+    otherwise a principal curve is fitted on the crown-half XY projection. The
+    result is always ordered Patient Right -> Patient Left. Results outside the
+    sanity gates are returned with ``accepted=False`` and a human-readable reason.
+    """
+    from .labels import TOOTH_ID_TO_FDI
+
+    mask = np.asarray(mask_zyx)
+    matrix = np.asarray(affine, dtype=np.float64)
+    if mask.ndim != 3 or matrix.shape != (4, 4):
+        raise ValueError("mask_zyx must be 3D and affine must be 4x4")
+
+    jaw_key = (
+        "lower" if jaw.lower().startswith("low") else ("upper" if jaw.lower().startswith("up") else "shared")
+    )
+    if is_5class:
+        if jaw_key == "lower":
+            labels = (4,)
+        elif jaw_key == "upper":
+            labels = (3,)
+        else:
+            labels = (3, 4)
+    else:
+        from .labels import MANDIBULAR_TEETH_IDS, MAXILLARY_TEETH_IDS
+
+        if jaw_key == "lower":
+            labels = tuple(MANDIBULAR_TEETH_IDS)
+        elif jaw_key == "upper":
+            labels = tuple(MAXILLARY_TEETH_IDS)
+        else:
+            labels = tuple(MANDIBULAR_TEETH_IDS) + tuple(MAXILLARY_TEETH_IDS)
+
+    z_idx, y_idx, x_idx = np.where(np.isin(mask, labels))
+    if len(x_idx) < 30:
+        return None
+
+    # Per-label centroids (only meaningful when labels are individual FDI teeth).
+    centroids: Dict[str, np.ndarray] = {}
+    if not is_5class and jaw_key != "shared":
+        for label in labels:
+            fdi = TOOTH_ID_TO_FDI.get(int(label))
+            if fdi is None:
+                continue
+            selected = mask == label
+            if int(np.count_nonzero(selected)) < 10:
+                continue
+            zz, yy, xx = np.nonzero(selected)
+            # Vectorized IJK -> RAS over the label's voxels.
+            voxels = np.column_stack([xx, yy, zz, np.ones(len(xx), dtype=np.float64)])
+            world = (matrix @ voxels.T).T[:, :3]
+            centroids[fdi] = world.mean(axis=0)
+
+    result: Optional[ArchFitResult] = None
+    if len(centroids) >= 6:
+        order = JAW_TOOTH_ORDER[jaw_key]
+        ordered_centroids = [centroids[fdi] for fdi in order if fdi in centroids]
+        ordered = np.asarray(ordered_centroids, dtype=np.float64)
+        method = "fdi_centroids"
+        if ordered[0, 0] < ordered[-1, 0]:
+            ordered = ordered[::-1].copy()
+        ctrl, dense = _spline_through_ordered(ordered, num_control_points, smoothing=0.15)
+        residual = _rms_to_polyline(ordered, dense)
+        n_used = len(ordered)
+    else:
+        method = "principal_curve"
+        step = max(1, len(x_idx) // 50000)
+        voxels = np.column_stack(
+            [
+                x_idx[::step],
+                y_idx[::step],
+                z_idx[::step],
+                np.ones(len(x_idx[::step]), dtype=np.float64),
+            ]
+        )
+        world = (matrix @ voxels.T).T[:, :3]
+
+        # Keep the crown half: lower crowns lie above the tooth median Z, upper below.
+        median_z = float(np.median(world[:, 2])) if jaw_key != "shared" else float(np.median(world[:, 2]))
+        if jaw_key == "lower":
+            crown = world[world[:, 2] >= median_z]
+        elif jaw_key == "upper":
+            crown = world[world[:, 2] <= median_z]
+        else:
+            crown = world
+        if len(crown) < 30:
+            crown = world
+        xy = crown[:, :2]
+        order_idx = _order_cloud_as_horseshoe(xy)
+        ordered = crown[order_idx]
+
+        # Bin medians along the horseshoe angle to suppress voxel-density noise.
+        bin_count = max(24, num_control_points * 3)
+        edges = np.linspace(0, len(ordered), bin_count + 1).astype(int)
+        binned = [
+            np.median(ordered[edges[i] : max(edges[i] + 1, edges[i + 1])], axis=0) for i in range(bin_count)
+        ]
+        binned = np.asarray(binned, dtype=np.float64)
+        if _monotonic_descending_x(binned):
+            ordered = binned
+        else:
+            # Fallback: legacy angular binned fit on the ordered cloud.
+            ordered = np.asarray(
+                [np.median(chunk, axis=0) for chunk in np.array_split(ordered, bin_count)],
+                dtype=np.float64,
+            )
+        if len(ordered) < 4:
+            return None
+        if ordered[0, 0] < ordered[-1, 0]:
+            ordered = ordered[::-1].copy()
+        ctrl, dense = _spline_through_ordered(ordered, num_control_points, smoothing=0.05)
+        residual = _rms_to_polyline(crown, dense)
+        n_used = len(crown)
+
+    arc_length = _polyline_arc_length(dense)
+    reason = ""
+    accepted = True
+    if residual > 3.0:
+        accepted = False
+        reason = f"residual RMS {residual:.2f} mm exceeds 3.0 mm"
+    if not (60.0 <= arc_length <= 200.0):
+        accepted = False
+        reason = (reason + "; " if reason else "") + f"arc length {arc_length:.1f} mm outside [60, 200] mm"
+    if len(ctrl) < 4:
+        return None
+    if ctrl[0, 0] < ctrl[-1, 0]:
+        ctrl = ctrl[::-1].copy()
+    result = ArchFitResult(
+        points_ras=ctrl,
+        arc_length_mm=arc_length,
+        residual_rms_mm=residual,
+        n_points_used=int(n_used),
+        method=method,
+        accepted=accepted,
+        reason=reason,
+    )
+    return result

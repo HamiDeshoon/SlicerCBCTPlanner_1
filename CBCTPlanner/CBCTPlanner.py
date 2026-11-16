@@ -136,6 +136,7 @@ from CBCTPlannerLib.core.arch_detector import (
     DentalArch,
     ToothArcSite,
     compute_fdi_arc_positions_mm,
+    fit_arch_from_label_mask,
     fit_dental_arch_from_points,
 )
 from CBCTPlannerLib.core.labels import (
@@ -1758,7 +1759,25 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if detected_teeth and hasattr(self, "selectedTeeth"):
             for fdi in detected_teeth:
                 self.selectedTeeth.add(int(fdi))
-        if hasattr(self, "onAutoFitArchClicked"):
+        jaw = self._effectiveJawKey()
+        existing_curve = (
+            self.logic.get_curve_node_for_jaw(volNode, jaw, parameterNode=self._parameterNode)
+            if self.logic is not None
+            else None
+        )
+        user_edited_curve = (
+            existing_curve is not None
+            and existing_curve.GetNumberOfControlPoints() >= 4
+            and existing_curve.GetAttribute("CBCTPlanner.UserEdited") == "1"
+        )
+        if user_edited_curve:
+            if hasattr(self, "globalStatusLabel"):
+                self.globalStatusLabel.setText(
+                    f"Pipeline kept user-edited {jaw} arch curve; panoramic regenerated."
+                )
+            if hasattr(self, "onGeneratePanoramicClicked"):
+                self.onGeneratePanoramicClicked()
+        elif hasattr(self, "onAutoFitArchClicked"):
             # Auto-Fit generates the panoramic exactly once; do not duplicate it here.
             self.onAutoFitArchClicked()
         if hasattr(self, "onExtractCanalsClicked"):
@@ -1961,6 +1980,16 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not volNode or not self.logic:
             return
         jaw = self._effectiveJawKey()
+        if segNode is None:
+            if slicer:
+                slicer.util.warningDisplay(
+                    "Auto-fit needs segmented teeth.\n"
+                    "Select/segment a jaw first, or use 'Place / Draw Arch Points on Axial'."
+                )
+                slicer.util.showStatusMessage("Auto-fit needs segmented teeth", 5000)
+            self.logic.start_interactive_arch_placement(volNode, jaw=jaw)
+            return
+
         curveNode = self.logic.auto_fit_arch_for_jaw(
             volumeNode=volNode,
             segmentationNode=segNode,
@@ -1968,21 +1997,30 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             visible=self.showCurvesCheckBox.isChecked(),
             confirm_overwrite=True,
         )
-        if curveNode is not None and curveNode.GetNumberOfControlPoints() >= 4:
+        fit = self.logic.last_arch_fit
+        if curveNode is not None and curveNode.GetNumberOfControlPoints() >= 4 and fit is not None:
             self._observeCurveEdits(curveNode)
+            self.step2HintLabel.setText(
+                f"Fitted {len(fit.points_ras)} pts, {fit.arc_length_mm:.1f} mm, "
+                f"RMS {fit.residual_rms_mm:.1f} mm ({fit.method})"
+            )
             self.step3Box.collapsed = False
-            self.step4Box.collapsed = False
-            self.step5Box.collapsed = False
             self.updateGUIFromParameterNode()
             self._syncCursorToViews()
-            if hasattr(self, "onGeneratePanoramicClicked"):
-                try:
-                    self.onGeneratePanoramicClicked()
-                except Exception as exc:
-                    logger.exception("Panoramic generation after Auto-Fit failed")
-                    if slicer:
-                        slicer.util.showStatusMessage(f"Panoramic generation failed: {exc}", 5000)
-                        slicer.util.errorDisplay(f"Panoramic generation failed:\n{exc}")
+            self.onGeneratePanoramicClicked()
+            return
+
+        reason = self.logic.last_arch_fit_error or "no accepted fit"
+        logger.warning("Auto-Fit produced no accepted arch curve: %s", reason)
+        self.step2HintLabel.setText(
+            f"Auto-Fit rejected ({reason}). Place 4+ arch points manually from Patient Right to Patient Left."
+        )
+        if slicer:
+            slicer.util.warningDisplay(
+                "Auto-Fit could not produce a reliable arch curve:\n"
+                f"{reason}\n\nPlace arch points manually or check the segmentation."
+            )
+        self.logic.start_interactive_arch_placement(volNode, jaw=jaw)
 
     def onDrawArchManualClicked(self) -> None:
         volNode = self.volumeSelector.currentNode()
@@ -2888,6 +2926,8 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         self._confirmed_ai_suggestions: Set[int] = set()
         self._cached_engine_key: Optional[Tuple[Any, ...]] = None
         self._cached_engine: Optional[MeasurementEngine] = None
+        self.last_arch_fit: Any = None
+        self.last_arch_fit_error: Optional[str] = None
         self._ruler_observers: List[Tuple[Any, int]] = []
         self.last_airway_result: Optional[AirwayAnalysisResult] = None
         self.last_prosthetic_proposals: List[ProstheticProposal] = []
@@ -3758,20 +3798,29 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         jaw: str,
         visible: bool = True,
         confirm_overwrite: bool = True,
+        allow_overwrite_user_edit: bool = True,
     ) -> Any:
-        """Fit dental arch curve for `jaw` from segmented teeth; if no teeth segmented, enter manual place mode."""
+        """Fit the dental arch from segmented tooth voxels; fall back to manual placement.
+
+        No surface meshes are generated. The fit is rejected with a reason when the
+        residual/arc-length sanity gates fail, and the caller can offer manual placement.
+        """
         if slicer is None or not volumeNode:
             return None
         jaw_cap = "Shared" if jaw.lower().startswith("sh") else jaw.capitalize()
         pNode = self.getParameterNode()
+        self.last_arch_fit = None
         existing = self.get_curve_node_for_jaw(volumeNode, jaw_cap, parameterNode=pNode)
-        if (
+
+        user_edited = (
             existing is not None
             and existing.GetNumberOfControlPoints() >= 4
             and existing.GetAttribute("CBCTPlanner.UserEdited") == "1"
-            and confirm_overwrite
-            and getattr(slicer, "app", None) is not None
-        ):
+        )
+        if user_edited and not allow_overwrite_user_edit:
+            logger.info("Skipping auto-fit: %s arch curve is user-edited", jaw_cap)
+            return existing
+        if user_edited and confirm_overwrite and getattr(slicer, "app", None) is not None:
             if not slicer.util.confirmOkCancelDisplay(
                 f"The {jaw_cap} dental arch curve has been manually edited.\n"
                 "Do you want to overwrite your manual edits with an auto-fitted curve?",
@@ -3779,34 +3828,95 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             ):
                 return existing
 
-        pts_cloud = self.extract_arch_points_from_segmentation(segmentationNode, volumeNode, jaw_cap)
-        if pts_cloud is None or len(pts_cloud) < 4:
+        if segmentationNode is None:
+            logger.warning("Auto-fit needs a segmentation with tooth labels")
             curveNode = self.start_interactive_arch_placement(volumeNode, jaw=jaw_cap)
             if getattr(slicer, "app", None) is not None:
                 slicer.util.showStatusMessage(
-                    f"No segmented teeth found for {jaw_cap} arch — click points along the arch from Patient Right to Patient Left.",
-                    5000,
+                    "Auto-fit needs segmented teeth — place arch points manually or run segmentation first.",
+                    6000,
                 )
             return curveNode
 
-        fitted_pts = fit_dental_arch_from_points(
-            pts_cloud, jaw_type=jaw_cap.lower(), num_control_points=11, ras_convention=True
-        )
+        mask, is_5class = self._extract_combined_label_mask(volumeNode, segmentationNode)
+        if mask is None:
+            logger.warning("Auto-fit could not build a label mask from the segmentation")
+            curveNode = self.start_interactive_arch_placement(volumeNode, jaw=jaw_cap)
+            if getattr(slicer, "app", None) is not None:
+                slicer.util.showStatusMessage(
+                    "Auto-fit could not read segmented teeth — place arch points manually.", 6000
+                )
+            return curveNode
 
-        self._is_programmatic_curve_update = True
-        try:
-            curveNode = self.panoramic.create_or_update_arch_curve(
-                volumeNode,
-                jaw=jaw_cap,
-                points_ras=fitted_pts,
-                visible=visible,
-                parameterNode=pNode,
+        _, affine = self._volume_array_and_affine(volumeNode)
+        if affine is None:
+            logger.error("Auto-fit could not read the volume IJK-to-RAS matrix")
+            return None
+
+        fit = fit_arch_from_label_mask(
+            mask,
+            affine,
+            jaw=jaw_cap,
+            is_5class=is_5class,
+            num_control_points=11,
+        )
+        self.last_arch_fit = fit
+        if fit is None or not fit.accepted:
+            reason = "no tooth labels found" if fit is None else (fit.reason or "fit rejected")
+            logger.warning("Auto-fit rejected for %s arch: %s", jaw_cap, reason)
+            self.last_arch_fit_error = reason
+            if getattr(slicer, "app", None) is not None:
+                slicer.util.showStatusMessage(f"Auto-fit rejected: {reason}", 6000)
+            return None
+
+        previous_points: Optional[np.ndarray] = None
+        if existing is not None and existing.GetNumberOfControlPoints() >= 2:
+            previous_points = np.zeros((existing.GetNumberOfControlPoints(), 3), dtype=np.float64)
+            buffer = [0.0, 0.0, 0.0]
+            for index in range(existing.GetNumberOfControlPoints()):
+                existing.GetNthControlPointPositionWorld(index, buffer)
+                previous_points[index] = buffer
+
+        def _apply_fit() -> None:
+            self._is_programmatic_curve_update = True
+            try:
+                node = self.panoramic.create_or_update_arch_curve(
+                    volumeNode,
+                    jaw=jaw_cap,
+                    points_ras=fit.points_ras,
+                    visible=visible,
+                    parameterNode=pNode,
+                )
+                if node is not None:
+                    node.SetAttribute("CBCTPlanner.UserEdited", "0")
+            finally:
+                self._is_programmatic_curve_update = False
+
+        if previous_points is not None:
+
+            def _restore_previous() -> None:
+                self._is_programmatic_curve_update = True
+                try:
+                    node = self.panoramic.create_or_update_arch_curve(
+                        volumeNode,
+                        jaw=jaw_cap,
+                        points_ras=previous_points,
+                        visible=visible,
+                        parameterNode=pNode,
+                    )
+                    if node is not None:
+                        node.SetAttribute("CBCTPlanner.UserEdited", "1")
+                finally:
+                    self._is_programmatic_curve_update = False
+
+            self.undo_redo.push(
+                f"Replace {jaw_cap} arch curve with auto-fit",
+                _restore_previous,
+                _apply_fit,
             )
-            if curveNode:
-                curveNode.SetAttribute("CBCTPlanner.UserEdited", "0")
-        finally:
-            self._is_programmatic_curve_update = False
-        return curveNode
+
+        _apply_fit()
+        return self.get_curve_node_for_jaw(volumeNode, jaw_cap, parameterNode=pNode)
 
     def set_curves_visibility(self, volumeNode: Any, visible: bool) -> None:
         if slicer is None or not volumeNode:
