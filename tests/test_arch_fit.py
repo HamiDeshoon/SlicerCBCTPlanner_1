@@ -128,6 +128,23 @@ class TestFitArchFromLabelMask(unittest.TestCase):
                 self.assertTrue(result.accepted, (perm3, signs, result.reason))
                 self.assertGreater(result.points_ras[0, 0], result.points_ras[-1, 0])
 
+    def test_end_extension_reaches_past_posterior_teeth(self) -> None:
+        mask = _phantom("lower", is_5class=False)
+        affine = _affine(mask.shape)
+        base = fit_arch_from_label_mask(mask, affine, jaw="lower", is_5class=False)
+        extended = fit_arch_from_label_mask(mask, affine, jaw="lower", is_5class=False, end_extension_mm=12.0)
+        self.assertIsNotNone(base)
+        self.assertIsNotNone(extended)
+        assert base is not None and extended is not None
+        self.assertGreater(extended.arc_length_mm, base.arc_length_mm + 20.0)
+        # The new first/last points lie one extension length beyond the tooth cloud.
+        self.assertAlmostEqual(
+            float(np.linalg.norm(extended.points_ras[0] - base.points_ras[0])), 12.0, delta=0.5
+        )
+        self.assertAlmostEqual(
+            float(np.linalg.norm(extended.points_ras[-1] - base.points_ras[-1])), 12.0, delta=0.5
+        )
+
     def test_no_teeth_returns_none_without_raising(self) -> None:
         mask = np.zeros((20, 20, 20), dtype=np.int16)
         self.assertIsNone(fit_arch_from_label_mask(mask, _affine(mask.shape), jaw="lower", is_5class=False))

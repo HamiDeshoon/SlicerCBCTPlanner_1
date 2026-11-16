@@ -319,6 +319,102 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         bannerLayout.addLayout(chipsRow)
         self.layout.addWidget(bannerFrame)
 
+        # AI segmentation configuration lives outside the clinical workflow steps.
+        # It is a one-time preset, persisted in QSettings, so the main Step 1 panel
+        # stays focused on loading data and reviewing results.
+        self.aiSettingsBox = ctk.ctkCollapsibleButton()
+        self.aiSettingsBox.text = "AI Segmentation Settings (saved preset — set once)"
+        self.aiSettingsBox.collapsed = True
+        self.layout.addWidget(self.aiSettingsBox)
+        aiSettingsLayout = qt.QFormLayout(self.aiSettingsBox)
+
+        self.nnunetBox = ctk.ctkCollapsibleButton()
+        self.nnunetBox.text = "nnU-Net ToothFairy3 model"
+        self.nnunetBox.collapsed = False
+        aiSettingsLayout.addRow(self.nnunetBox)
+        nnunetLayout = qt.QFormLayout(self.nnunetBox)
+
+        modelRow = qt.QHBoxLayout()
+        self.nnunetModelPathEdit = qt.QLineEdit()
+        self.nnunetModelPathEdit.setPlaceholderText("Path to nnU-Net model folder or checkpoint (.pth)")
+        self.btnBrowseNNUNetModel = qt.QPushButton("Browse...")
+        modelRow.addWidget(self.nnunetModelPathEdit)
+        modelRow.addWidget(self.btnBrowseNNUNetModel)
+        nnunetLayout.addRow("Model / Checkpoint:", modelRow)
+
+        self.nnunetDeviceCombo = qt.QComboBox()
+        self.nnunetDeviceCombo.addItems(
+            [
+                "Auto (GPU FP32 / CPU INT8)",
+                "CPU (INT8 Quantized)",
+                "GPU (FP32 Full Precision)",
+            ]
+        )
+        nnunetLayout.addRow("Compute & Precision:", self.nnunetDeviceCombo)
+
+        self.nnunetFoldCombo = qt.QComboBox()
+        self.nnunetFoldCombo.addItems(["0", "all", "1", "2", "3", "4"])
+        nnunetLayout.addRow("Fold:", self.nnunetFoldCombo)
+
+        self.btnRunNNUNetInference = qt.QPushButton("Run nnU-Net Inference & Auto-Plan (ToothFairy3)")
+        self.btnApplyMaskPipeline = qt.QPushButton("Apply Mask to Full Planning Pipeline")
+        nnunetLayout.addRow(self.btnRunNNUNetInference)
+        nnunetLayout.addRow(self.btnApplyMaskPipeline)
+
+        self.checkpointPathEdit = ctk.ctkPathLineEdit()
+        self.checkpointPathEdit.setToolTip(
+            "Select your trained 3D segmentation checkpoint (.pth, .pt, .ckpt, .onnx, .npy, .nii.gz, or nnU-Net model folder)."
+        )
+        aiSettingsLayout.addRow("Custom AI model / checkpoint:", self.checkpointPathEdit)
+
+        self.customArchPathEdit = ctk.ctkPathLineEdit()
+        self.customArchPathEdit.setToolTip(
+            "Optional: custom Python (.py) model definition for a raw PyTorch state_dict."
+        )
+        aiSettingsLayout.addRow("Custom model .py (optional):", self.customArchPathEdit)
+
+        ckptRunRow = qt.QHBoxLayout()
+        self.ckptSchemeCombo = qt.QComboBox()
+        self.ckptSchemeCombo.addItem("ToothFairy3 (32 FDI Teeth + Canal)", "toothfairy3")
+        self.ckptSchemeCombo.addItem("5-Class (Dental)", "5class")
+        self.ckptSchemeCombo.setToolTip("Output class label scheme of the checkpoint.")
+        self.ckptPatchSpin = qt.QSpinBox()
+        self.ckptPatchSpin.minimum = 32
+        self.ckptPatchSpin.maximum = 256
+        self.ckptPatchSpin.singleStep = 16
+        self.ckptPatchSpin.value = 96
+        self.ckptPatchSpin.suffix = "³"
+        self.ckptPatchSpin.setToolTip("3D sliding-window cubic patch size (e.g. 96³ or 128³).")
+        self.btnRunCheckpointSeg = qt.QPushButton("Run Checkpoint Segmentation")
+        self.btnRunCheckpointSeg.setToolTip(
+            "Run 3D Gaussian-weighted sliding-window inference using your checkpoint and populate the Slicer Segmentation node."
+        )
+        ckptRunRow.addWidget(self.ckptSchemeCombo)
+        ckptRunRow.addWidget(qt.QLabel("Patch:"))
+        ckptRunRow.addWidget(self.ckptPatchSpin)
+        ckptRunRow.addWidget(self.btnRunCheckpointSeg)
+        aiSettingsLayout.addRow("Checkpoint inference:", ckptRunRow)
+
+        aiSaveRow = qt.QHBoxLayout()
+        self.btnSaveAiPreset = qt.QPushButton("Save AI Preset")
+        self.btnSaveAiPreset.setToolTip(
+            "Save model paths, device, fold, scheme and patch size for every future session."
+        )
+        self.aiPresetStatusLabel = qt.QLabel("Preset not loaded yet")
+        aiSaveRow.addWidget(self.btnSaveAiPreset)
+        aiSaveRow.addWidget(self.aiPresetStatusLabel, 1)
+        aiSettingsLayout.addRow(aiSaveRow)
+        self._restore_ai_settings_preset()
+        self.btnSaveAiPreset.clicked.connect(self._save_ai_settings_preset)
+        for signal_name in ("editingFinished", "currentPathChanged"):
+            for widget in (self.nnunetModelPathEdit, self.checkpointPathEdit, self.customArchPathEdit):
+                signal = getattr(widget, signal_name, None)
+                if signal is not None and hasattr(signal, "connect"):
+                    signal.connect(self._save_ai_settings_preset)
+        for widget in (self.nnunetDeviceCombo, self.nnunetFoldCombo, self.ckptSchemeCombo):
+            widget.currentIndexChanged.connect(self._save_ai_settings_preset)
+        self.ckptPatchSpin.valueChanged.connect(self._save_ai_settings_preset)
+
         # ==================== STEP 1: LOAD & CUSTOM AI CHECKPOINT ====================
         self.step1Box = ctk.ctkCollapsibleButton()
         self.step1Box.text = "Step 1: Load CBCT, Custom AI Checkpoint & 3D / VR View"
@@ -405,74 +501,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logger.debug("Could not read autoStandardizeOnLoad setting", exc_info=True)
         step1Layout.addRow(self.autoStandardizeOnLoadCheck)
 
-        self.nnunetBox = ctk.ctkCollapsibleButton()
-        self.nnunetBox.text = "AI Segmentation (nnU-Net ToothFairy3)"
-        self.nnunetBox.collapsed = True
-        step1Layout.addRow(self.nnunetBox)
-        nnunetLayout = qt.QFormLayout(self.nnunetBox)
-
-        modelRow = qt.QHBoxLayout()
-        self.nnunetModelPathEdit = qt.QLineEdit()
-        self.nnunetModelPathEdit.setPlaceholderText("Path to nnU-Net model folder or checkpoint (.pth)")
-        self.btnBrowseNNUNetModel = qt.QPushButton("Browse...")
-        modelRow.addWidget(self.nnunetModelPathEdit)
-        modelRow.addWidget(self.btnBrowseNNUNetModel)
-        nnunetLayout.addRow("Model / Checkpoint:", modelRow)
-
-        self.nnunetDeviceCombo = qt.QComboBox()
-        self.nnunetDeviceCombo.addItems(
-            [
-                "Auto (GPU FP32 / CPU INT8)",
-                "CPU (INT8 Quantized)",
-                "GPU (FP32 Full Precision)",
-            ]
-        )
-        nnunetLayout.addRow("Compute & Precision:", self.nnunetDeviceCombo)
-
-        self.nnunetFoldCombo = qt.QComboBox()
-        self.nnunetFoldCombo.addItems(["0", "all", "1", "2", "3", "4"])
-        nnunetLayout.addRow("Fold:", self.nnunetFoldCombo)
-
-        self.btnRunNNUNetInference = qt.QPushButton("Run nnU-Net Inference & Auto-Plan (ToothFairy3)")
-        self.btnApplyMaskPipeline = qt.QPushButton("Apply Mask to Full Planning Pipeline")
-        nnunetLayout.addRow(self.btnRunNNUNetInference)
-        nnunetLayout.addRow(self.btnApplyMaskPipeline)
-
-        # Custom AI Checkpoint Loader
-        self.checkpointPathEdit = ctk.ctkPathLineEdit()
-        self.checkpointPathEdit.setToolTip(
-            "Select your trained 3D segmentation checkpoint (.pth, .pt, .ckpt, .onnx, .npy, .nii.gz, or nnU-Net model folder)."
-        )
-        step1Layout.addRow("AI Model Checkpoint:", self.checkpointPathEdit)
-
-        self.customArchPathEdit = ctk.ctkPathLineEdit()
-        self.customArchPathEdit.setToolTip(
-            "Optional: Select your custom Python (.py) model file if loading a raw PyTorch state_dict with a custom nn.Module."
-        )
-        step1Layout.addRow("Custom Model .py (Optional):", self.customArchPathEdit)
-
-        ckptRunRow = qt.QHBoxLayout()
-        self.ckptSchemeCombo = qt.QComboBox()
-        self.ckptSchemeCombo.addItem("ToothFairy3 (32 FDI Teeth + Canal)", "toothfairy3")
-        self.ckptSchemeCombo.addItem("5-Class (Dental)", "5class")
-        self.ckptSchemeCombo.setToolTip("Select the output class label scheme of your checkpoint.")
-        self.ckptPatchSpin = qt.QSpinBox()
-        self.ckptPatchSpin.minimum = 32
-        self.ckptPatchSpin.maximum = 256
-        self.ckptPatchSpin.singleStep = 16
-        self.ckptPatchSpin.value = 96
-        self.ckptPatchSpin.suffix = "³"
-        self.ckptPatchSpin.setToolTip("3D sliding-window cubic patch size (e.g. 96³ or 128³).")
-        self.btnRunCheckpointSeg = qt.QPushButton("Run Checkpoint Segmentation")
-        self.btnRunCheckpointSeg.setToolTip(
-            "Run 3D Gaussian-weighted sliding-window inference using your checkpoint and populate the Slicer Segmentation node."
-        )
-        ckptRunRow.addWidget(self.ckptSchemeCombo)
-        ckptRunRow.addWidget(qt.QLabel("Patch:"))
-        ckptRunRow.addWidget(self.ckptPatchSpin)
-        ckptRunRow.addWidget(self.btnRunCheckpointSeg)
-        step1Layout.addRow("Checkpoint Inference:", ckptRunRow)
-
         layoutBtnRow = qt.QHBoxLayout()
         self.btnDentalLightbox = qt.QPushButton("3-Slice Lightbox (-2 / 0 / +2 mm)")
         self.btnDentalLightbox.setToolTip(
@@ -517,6 +545,13 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.vrPresetCombo = qt.QComboBox()
         self.vrPresetCombo.addItems(list(VRVisualizationLogic.SUPPORTED_VR_PRESETS))
+        self.vrPresetCombo.setCurrentText("DentalSegmentator (Teeth & Bone)")
+        try:
+            saved_vr = str(qt.QSettings().value(self.SETTINGS_PREFIX + "vrPreset", "") or "")
+            if saved_vr:
+                self.vrPresetCombo.setCurrentText(saved_vr)
+        except Exception:
+            logger.debug("Could not restore VR preset", exc_info=True)
         self.vrPresetCombo.setToolTip(
             "Select Volume Rendering transfer function preset (re-applied cleanly on change, B8)."
         )
@@ -1602,6 +1637,11 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     standardized, report = self.logic.standardize_orientation(node, segNode, mode="in_place")
                     if standardized is not None:
                         self.step1HintLabel.setText("Orientation: " + self._formatOrientationReport(report))
+                        if slicer:
+                            try:
+                                slicer.util.setSliceViewerLayers(background=standardized, fit=True)
+                            except Exception:
+                                logger.debug("Could not refit slice views after in-place RAS", exc_info=True)
                     else:
                         logger.warning("Auto-standardize skipped: %s", "; ".join(report.notes))
             except Exception:
@@ -1655,9 +1695,18 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.step1HintLabel.setText("Orientation: " + summary)
             return
         self.volumeSelector.setCurrentNode(newVol)
+        if self._parameterNode is not None:
+            self._parameterNode.SetNodeReferenceID("InputVolume", newVol.GetID())
+        if segNode is not None:
+            self.segmentationSelector.setCurrentNode(segNode)
         self.step1HintLabel.setText("Orientation: " + summary)
         self.globalStatusLabel.setText("Standardized to RAS")
+        self.updateGUIFromParameterNode()
         if slicer:
+            try:
+                slicer.util.setSliceViewerLayers(background=newVol, fit=True)
+            except Exception:
+                logger.debug("Could not refit slice views after RAS standardization", exc_info=True)
             slicer.util.showStatusMessage("Standardized volume to RAS", 4000)
 
     def onAutoDetectOrientationClicked(self) -> None:
@@ -1699,6 +1748,56 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logger.error("Manual %s flip failed", axis)
             if slicer:
                 slicer.util.errorDisplay(f"Manual {axis} flip failed.")
+
+    def _restore_ai_settings_preset(self) -> None:
+        """Load the one-time AI segmentation preset saved in QSettings."""
+        if qt is None:
+            return
+        try:
+            settings = qt.QSettings()
+            prefix = self.SETTINGS_PREFIX + "aiPreset/"
+            self.nnunetModelPathEdit.setText(str(settings.value(prefix + "nnunetModelPath", "") or ""))
+            self.nnunetDeviceCombo.setCurrentIndex(int(settings.value(prefix + "deviceIndex", 0) or 0))
+            fold = str(settings.value(prefix + "fold", "0") or "0")
+            fold_index = self.nnunetFoldCombo.findText(fold)
+            self.nnunetFoldCombo.setCurrentIndex(max(0, fold_index))
+            self.checkpointPathEdit.setCurrentPath(str(settings.value(prefix + "checkpointPath", "") or ""))
+            self.customArchPathEdit.setCurrentPath(str(settings.value(prefix + "customArchPath", "") or ""))
+            scheme = str(settings.value(prefix + "scheme", "toothfairy3") or "toothfairy3")
+            scheme_index = self.ckptSchemeCombo.findData(scheme)
+            self.ckptSchemeCombo.setCurrentIndex(max(0, scheme_index))
+            self.ckptPatchSpin.value = int(settings.value(prefix + "patchSize", 96) or 96)
+            has_preset = bool(
+                self.nnunetModelPathEdit.text
+                or self.checkpointPathEdit.currentPath
+                or self.customArchPathEdit.currentPath
+            )
+            if hasattr(self, "aiPresetStatusLabel"):
+                self.aiPresetStatusLabel.setText(
+                    "Preset restored for this session" if has_preset else "Preset not set yet"
+                )
+        except Exception:
+            logger.debug("Could not restore the AI segmentation preset", exc_info=True)
+
+    def _save_ai_settings_preset(self, *_args: Any) -> None:
+        """Persist the AI segmentation preset so it is configured once, not per case."""
+        if qt is None:
+            return
+        try:
+            settings = qt.QSettings()
+            prefix = self.SETTINGS_PREFIX + "aiPreset/"
+            settings.setValue(prefix + "nnunetModelPath", self.nnunetModelPathEdit.text)
+            settings.setValue(prefix + "deviceIndex", self.nnunetDeviceCombo.currentIndex)
+            settings.setValue(prefix + "fold", self.nnunetFoldCombo.currentText)
+            settings.setValue(prefix + "checkpointPath", self.checkpointPathEdit.currentPath)
+            settings.setValue(prefix + "customArchPath", self.customArchPathEdit.currentPath)
+            settings.setValue(prefix + "scheme", self.ckptSchemeCombo.currentData)
+            settings.setValue(prefix + "patchSize", self.ckptPatchSpin.value)
+            settings.sync()
+            if hasattr(self, "aiPresetStatusLabel"):
+                self.aiPresetStatusLabel.setText("AI preset saved — reused in future sessions")
+        except Exception:
+            logger.exception("Could not save the AI segmentation preset")
 
     def onBrowseNNUNetModelClicked(self) -> None:
         path = qt.QFileDialog.getExistingDirectory(self.parent, "Select nnU-Net ToothFairy3 Model Folder")
@@ -2810,6 +2909,39 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 selected_fdis = [41, 42, 43, 44, 45, 46, 47]  # Standard quadrant default
 
         quadrant = int(str(selected_fdis[0])[0]) if selected_fdis else 4
+        if segNode is None and self.logic is not None:
+            if slicer:
+                slicer.util.warningDisplay(
+                    "The print layout needs a segmentation to locate the arch and draw measurements.\n"
+                    "Run AI segmentation (or load a mask), then try again."
+                )
+            return
+
+        # The layout needs an arch curve. Fit it automatically instead of failing with
+        # "No arch positions" when the user went straight from segmentation to print.
+        if segNode is not None and self.logic is not None:
+            jaw_key = "lower" if quadrant in (3, 4) else "upper"
+            curve = self.logic.get_curve_node_for_jaw(volNode, jaw_key.capitalize())
+            if curve is None or curve.GetNumberOfControlPoints() < 4:
+                self.globalStatusLabel.setText("Print layout: fitting arch...")
+                curve = self.logic.auto_fit_arch_for_jaw(
+                    volumeNode=volNode,
+                    segmentationNode=segNode,
+                    jaw=jaw_key.capitalize(),
+                    visible=False,
+                    confirm_overwrite=False,
+                    allow_overwrite_user_edit=False,
+                )
+                if curve is None or curve.GetNumberOfControlPoints() < 4:
+                    reason = self.logic.last_arch_fit_error or "no accepted arch fit"
+                    self.globalStatusLabel.setText(f"Print layout stopped: {reason}")
+                    if slicer:
+                        slicer.util.warningDisplay(
+                            "Could not fit the dental arch for the print layout:\n"
+                            f"{reason}\n\nFit or draw the arch in Step 2, then retry."
+                        )
+                    return
+                self._observeCurveEdits(curve)
 
         from CBCTPlannerLib.PrintLayoutEngine import PrintLayoutEngine
 
@@ -3609,6 +3741,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         segmentationNode: Any = None,
         *,
         mode: str = "clone",
+        allow_resample: bool = True,
     ) -> Tuple[Optional[Any], Any]:
         """Losslessly convert a volume (and optionally its segmentation) to RAS.
 
@@ -3620,6 +3753,8 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             _obliquity_deg,
             axcodes_from_affine,
             canonicalize_to_ras,
+            resample_mask_to_grid,
+            resample_to_ras,
             verify_orientation,
         )
 
@@ -3646,13 +3781,17 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             logger.exception("RAS canonicalization failed")
             return None, OrientationReport(notes=[f"Canonicalization failed: {exc}"])
 
+        resampled = False
         if result.is_oblique:
-            return None, OrientationReport(
-                notes=[
-                    f"Volume axes are oblique ({_obliquity_deg(affine):.1f}° > 5°). "
-                    "No lossless permutation is possible; resample with OrientScalarVolume first."
-                ]
-            )
+            if not allow_resample:
+                return None, OrientationReport(
+                    notes=[
+                        f"Volume axes are oblique ({_obliquity_deg(affine):.1f}° > 5°). "
+                        "No lossless permutation is possible; enable resampling or run OrientScalarVolume."
+                    ]
+                )
+            result = resample_to_ras(arr, affine)
+            resampled = True
 
         target_volume = volumeNode
         if mode == "clone":
@@ -3675,11 +3814,18 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         if segmentationNode is not None:
             from CBCTPlannerLib.core.orientation import apply_ops
 
+            if resampled:
+                target_shape = result.image_zyx.shape
+                segment_func = lambda seg_arr: resample_mask_to_grid(  # noqa: E731
+                    seg_arr, affine, result.affine, target_shape
+                )
+            else:
+                segment_func = lambda seg_arr: apply_ops(seg_arr, result.ops)  # noqa: E731
             updated_segments = self._apply_segment_ops(
                 segmentationNode,
                 volumeNode,
                 target_volume,
-                lambda seg_arr: apply_ops(seg_arr, result.ops),
+                segment_func,
             )
             if hasattr(segmentationNode, "SetReferenceImageGeometryParameterFromVolumeNode"):
                 segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(target_volume)
@@ -3688,7 +3834,8 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
 
         report = OrientationReport(
             notes=[
-                f"Canonicalized {axcodes_from_affine(affine)} -> {axcodes_from_affine(result.affine)} "
+                f"{'Resampled' if resampled else 'Canonicalized'} "
+                f"{axcodes_from_affine(affine)} -> {axcodes_from_affine(result.affine)} "
                 f"({updated_segments} segment(s) re-encoded)."
             ]
         )
@@ -3698,7 +3845,8 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 report = verify_orientation(mask, result.affine, is_5class=is_5class)
                 report.notes.insert(
                     0,
-                    f"Canonicalized {axcodes_from_affine(affine)} -> "
+                    f"{'Resampled' if resampled else 'Canonicalized'} "
+                    f"{axcodes_from_affine(affine)} -> "
                     f"{axcodes_from_affine(result.affine)} ({updated_segments} segment(s) re-encoded).",
                 )
             else:
@@ -4007,6 +4155,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             jaw=jaw_cap,
             is_5class=is_5class,
             num_control_points=11,
+            end_extension_mm=12.0,
         )
         self.last_arch_fit = fit
         if fit is None or not fit.accepted:

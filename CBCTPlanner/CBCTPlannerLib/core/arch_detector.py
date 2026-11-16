@@ -719,6 +719,27 @@ def _polyline_arc_length(points: np.ndarray) -> float:
     return float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
 
 
+def _extend_arch_endpoints(points: np.ndarray, extension_mm: float) -> np.ndarray:
+    """Extend a right-to-left arch polyline tangentially at both ends.
+
+    The extension follows the end segment direction, so a horseshoe arch keeps its
+    curvature trend and reaches the retromolar/tuberosity region without inventing
+    a new curve shape. Non-positive extensions are a no-op.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    if extension_mm <= 0.0 or len(pts) < 3:
+        return pts
+    start_dir = pts[0] - pts[1]
+    end_dir = pts[-1] - pts[-2]
+    start_norm = float(np.linalg.norm(start_dir))
+    end_norm = float(np.linalg.norm(end_dir))
+    if start_norm < 1e-9 or end_norm < 1e-9:
+        return pts
+    start = pts[0] + start_dir / start_norm * extension_mm
+    end = pts[-1] + end_dir / end_norm * extension_mm
+    return np.vstack([start[None, :], pts, end[None, :]])
+
+
 def _spline_through_ordered(
     ordered: np.ndarray, num_control_points: int, smoothing: float
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -807,6 +828,7 @@ def fit_arch_from_label_mask(
     jaw: str,
     is_5class: bool,
     num_control_points: int = 11,
+    end_extension_mm: float = 0.0,
 ) -> Optional[ArchFitResult]:
     """Fit a dental arch curve directly from tooth voxels (no mesh extraction).
 
@@ -922,6 +944,9 @@ def fit_arch_from_label_mask(
         ctrl, dense = _spline_through_ordered(ordered, num_control_points, smoothing=0.05)
         residual = _rms_to_polyline(crown, dense)
         n_used = len(crown)
+
+    ctrl = _extend_arch_endpoints(ctrl, float(end_extension_mm))
+    dense = _extend_arch_endpoints(dense, float(end_extension_mm))
 
     arc_length = _polyline_arc_length(dense)
     reason = ""

@@ -153,6 +153,102 @@ def canonicalize_to_ras(
     )
 
 
+def resample_to_ras(
+    image_zyx: np.ndarray,
+    affine: np.ndarray,
+    *,
+    order: int = 1,
+    cval: float = -1000.0,
+) -> CanonResult:
+    """Resample an oblique volume onto a RAS-aligned grid (only when lossless permutation is impossible).
+
+    The output spacing is the source spacing projected on RAS; the grid bounds are the
+    transformed source corners, so no anatomy is cropped. Use ``order=0`` and
+    :func:`resample_mask_to_grid` for label masks.
+    """
+    image = np.asarray(image_zyx)
+    matrix = np.asarray(affine, dtype=np.float64)
+    if image.ndim != 3 or matrix.shape != (4, 4):
+        raise ValueError("image_zyx must be 3D and affine must be 4x4")
+    try:
+        from scipy import ndimage  # type: ignore
+    except ImportError as exc:  # pragma: no cover - SciPy ships with Slicer
+        raise RuntimeError("Resampling an oblique volume requires SciPy") from exc
+
+    spacing = np.linalg.norm(matrix[:3, :3], axis=0)
+    spacing[spacing < 1e-9] = 1.0
+    corners = np.array(
+        [
+            [i, j, k, 1.0]
+            for i in (0, image.shape[2] - 1)
+            for j in (0, image.shape[1] - 1)
+            for k in (0, image.shape[0] - 1)
+        ],
+        dtype=np.float64,
+    )
+    world = (matrix @ corners.T).T[:, :3]
+    origin = world.min(axis=0)
+    extent = world.max(axis=0) - origin
+    # World extents are (x, y, z); array shape is (Z, Y, X).
+    output_shape = (
+        int(np.floor(extent[2] / spacing[2] + 1e-6)) + 1,
+        int(np.floor(extent[1] / spacing[1] + 1e-6)) + 1,
+        int(np.floor(extent[0] / spacing[0] + 1e-6)) + 1,
+    )
+    new_affine = np.eye(4, dtype=np.float64)
+    new_affine[:3, :3] = np.diag(spacing)
+    new_affine[:3, 3] = origin
+
+    k_idx, j_idx, i_idx = np.indices(output_shape, dtype=np.float64)
+    world_out = np.stack([i_idx, j_idx, k_idx], axis=-1)
+    world_flat = world_out.reshape(-1, 3) * spacing[None, :] + origin[None, :]
+    inv = np.linalg.inv(matrix)
+    vox = (inv[:3, :3] @ world_flat.T).T + inv[:3, 3][None, :]
+    coords = np.vstack([vox[:, 2], vox[:, 1], vox[:, 0]])
+    sampled = ndimage.map_coordinates(
+        image, coords, order=order, mode="constant", cval=float(cval), prefilter=order > 1
+    )
+    return CanonResult(
+        image_zyx=np.asarray(sampled).reshape(output_shape).astype(image.dtype),
+        affine=new_affine,
+        ops=ArrayOps(perm=(0, 1, 2), flip=(False, False, False)),
+        max_obliquity_deg=_obliquity_deg(matrix),
+        is_oblique=True,
+    )
+
+
+def resample_mask_to_grid(
+    mask_zyx: np.ndarray,
+    source_affine: np.ndarray,
+    target_affine: np.ndarray,
+    target_shape_zyx: Tuple[int, int, int],
+) -> np.ndarray:
+    """Nearest-neighbour resample a label mask onto an existing target grid."""
+    mask = np.asarray(mask_zyx)
+    source = np.asarray(source_affine, dtype=np.float64)
+    target = np.asarray(target_affine, dtype=np.float64)
+    shape = tuple(int(v) for v in target_shape_zyx)
+    k_idx, j_idx, i_idx = np.indices(shape, dtype=np.float64)
+    world = np.stack([i_idx, j_idx, k_idx], axis=-1).reshape(-1, 3)
+    world = (target[:3, :3] @ world.T).T + target[:3, 3][None, :]
+    inv = np.linalg.inv(source)
+    vox = (inv[:3, :3] @ world.T).T + inv[:3, 3][None, :]
+    try:
+        from scipy import ndimage  # type: ignore
+
+        sampled = ndimage.map_coordinates(
+            mask,
+            np.vstack([vox[:, 2], vox[:, 1], vox[:, 0]]),
+            order=0,
+            mode="constant",
+            cval=0,
+            prefilter=False,
+        )
+        return np.asarray(sampled).reshape(shape).astype(mask.dtype)
+    except ImportError:  # pragma: no cover
+        return np.zeros(shape, dtype=mask.dtype)
+
+
 def flip_axis(image_zyx: np.ndarray, affine: np.ndarray, axis: str) -> Tuple[np.ndarray, np.ndarray]:
     """Mirror the array along an anatomical axis and update the affine.
 

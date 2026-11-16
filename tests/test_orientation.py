@@ -217,6 +217,34 @@ class TestVerifyOrientation(unittest.TestCase):
         report_lr = verify_orientation(inverted_lr, affine, is_5class=False)
         self.assertFalse(report_lr.lr_ok)
 
+    def test_oblique_volume_resamples_to_ras_without_mirroring(self) -> None:
+        from CBCTPlannerLib.core.orientation import resample_to_ras
+
+        angle = np.deg2rad(11.0)
+        rotation = np.array(
+            [[1.0, 0.0, 0.0], [0.0, np.cos(angle), -np.sin(angle)], [0.0, np.sin(angle), np.cos(angle)]]
+        )
+        affine = np.eye(4)
+        affine[:3, :3] = rotation
+        affine[:3, 3] = [-15.0, -15.0, -15.0]
+        image = np.zeros((24, 32, 40), dtype=np.int16)
+        image[8:14, 12:22, 16:28] = 46
+        result = resample_to_ras(image, affine)
+        self.assertEqual(axcodes_from_affine(result.affine), ("R", "A", "S"))
+        self.assertTrue(result.is_oblique)
+        self.assertGreater(int(np.count_nonzero(result.image_zyx == 46)), 300)
+
+        # World centroid must stay in the same anatomical octant and within one voxel.
+        def world_centroid(arr, aff):
+            z, y, x = np.nonzero(arr == 46)
+            return (aff @ np.array([x.mean(), y.mean(), z.mean(), 1.0]))[:3]
+
+        self.assertTrue(
+            np.allclose(
+                world_centroid(image, affine), world_centroid(result.image_zyx, result.affine), atol=1.5
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
