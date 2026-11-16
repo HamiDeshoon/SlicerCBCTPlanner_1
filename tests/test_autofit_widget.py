@@ -25,6 +25,7 @@ class _FakeFit:
     arc_length_mm = 134.0
     tooth_bearing_arc_mm = 110.0
     end_extension_mm = 12.0
+    applied_extension_mm = 12.0
     residual_rms_mm = 0.7
     method = "fdi_centroids"
 
@@ -83,6 +84,8 @@ class TestAutoFitWidgetFlow(unittest.TestCase):
         self.assertEqual(calls, ["pano"])
         self.assertIn("fdi_centroids", widget.step2HintLabel.text)
         self.assertIn("RMS", widget.step2HintLabel.text)
+        self.assertIn("tooth-bearing 110.0 mm", widget.step2HintLabel.text)
+        self.assertIn("curve 134.0 mm", widget.step2HintLabel.text)
         self.assertFalse(widget.step3Box.collapsed)
 
     def test_autofit_without_segmentation_warns_and_places_manually(self) -> None:

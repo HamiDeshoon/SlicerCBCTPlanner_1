@@ -758,7 +758,7 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         v = np.arange(-10.0, 10.01, 0.25)
         mask_cs = np.zeros((len(v), len(u)), dtype=np.int32)
         mask_cs[v <= 2.0, :] = 2
-        img_cs = np.full_like(mask_cs, 900.0, dtype=np.float32)
+        img_cs = (600.0 + np.add.outer(v * 40.0, u * 20.0)).astype(np.float32)
 
         def _cs() -> CrossSectionData:
             return CrossSectionData(
@@ -854,8 +854,8 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
             with Image.open(io.BytesIO(first_png)) as png:
                 self.assertEqual(png.size, (160, 160))
                 pixels = np.asarray(png.convert("L"), dtype=np.float32)
-            self.assertGreater(float(pixels.std()), 10.0)
-            self.assertGreater(float(pixels.max()) - float(pixels.min()), 30.0)
+            self.assertGreater(float(pixels.std()), 15.0)
+            self.assertGreater(float(pixels.max()) - float(pixels.min()), 80.0)
             self.assertGreaterEqual(float(pixels.min()), 0.0)
             self.assertLessEqual(float(pixels.max()), 255.0)
             self.assertIn("Quadrant 4", html_txt)
@@ -942,18 +942,35 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertEqual(int(np.count_nonzero(cleaned == 46)), 8 * 8 * 8)
         self.assertEqual(int(cleaned[15, 15, 15]), 0)
 
-    def test_remove_small_label_islands_never_erases_small_real_label(self) -> None:
-        """A thin root / impacted molar smaller than the speckle threshold must survive."""
+    def test_remove_small_label_islands_preserves_sub_threshold_sliver_and_blob(self) -> None:
+        """A thin root and a small impacted molar, each below the threshold, must survive."""
         from CBCTPlannerLib.CheckpointInference import remove_small_label_islands
 
         labels = np.zeros((24, 24, 24), dtype=np.uint16)
-        labels[2:5, 2:7, 2:3] = 38  # one flat, 15-voxel root fragment (main component)
-        labels[2, 2, 2] = 38
-        labels[20, 20, 20] = 38  # isolated one-voxel seam speckle
+        labels[2:14, 2, 2] = 38  # 12-voxel thin-root sliver (main component)
+        labels[2, 2, 2] = 38  # extra speckle inside the same bbox
+        labels[16:18, 16:18, 16:19] = 48  # 12-voxel compact impacted-molar blob
+        labels[20, 20, 20] = 48  # isolated one-voxel seam speckle
         cleaned = remove_small_label_islands(labels, min_voxels=20)
-        self.assertEqual(int(np.count_nonzero(cleaned == 38)), 15 + 1 - 1)
-        self.assertEqual(int(cleaned[2:5, 2:7, 2:3].sum()), 38 * 15)
+        self.assertEqual(int(np.count_nonzero(cleaned == 38)), 12)
+        self.assertEqual(int(np.count_nonzero(cleaned == 48)), 12)
+        self.assertTrue(np.all(cleaned[2:14, 2, 2] == 38))
+        self.assertTrue(np.all(cleaned[16:18, 16:18, 16:19] == 48))
         self.assertEqual(int(cleaned[20, 20, 20]), 0)
+
+    def test_remove_small_label_islands_is_deterministic_and_bbox_bounded(self) -> None:
+        """Repeated runs match, and a neighbouring label inside the crop is never cleared."""
+        from CBCTPlannerLib.CheckpointInference import remove_small_label_islands
+
+        labels = np.zeros((20, 20, 20), dtype=np.uint16)
+        labels[2, 2, 2] = 38
+        labels[2, 2, 18] = 38  # same label's bbox spans x=2..18
+        labels[2, 2, 8:13] = 46  # neighbouring label's only (small) component
+        outputs = [remove_small_label_islands(labels, min_voxels=8) for _ in range(8)]
+        for output in outputs[1:]:
+            np.testing.assert_array_equal(output, outputs[0])
+        self.assertTrue(np.all(outputs[0][2, 2, 8:13] == 46))
+        self.assertEqual(int(np.count_nonzero(outputs[0] == 38)), 1)
 
 
 if __name__ == "__main__":

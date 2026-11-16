@@ -149,12 +149,118 @@ class TestFitArchFromLabelMask(unittest.TestCase):
             float(np.linalg.norm(extended.points_ras[-1] - base.points_ras[-1])), 12.0, delta=0.5
         )
 
-    def test_5class_tooth_span_excludes_retromolar_extension(self) -> None:
-        """Approximate FDI sites must not be spread over the cosmetic 12 mm extension."""
+    def test_extension_is_monotone_bounded_and_seam_continuous(self) -> None:
+        """The 12 mm extension must not kink, flip slice normals, teleport, or leave the FOV."""
+        from CBCTPlannerLib.core.arch_detector import (
+            DentalArch,
+            _extend_arch_endpoints,
+            project_point_to_polyline_arc_mm,
+        )
+
+        points = np.array([[0.0, 0.0, 0.0], [0.2, 0.0, 0.0], [0.4, 0.0, 0.0]])
+        bounded = _extend_arch_endpoints(points, 10.0, inverse_affine=np.eye(4), shape_zyx=(1, 1, 11))
+        self.assertTrue(np.all(bounded[:, 0] <= 10.0 + 1e-9))
+        self.assertAlmostEqual(float(bounded[-1, 0]), 10.0, delta=1e-9)
+        steps = np.linalg.norm(np.diff(bounded, axis=0), axis=1)
+        self.assertLessEqual(float(steps.max()), 0.2 + 1e-9)
+
+        mask = _phantom("lower", is_5class=False)
+        affine = _affine(mask.shape)
+        base = fit_arch_from_label_mask(mask, affine, jaw="lower", is_5class=False)
+        extended = fit_arch_from_label_mask(mask, affine, jaw="lower", is_5class=False, end_extension_mm=12.0)
+        self.assertIsNotNone(base)
+        self.assertIsNotNone(extended)
+        assert base is not None and extended is not None
+        self.assertAlmostEqual(extended.applied_extension_mm, 12.0, delta=0.1)
+        arch = DentalArch(extended.points_ras, jaw_type="lower", ras_convention=True)
+        dense_steps = np.linalg.norm(np.diff(arch.pts_dense, axis=0), axis=1)
+        self.assertTrue(np.all(dense_steps > 1e-9))
+        self.assertLess(float(dense_steps.max() / dense_steps.min()), 1.25)
+        self.assertTrue(np.all(np.diff(arch.cum_arc_lengths) > 1e-9))
+
+        vox = (
+            np.linalg.inv(affine) @ np.hstack([extended.points_ras, np.ones((len(extended.points_ras), 1))]).T
+        ).T[:, :3]
+        self.assertTrue(np.all(vox >= -1e-6))
+        self.assertTrue(np.all(vox <= np.array(mask.shape[::-1]) - 1 + 1e-6))
+
+        for idx, base_idx in ((0, 0), (-1, -1)):
+            vec = extended.points_ras[idx] - base.points_ras[base_idx]
+            base_tangent = (
+                base.points_ras[0] - base.points_ras[1]
+                if idx == 0
+                else base.points_ras[-1] - base.points_ras[-2]
+            )
+            self.assertGreater(
+                float(np.dot(vec, base_tangent) / (np.linalg.norm(vec) * np.linalg.norm(base_tangent))), 0.999
+            )
+            seam, dist, _ = project_point_to_polyline_arc_mm(
+                arch.pts_dense, arch.cum_arc_lengths, base.points_ras[base_idx]
+            )
+            self.assertLess(float(dist), 0.05)
+            before = arch.get_frame_at_mm(seam - 0.5)
+            after = arch.get_frame_at_mm(seam + 0.5)
+            tangent_angle = np.degrees(np.arccos(np.clip(np.dot(before.tangent, after.tangent), -1.0, 1.0)))
+            normal_angle = np.degrees(np.arccos(np.clip(np.dot(before.normal, after.normal), -1.0, 1.0)))
+            self.assertLess(float(tangent_angle), 5.0)
+            self.assertLess(float(normal_angle), 5.0)
+            self.assertGreater(float(np.dot(before.normal, after.normal)), 0.99)
+
+    def test_short_tooth_row_cannot_pass_gate_by_extending_ends(self) -> None:
+        """A 45 mm tooth row is rejected even though a 20 mm extension makes the curve 85 mm."""
+        mask = np.zeros((40, 96, 96), dtype=np.int16)
+        affine = _affine(mask.shape)
+        for index, theta in enumerate(np.linspace(0.0, np.pi, 8)):
+            center = np.linalg.inv(affine) @ np.array([16.0 * np.cos(theta), 12.5 * np.sin(theta), 6.0, 1.0])
+            _stamp(mask, center[:3], 2.0, int(JAW_TOOTH_ORDER["lower"][index]))
+        fit = fit_arch_from_label_mask(mask, affine, jaw="lower", is_5class=False, end_extension_mm=20.0)
+        self.assertIsNotNone(fit)
+        assert fit is not None
+        self.assertAlmostEqual(fit.tooth_bearing_arc_mm, 45.1, delta=1.5)
+        self.assertGreater(fit.arc_length_mm, 80.0)
+        self.assertFalse(fit.accepted)
+        self.assertIn("tooth-bearing arc", fit.reason)
+
+    def test_anchored_measurement_sites_are_unchanged_by_extension(self) -> None:
+        """With per-tooth anchors, site points are the same physical points after extension."""
         from CBCTPlannerLib.core.arch_detector import (
             DentalArch,
             compute_fdi_arc_positions_mm,
         )
+
+        mask = _phantom("lower", is_5class=False)
+        affine = _affine(mask.shape)
+        base = fit_arch_from_label_mask(mask, affine, jaw="lower", is_5class=False)
+        extended = fit_arch_from_label_mask(mask, affine, jaw="lower", is_5class=False, end_extension_mm=12.0)
+        assert base is not None and extended is not None
+        centroids = {}
+        for fdi in ("33", "34", "35", "36", "43", "44", "45", "46"):
+            z_idx, y_idx, x_idx = np.where(mask == int(fdi))
+            centroids[fdi] = np.array(
+                [
+                    affine[0, 0] * x_idx.mean() + affine[0, 3],
+                    affine[1, 1] * y_idx.mean() + affine[1, 3],
+                    affine[2, 2] * z_idx.mean() + affine[2, 3],
+                ]
+            )
+        base_arch = DentalArch(base.points_ras, jaw_type="lower", ras_convention=True)
+        ext_arch = DentalArch(extended.points_ras, jaw_type="lower", ras_convention=True)
+        base_sites = compute_fdi_arc_positions_mm(
+            base_arch.total_arc_length, "lower", arch=base_arch, segmented_centroids=centroids
+        )
+        ext_sites = compute_fdi_arc_positions_mm(
+            ext_arch.total_arc_length, "lower", arch=ext_arch, segmented_centroids=centroids
+        )
+        for fdi in centroids:
+            self.assertEqual(base_sites[fdi].source, "segmentation")
+            self.assertLess(
+                float(np.linalg.norm(base_sites[fdi].point_ras - ext_sites[fdi].point_ras)),
+                0.1,
+            )
+
+    def test_5class_tooth_span_excludes_retromolar_extension(self) -> None:
+        """Approximate FDI sites must not be spread over the cosmetic 12 mm extension."""
+        from CBCTPlannerLib.core.arch_detector import DentalArch
         from CBCTPlannerLib.core.measurements import MeasurementEngine
         from CBCTPlannerLib.core.volume_loader import CBCTVolume
 
@@ -184,14 +290,17 @@ class TestFitArchFromLabelMask(unittest.TestCase):
         assert span is not None
         self.assertGreater(span[0], 5.0)
         self.assertLess(span[1], arch.total_arc_length - 5.0)
-        sites = compute_fdi_arc_positions_mm(
-            fit.arc_length_mm,
-            jaw_type="lower",
-            arch=arch,
-            tooth_bearing_span_mm=span,
-        )
-        self.assertTrue(all(site.is_approximate for site in sites.values()))
-        self.assertTrue(all(span[0] - 0.1 <= site.arc_mm <= span[1] + 0.1 for site in sites.values()))
+        from CBCTPlannerLib.core.arch_detector import project_point_to_polyline_arc_mm
+
+        for fdi in ("48", "47", "46", "45", "44", "43", "42", "41"):
+            point, source, approximate = engine._estimate_missing_tooth_site_with_provenance(fdi)
+            arc, _dist, _closest = project_point_to_polyline_arc_mm(
+                arch.pts_dense, arch.cum_arc_lengths, point
+            )
+            self.assertEqual(source, "approximate_width_table")
+            self.assertTrue(approximate)
+            self.assertGreaterEqual(arc, span[0] - 0.5, (fdi, arc, span))
+            self.assertLessEqual(arc, span[1] + 0.5, (fdi, arc, span))
 
     def test_no_teeth_returns_none_without_raising(self) -> None:
         mask = np.zeros((20, 20, 20), dtype=np.int16)

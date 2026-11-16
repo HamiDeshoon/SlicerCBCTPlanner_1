@@ -719,6 +719,7 @@ class ArchFitResult:
     reason: str = ""
     tooth_bearing_arc_mm: float = 0.0
     end_extension_mm: float = 0.0
+    applied_extension_mm: float = 0.0
 
 
 def _polyline_arc_length(points: np.ndarray) -> float:
@@ -727,12 +728,40 @@ def _polyline_arc_length(points: np.ndarray) -> float:
     return float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
 
 
-def _extend_arch_endpoints(points: np.ndarray, extension_mm: float) -> np.ndarray:
+def _limit_ray_to_box(
+    origin: np.ndarray,
+    direction: np.ndarray,
+    length: float,
+    bounds: Tuple[np.ndarray, np.ndarray],
+) -> float:
+    """Return the usable ray length before leaving an axis-aligned box."""
+    if length <= 0.0:
+        return length
+    lo, hi = (np.asarray(bounds[0], dtype=np.float64), np.asarray(bounds[1], dtype=np.float64))
+    limit = float(length)
+    for axis in range(3):
+        component = float(direction[axis])
+        if component > 1e-12:
+            limit = min(limit, (float(hi[axis]) - float(origin[axis])) / component)
+        elif component < -1e-12:
+            limit = min(limit, (float(lo[axis]) - float(origin[axis])) / component)
+    return float(max(0.0, min(length, limit)))
+
+
+def _extend_arch_endpoints(
+    points: np.ndarray,
+    extension_mm: float,
+    *,
+    inverse_affine: Optional[np.ndarray] = None,
+    shape_zyx: Optional[Tuple[int, int, int]] = None,
+) -> np.ndarray:
     """Extend a right-to-left arch polyline tangentially at both ends.
 
     The extension follows the end segment direction, so a horseshoe arch keeps its
     curvature trend and reaches the retromolar/tuberosity region without inventing
-    a new curve shape. Non-positive extensions are a no-op.
+    a new curve shape. It is sampled at the source curve spacing (no 12 mm teleport)
+    and clipped to the voxel field of view so it cannot leave the scan or double back.
+    Non-positive extensions are a no-op.
     """
     pts = np.asarray(points, dtype=np.float64)
     if extension_mm <= 0.0 or len(pts) < 3:
@@ -743,9 +772,45 @@ def _extend_arch_endpoints(points: np.ndarray, extension_mm: float) -> np.ndarra
     end_norm = float(np.linalg.norm(end_dir))
     if start_norm < 1e-9 or end_norm < 1e-9:
         return pts
-    start = pts[0] + start_dir / start_norm * extension_mm
-    end = pts[-1] + end_dir / end_norm * extension_mm
-    return np.vstack([start[None, :], pts, end[None, :]])
+    start_dir /= start_norm
+    end_dir /= end_norm
+
+    def _usable_length(origin: np.ndarray, direction: np.ndarray) -> float:
+        if inverse_affine is None or shape_zyx is None:
+            return float(extension_mm)
+        inv = np.asarray(inverse_affine, dtype=np.float64)
+        shape = tuple(int(v) for v in shape_zyx)
+        dir_vox = inv[:3, :3] @ direction
+        speed = float(np.linalg.norm(dir_vox))
+        if speed < 1e-12:
+            return float(extension_mm)
+        origin_vox = inv[:3, :3] @ origin + inv[:3, 3]
+        vox_bounds = (
+            np.zeros(3, dtype=np.float64),
+            np.array([shape[2] - 1, shape[1] - 1, shape[0] - 1], dtype=np.float64),
+        )
+        allowed_vox = _limit_ray_to_box(origin_vox, dir_vox / speed, float(extension_mm) * speed, vox_bounds)
+        return allowed_vox / speed
+
+    start_len = _usable_length(pts[0], start_dir)
+    end_len = _usable_length(pts[-1], end_dir)
+    if start_len <= 1e-9 and end_len <= 1e-9:
+        return pts
+
+    base_steps = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    positive = base_steps[base_steps > 1e-9]
+    spacing = float(np.median(positive)) if len(positive) else float(extension_mm)
+    spacing = max(1e-3, spacing)
+
+    def _samples(origin: np.ndarray, direction: np.ndarray, length: float) -> np.ndarray:
+        if length <= 1e-9:
+            return np.empty((0, 3), dtype=np.float64)
+        count = min(10000, max(1, int(np.ceil(length / spacing))))
+        return origin[None, :] + direction[None, :] * np.linspace(0.0, length, count + 1)[1:, None]
+
+    start_pts = _samples(pts[0], start_dir, start_len)
+    end_pts = _samples(pts[-1], end_dir, end_len)
+    return np.vstack([start_pts[::-1], pts, end_pts])
 
 
 def _spline_through_ordered(
@@ -954,9 +1019,22 @@ def fit_arch_from_label_mask(
         n_used = len(crown)
 
     tooth_bearing_arc = _polyline_arc_length(dense)
-    ctrl = _extend_arch_endpoints(ctrl, float(end_extension_mm))
-    dense = _extend_arch_endpoints(dense, float(end_extension_mm))
+
+    # Clip against the true voxel field of view, not just a world AABB: an oblique
+    # AABB can include corners that are outside the scanned volume.
+    inverse_affine = np.linalg.inv(matrix)
+    base_ctrl = ctrl.copy()
+    ctrl = _extend_arch_endpoints(
+        ctrl, float(end_extension_mm), inverse_affine=inverse_affine, shape_zyx=mask.shape
+    )
+    dense = _extend_arch_endpoints(
+        dense, float(end_extension_mm), inverse_affine=inverse_affine, shape_zyx=mask.shape
+    )
     arc_length = _polyline_arc_length(dense)
+    applied_extension = min(
+        float(np.linalg.norm(ctrl[0] - base_ctrl[0])),
+        float(np.linalg.norm(ctrl[-1] - base_ctrl[-1])),
+    )
 
     reason = ""
     accepted = True
@@ -984,5 +1062,6 @@ def fit_arch_from_label_mask(
         reason=reason,
         tooth_bearing_arc_mm=float(tooth_bearing_arc),
         end_extension_mm=float(end_extension_mm),
+        applied_extension_mm=float(applied_extension),
     )
     return result

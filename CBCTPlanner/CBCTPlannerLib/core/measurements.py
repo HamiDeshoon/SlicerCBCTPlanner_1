@@ -194,6 +194,9 @@ class MeasurementEngine:
 
     def set_arches(self, arches: Dict[str, DentalArch], arch: Optional[DentalArch] = None) -> None:
         """Update arch geometry without rebuilding the mask or tooth localizer."""
+        cache = getattr(self, "_tooth_span_cache", None)
+        if cache is not None:
+            cache.clear()
         self.arches = dict(arches)
         if arch is not None:
             self.arch = arch

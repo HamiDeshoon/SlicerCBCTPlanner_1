@@ -153,6 +153,17 @@ def canonicalize_to_ras(
     )
 
 
+def _background_value(dtype: np.dtype, cval: float) -> float:
+    """Return a fill value the output dtype can actually represent.
+
+    SciPy currently clamps a negative ``cval`` to zero for unsigned arrays, but the
+    explicit choice keeps this correct if the resampler or SciPy version changes.
+    """
+    if np.issubdtype(dtype, np.floating) or np.issubdtype(dtype, np.signedinteger):
+        return float(cval)
+    return 0.0
+
+
 def resample_to_ras(
     image_zyx: np.ndarray,
     affine: np.ndarray,
@@ -205,13 +216,7 @@ def resample_to_ras(
     inv = np.linalg.inv(matrix)
     vox = (inv[:3, :3] @ world_flat.T).T + inv[:3, 3][None, :]
     coords = np.vstack([vox[:, 2], vox[:, 1], vox[:, 0]])
-    # An unsigned integer volume cannot represent -1000; casting it would produce a
-    # bright 64536/24 halo outside the source and corrupt windowing. Use 0 instead.
-    background = (
-        float(cval)
-        if np.issubdtype(image.dtype, np.floating) or np.issubdtype(image.dtype, np.signedinteger)
-        else 0.0
-    )
+    background = _background_value(image.dtype, cval)
     sampled = ndimage.map_coordinates(
         image, coords, order=order, mode="constant", cval=background, prefilter=order > 1
     )

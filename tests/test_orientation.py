@@ -247,7 +247,7 @@ class TestVerifyOrientation(unittest.TestCase):
 
     def test_oblique_ras_resampling_preserves_unsigned_background_and_full_extent(self) -> None:
         """Unsigned CT must not get a 64536 halo, and no world corner may be cropped."""
-        from CBCTPlannerLib.core.orientation import resample_to_ras
+        from CBCTPlannerLib.core.orientation import _background_value, resample_to_ras
 
         angle = np.deg2rad(17.0)
         rotation = np.array(
@@ -258,6 +258,10 @@ class TestVerifyOrientation(unittest.TestCase):
         affine[:3, 3] = [-12.3, -10.1, -9.7]
         image = np.zeros((21, 25, 31), dtype=np.uint16)
         image[8:13, 10:15, 12:18] = 1200
+        self.assertEqual(_background_value(np.dtype(np.uint16), -1000.0), 0.0)
+        self.assertEqual(_background_value(np.dtype(np.uint8), -1000.0), 0.0)
+        self.assertEqual(_background_value(np.dtype(np.int16), -1000.0), -1000.0)
+        self.assertEqual(_background_value(np.dtype(np.float32), -1000.0), -1000.0)
         result = resample_to_ras(image, affine)
         self.assertEqual(result.image_zyx.dtype, np.uint16)
         self.assertLessEqual(int(result.image_zyx.max()), 1200)

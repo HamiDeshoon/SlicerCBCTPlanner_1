@@ -2123,9 +2123,16 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         fit = self.logic.last_arch_fit
         if curveNode is not None and curveNode.GetNumberOfControlPoints() >= 4 and fit is not None:
             self._observeCurveEdits(curveNode)
+            applied = float(getattr(fit, "applied_extension_mm", fit.end_extension_mm))
+            ext_note = (
+                f", extension clipped to {applied:.1f} mm"
+                if applied + 0.5 < float(fit.end_extension_mm)
+                else ""
+            )
             self.step2HintLabel.setText(
                 f"Fitted {len(fit.points_ras)} pts, tooth-bearing {fit.tooth_bearing_arc_mm:.1f} mm, "
-                f"curve {fit.arc_length_mm:.1f} mm, RMS {fit.residual_rms_mm:.1f} mm ({fit.method})"
+                f"curve {fit.arc_length_mm:.1f} mm, RMS {fit.residual_rms_mm:.1f} mm "
+                f"({fit.method}){ext_note}"
             )
             self.step3Box.collapsed = False
             self.updateGUIFromParameterNode()
@@ -2876,9 +2883,16 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 return
             self._observeCurveEdits(curveNode)
             if fit is not None:
+                applied = float(getattr(fit, "applied_extension_mm", fit.end_extension_mm))
+                ext_note = (
+                    f", extension clipped to {applied:.1f} mm"
+                    if applied + 0.5 < float(fit.end_extension_mm)
+                    else ""
+                )
                 self.step2HintLabel.setText(
                     f"Fitted {len(fit.points_ras)} pts, tooth-bearing {fit.tooth_bearing_arc_mm:.1f} mm, "
-                    f"curve {fit.arc_length_mm:.1f} mm, RMS {fit.residual_rms_mm:.1f} mm ({fit.method})"
+                    f"curve {fit.arc_length_mm:.1f} mm, RMS {fit.residual_rms_mm:.1f} mm "
+                    f"({fit.method}){ext_note}"
                 )
             self.step3Box.collapsed = False
             self.globalStatusLabel.setText("Pipeline: generating panoramic CPR...")
