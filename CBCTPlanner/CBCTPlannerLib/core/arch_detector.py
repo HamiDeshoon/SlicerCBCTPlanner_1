@@ -14,8 +14,6 @@ from . import ensure_optional_package
 from .labels import (
     ANATOMICAL_MESIODISTAL_WIDTHS_MM,
     LOWER_JAW_ID,
-    MANDIBULAR_TEETH_IDS,
-    MAXILLARY_TEETH_IDS,
     UPPER_JAW_ID,
 )
 from .mask_centerline import CenterlineCurve
@@ -23,12 +21,40 @@ from .mask_centerline import CenterlineCurve
 # FDI sequence from patient right posterior to patient left posterior for each jaw.
 JAW_TOOTH_ORDER: Dict[str, List[str]] = {
     "lower": [
-        "48", "47", "46", "45", "44", "43", "42", "41",
-        "31", "32", "33", "34", "35", "36", "37", "38",
+        "48",
+        "47",
+        "46",
+        "45",
+        "44",
+        "43",
+        "42",
+        "41",
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
+        "38",
     ],
     "upper": [
-        "18", "17", "16", "15", "14", "13", "12", "11",
-        "21", "22", "23", "24", "25", "26", "27", "28",
+        "18",
+        "17",
+        "16",
+        "15",
+        "14",
+        "13",
+        "12",
+        "11",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27",
+        "28",
     ],
 }
 
@@ -145,7 +171,9 @@ class ToothArcSite:
     arc_mm: float
     t_normalized: float
     point_ras: np.ndarray
-    source: str  # "segmentation", "calibrated_marker", "interpolated_from_neighbors", "approximate_width_table"
+    source: (
+        str  # "segmentation", "calibrated_marker", "interpolated_from_neighbors", "approximate_width_table"
+    )
     is_approximate: bool
     is_missing_tooth: bool = False
 
@@ -230,9 +258,7 @@ class DentalArch:
             from scipy import interpolate  # type: ignore
 
             return np.column_stack(interpolate.splev(u_arr, self.tck))
-        return np.column_stack(
-            [np.interp(u_arr, self._u_ctrl, self.control_points[:, d]) for d in range(3)]
-        )
+        return np.column_stack([np.interp(u_arr, self._u_ctrl, self.control_points[:, d]) for d in range(3)])
 
     def _eval_deriv_raw(self, u_val: float) -> np.ndarray:
         if self._use_scipy and self.tck is not None:
@@ -263,9 +289,7 @@ class DentalArch:
         arc_mm = t * self.total_arc_length
         return self.get_frame_at_mm(arc_mm, occlusal_normal=occlusal_normal)
 
-    def get_frame_at_mm(
-        self, arc_mm: float, occlusal_normal: Optional[Sequence[float]] = None
-    ) -> ArchFrame:
+    def get_frame_at_mm(self, arc_mm: float, occlusal_normal: Optional[Sequence[float]] = None) -> ArchFrame:
         arc_clamped = float(np.clip(arc_mm, 0.0, self.total_arc_length))
         t = arc_clamped / max(1e-9, self.total_arc_length)
         u = self._arc_to_u(arc_clamped)
@@ -319,9 +343,7 @@ class DentalArch:
     def find_closest_parameter(self, point_mm: np.ndarray) -> Tuple[float, float]:
         """B13: Sub-sample segment projection followed by local spline refinement."""
         pt = np.asarray(point_mm, dtype=np.float64).reshape(3)
-        best_arc, best_dist, _ = project_point_to_polyline_arc_mm(
-            self.pts_dense, self.cum_arc_lengths, pt
-        )
+        best_arc, best_dist, _ = project_point_to_polyline_arc_mm(self.pts_dense, self.cum_arc_lengths, pt)
         best_t = float(np.clip(best_arc / max(self.total_arc_length, 1e-9), 0.0, 1.0))
 
         if self._use_scipy and self.tck is not None:
@@ -351,7 +373,9 @@ class DentalArch:
             raise ValueError(f"Found only {len(ordered_pts)} teeth for {jaw_type} jaw; need at least 4.")
         pruned = _prune_pathological_points(np.array(ordered_pts, dtype=np.float64))
         if len(pruned) < 4:
-            raise ValueError(f"Only {len(pruned)} plausible teeth remain for {jaw_type} jaw; need at least 4.")
+            raise ValueError(
+                f"Only {len(pruned)} plausible teeth remain for {jaw_type} jaw; need at least 4."
+            )
         return cls(
             control_points=pruned,
             jaw_type=jaw_type,
@@ -550,9 +574,7 @@ def fit_dental_arch_from_points(
         )
         u_dense = np.linspace(0.0, 1.0, 300)
         dense_pts = np.column_stack(interpolate.splev(u_dense, tck))
-        dense_s = np.concatenate(
-            [[0.0], np.cumsum(np.linalg.norm(np.diff(dense_pts, axis=0), axis=1))]
-        )
+        dense_s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(dense_pts, axis=0), axis=1))])
         target_s = np.linspace(0.0, float(dense_s[-1]), num_control_points)
         target_u = np.interp(target_s, dense_s, u_dense)
         ctrl = np.column_stack(interpolate.splev(target_u, tck))
@@ -642,15 +664,21 @@ def compute_fdi_arc_positions_mm(
                 i1 = right_neighbors[0]
                 dw_total = float(cum_centers[i1] - cum_centers[i0])
                 frac = float(cum_centers[idx] - cum_centers[i0]) / max(1e-6, dw_total)
-                s_val = float(np.clip(anchored_arc[i0] + frac * (anchored_arc[i1] - anchored_arc[i0]), 0.0, L))
+                s_val = float(
+                    np.clip(anchored_arc[i0] + frac * (anchored_arc[i1] - anchored_arc[i0]), 0.0, L)
+                )
             elif left_neighbors:
                 i0 = left_neighbors[-1]
                 scale = (span_end - span_start) / max(1e-6, float(cum_centers[-1] - cum_centers[0]))
-                s_val = float(np.clip(anchored_arc[i0] + (cum_centers[idx] - cum_centers[i0]) * scale, 0.0, L))
+                s_val = float(
+                    np.clip(anchored_arc[i0] + (cum_centers[idx] - cum_centers[i0]) * scale, 0.0, L)
+                )
             else:
                 i1 = right_neighbors[0]
                 scale = (span_end - span_start) / max(1e-6, float(cum_centers[-1] - cum_centers[0]))
-                s_val = float(np.clip(anchored_arc[i1] - (cum_centers[i1] - cum_centers[idx]) * scale, 0.0, L))
+                s_val = float(
+                    np.clip(anchored_arc[i1] - (cum_centers[i1] - cum_centers[idx]) * scale, 0.0, L)
+                )
             src = "interpolated_from_neighbors"
             is_approx = True
             is_missing = bool(seg_map) and (fdi not in seg_map)

@@ -15,13 +15,14 @@ Generates standard 8x10 inch printable film layouts (HTML & PDF) combining:
 from __future__ import annotations
 
 import base64
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import html
 import io
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -41,15 +42,9 @@ except ImportError:
     ImageDraw = None
     ImageFont = None
 
-from .core.labels import (
-    ANATOMICAL_MESIODISTAL_WIDTHS_MM,
-    FDI_TO_TOOTH_ID,
-    MANDIBULAR_TEETH_IDS,
-    MAXILLARY_TEETH_IDS,
-    get_tooth_label,
-)
-from .core.arch_detector import JAW_TOOTH_ORDER
-from .core.measurements import ImplantSiteMeasurement, MeasurementEngine
+from .core.measurements import ImplantSiteMeasurement
+
+logger = logging.getLogger(__name__)
 
 
 CLINICAL_DISCLAIMER_TEXT = (
@@ -109,7 +104,6 @@ def render_annotated_cross_section_slice(
     w0_val = meas.crest_width_mm if (meas and meas.crest_width_mm is not None) else None
     w3_val = meas.bone_width_at_depths_mm.get(3.0) if (meas and meas.bone_width_at_depths_mm) else None
     w5_val = meas.bone_width_at_depths_mm.get(5.0) if (meas and meas.bone_width_at_depths_mm) else None
-    nerve_val = meas.nerve_distance_mm if (meas and meas.nerve_distance_mm is not None) else None
 
     # Use Qt rendering if available
     pix = None
@@ -246,7 +240,7 @@ def build_panoramic_placeholder_base64(jaw_name: str = "Mandible") -> str:
     pts = []
     for x in range(0, w, 5):
         t = (x - w / 2) / (w / 2)
-        y = int(h * 0.55 + 35 * (t ** 2) - 10 * math.sin(t * 3.14))
+        y = int(h * 0.55 + 35 * (t**2) - 10 * math.sin(t * 3.14))
         pts.append((x, y))
     draw.line(pts, fill=(226, 232, 240), width=4)
 
@@ -255,7 +249,7 @@ def build_panoramic_placeholder_base64(jaw_name: str = "Mandible") -> str:
         tx = int(w * (0.10 + 0.80 * i / 14))
         ty = int(h * 0.55 + 35 * (((tx - w / 2) / (w / 2)) ** 2))
         draw.line([(tx, ty - 25), (tx, ty + 25)], fill=(234, 179, 8), width=2)
-        draw.text((tx - 6, ty + 28), f"{i+1}", fill=(248, 250, 252))
+        draw.text((tx - 6, ty + 28), f"{i + 1}", fill=(248, 250, 252))
 
     draw.text((20, 15), f"Panoramic Reformat — {jaw_name.capitalize()} Arch", fill=(248, 250, 252))
     bio = io.BytesIO()
@@ -341,8 +335,8 @@ class PrintLayoutEngine:
 
         # 2. Resample cross-sectional series using MeasurementEngine
         engine = None
-        if self.logic is not None and hasattr(self.logic, "_get_or_create_measurement_engine") and volumeNode:
-            engine = self.logic._get_or_create_measurement_engine(volumeNode, segmentationNode)
+        if self.logic is not None and hasattr(self.logic, "_get_or_build_measurement_engine") and volumeNode:
+            engine = self.logic._get_or_build_measurement_engine(volumeNode, segmentationNode)
 
         slices_data: List[CrossSectionSliceSpec] = []
         half_span = (float(num_slices) - 1.0) / 2.0
@@ -362,17 +356,21 @@ class PrintLayoutEngine:
                 try:
                     meas = engine.measure_implant_site(str(target_fdi), offset_mm=off)
                 except Exception:
+                    logger.exception(
+                        "Cross-section measurement failed for FDI %s at %+.2f mm", target_fdi, off
+                    )
                     meas = None
                 try:
-                    info = get_tooth_label(str(target_fdi))
-                    center_ras = engine.get_site_center_ras(str(target_fdi))
+                    center_ras = engine.get_site_center_ras(str(target_fdi), offset_mm=off)
                     if center_ras is not None:
                         _, _, _, img_2d, _, _, _ = engine._resample_arch_cross_section(
-                            center_ras + off * np.array([0.0, 1.0, 0.0]),
+                            center_ras,
                             is_mandible=is_mandible,
                         )
                 except Exception:
-                    pass
+                    logger.exception(
+                        "Cross-section resampling failed for FDI %s at %+.2f mm", target_fdi, off
+                    )
 
             data_uri, pix = render_annotated_cross_section_slice(
                 img_2d_hu=img_2d,
@@ -391,9 +389,17 @@ class PrintLayoutEngine:
                 fdi=target_fdi,
                 height_mm=meas.bone_height_mm if (meas and meas.bone_height_mm is not None) else None,
                 crest_width_mm=meas.crest_width_mm if (meas and meas.crest_width_mm is not None) else None,
-                width_3mm=meas.bone_width_at_depths_mm.get(3.0) if (meas and meas.bone_width_at_depths_mm) else None,
-                width_5mm=meas.bone_width_at_depths_mm.get(5.0) if (meas and meas.bone_width_at_depths_mm) else None,
-                nerve_dist_mm=meas.nerve_distance_mm if (meas and meas.nerve_distance_mm is not None) else None,
+                width_3mm=meas.bone_width_at_depths_mm.get(3.0)
+                if (meas and meas.bone_width_at_depths_mm)
+                else None,
+                width_5mm=meas.bone_width_at_depths_mm.get(5.0)
+                if (meas and meas.bone_width_at_depths_mm)
+                else None,
+                nerve_dist_mm=(
+                    meas.distance_to_vital_structure_mm
+                    if (meas and meas.distance_to_vital_structure_mm is not None)
+                    else None
+                ),
                 is_mandible=is_mandible,
                 image_data_uri=data_uri,
                 pixmap=pix,
@@ -434,6 +440,7 @@ class PrintLayoutEngine:
 
         # 5. Export to PDF
         from .AdvancedTools import export_html_to_pdf
+
         export_html_to_pdf(html_content, pdf_file)
 
         return html_file, pdf_file, slices_data
@@ -456,9 +463,7 @@ class PrintLayoutEngine:
         cards_html: List[str] = []
         for s in slices:
             cards_html.append(
-                f"<div class='cs-card'>"
-                f"<img src='{s.image_data_uri}' alt='Slice {s.slice_index}'/>"
-                f"</div>"
+                f"<div class='cs-card'><img src='{s.image_data_uri}' alt='Slice {s.slice_index}'/></div>"
             )
 
         fdi_list_str = ", ".join(f"#{t}" for t in fdis)
@@ -609,7 +614,7 @@ body {{
     <div>
         <div class="section-label" style="margin-bottom: 2px;">Sequential Cross-Sectional Series ({len(slices)} Slices @ Overlaid Measurement Levels)</div>
         <div class="grid-section">
-            {''.join(cards_html)}
+            {"".join(cards_html)}
         </div>
     </div>
 

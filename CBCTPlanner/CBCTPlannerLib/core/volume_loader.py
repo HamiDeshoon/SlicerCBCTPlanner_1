@@ -72,20 +72,14 @@ class CBCTVolume:
         """Volume shape as (X, Y, Z)."""
         return (self.image.shape[2], self.image.shape[1], self.image.shape[0])
 
-    def world_to_voxel(
-        self, world_coord_mm: Union[np.ndarray, List[float], Tuple[float, ...]]
-    ) -> np.ndarray:
+    def world_to_voxel(self, world_coord_mm: Union[np.ndarray, List[float], Tuple[float, ...]]) -> np.ndarray:
         """Convert physical world coordinate(s) (x_mm, y_mm, z_mm) to continuous voxel index (i_x, j_y, k_z).
 
         Supports both a single 3-vector `(3,)` and a batch of points `(N, 3)`.
         """
         pts = np.asarray(world_coord_mm, dtype=np.float64)
         if pts.ndim == 1:
-            pt_homog = (
-                np.array([pts[0], pts[1], pts[2], 1.0], dtype=np.float64)
-                if len(pts) == 3
-                else pts
-            )
+            pt_homog = np.array([pts[0], pts[1], pts[2], 1.0], dtype=np.float64) if len(pts) == 3 else pts
             vox_homog = self._inv_affine @ pt_homog
             return vox_homog[:3]
         ones = np.ones((pts.shape[0], 1), dtype=np.float64)
@@ -93,17 +87,11 @@ class CBCTVolume:
         vox = (self._inv_affine @ homog.T).T
         return vox[:, :3]
 
-    def voxel_to_world(
-        self, voxel_index: Union[np.ndarray, List[float], Tuple[float, ...]]
-    ) -> np.ndarray:
+    def voxel_to_world(self, voxel_index: Union[np.ndarray, List[float], Tuple[float, ...]]) -> np.ndarray:
         """Convert voxel index `(i_x, j_y, k_z)` or `(N, 3)` batch to physical world coordinate `(x_mm, y_mm, z_mm)`."""
         idx = np.asarray(voxel_index, dtype=np.float64)
         if idx.ndim == 1:
-            idx_homog = (
-                np.array([idx[0], idx[1], idx[2], 1.0], dtype=np.float64)
-                if len(idx) == 3
-                else idx
-            )
+            idx_homog = np.array([idx[0], idx[1], idx[2], 1.0], dtype=np.float64) if len(idx) == 3 else idx
             world_homog = self.affine @ idx_homog
             return world_homog[:3]
         ones = np.ones((idx.shape[0], 1), dtype=np.float64)
@@ -137,14 +125,7 @@ class CBCTVolume:
             jy = np.rint(coords_zyx[1]).astype(np.int64)
             ix = np.rint(coords_zyx[2]).astype(np.int64)
             z_dim, y_dim, x_dim = self.shape
-            valid = (
-                (kz >= 0)
-                & (kz < z_dim)
-                & (jy >= 0)
-                & (jy < y_dim)
-                & (ix >= 0)
-                & (ix < x_dim)
-            )
+            valid = (kz >= 0) & (kz < z_dim) & (jy >= 0) & (jy < y_dim) & (ix >= 0) & (ix < x_dim)
             out = np.full(len(flat_pts), float(cval), dtype=np.float64)
             out[valid] = self.image[kz[valid], jy[valid], ix[valid]].astype(np.float64)
             return out.reshape(orig_shape)
@@ -163,14 +144,7 @@ class CBCTVolume:
         jy = np.rint(vox_ijk[:, 1]).astype(np.int64)
         kz = np.rint(vox_ijk[:, 2]).astype(np.int64)
         z_dim, y_dim, x_dim = mask.shape
-        valid = (
-            (kz >= 0)
-            & (kz < z_dim)
-            & (jy >= 0)
-            & (jy < y_dim)
-            & (ix >= 0)
-            & (ix < x_dim)
-        )
+        valid = (kz >= 0) & (kz < z_dim) & (jy >= 0) & (jy < y_dim) & (ix >= 0) & (ix < x_dim)
         out = np.zeros(len(flat_pts), dtype=mask.dtype)
         out[valid] = mask[kz[valid], jy[valid], ix[valid]]
         return out.reshape(orig_shape)

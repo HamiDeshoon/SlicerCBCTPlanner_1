@@ -156,9 +156,7 @@ class MeasurementEngine:
             binary = self.mask == structure_id
             if not binary.any():
                 return None
-            scipy_nd = ensure_optional_package(
-                "scipy.ndimage", "scipy", "3D distance transform"
-            )
+            scipy_nd = ensure_optional_package("scipy.ndimage", "scipy", "3D distance transform")
             z_idx, y_idx, x_idx = np.where(binary)
             sz, sy, sx = self.volume.spacing
             margin_z = int(max(4, round(30.0 / max(1e-3, sz))))
@@ -180,11 +178,7 @@ class MeasurementEngine:
         dt_sub, zs, ys, xs = self._cropped_dt_cache[structure_id]
         vox = self.volume.world_to_voxel(world_pt_ras)
         vx, vy, vz = int(round(vox[0])), int(round(vox[1])), int(round(vox[2]))
-        if (
-            zs.start <= vz < zs.stop
-            and ys.start <= vy < ys.stop
-            and xs.start <= vx < xs.stop
-        ):
+        if zs.start <= vz < zs.stop and ys.start <= vy < ys.stop and xs.start <= vx < xs.stop:
             return float(dt_sub[vz - zs.start, vy - ys.start, vx - xs.start])
         return None
 
@@ -227,30 +221,26 @@ class MeasurementEngine:
         v_coords = np.linspace(-half_v_mm, half_v_mm, n_v)
 
         uu, vv = np.meshgrid(u_coords, v_coords)  # shape (n_v, n_u)
-        world_grid = (
-            P[None, None, :]
-            + uu[:, :, None] * N[None, None, :]
-            + vv[:, :, None] * B[None, None, :]
-        )
+        world_grid = P[None, None, :] + uu[:, :, None] * N[None, None, :] + vv[:, :, None] * B[None, None, :]
         mask_cs = self.volume.sample_mask_world_points(self.mask, world_grid)
         img_cs = self.volume.sample_world_points(world_grid, order=1, cval=-1000.0)
         return u_coords, v_coords, mask_cs, img_cs, P, N, B
 
-    def measure_implant_site(
+    def _site_center_with_provenance(
         self, fdi: str, offset_mm: float = 0.0
-    ) -> Optional[ImplantSiteMeasurement]:
-        """Compute implant planning metrics in the arch-frame cross-section (B4); returns None if unmeasurable."""
+    ) -> Optional[Tuple[np.ndarray, str, bool]]:
+        """Resolve the arch cross-section center for `fdi` plus its provenance.
+
+        Returns `(center_ras, source, is_approximate)` or `None` when neither a segmented
+        tooth nor an arch is available. `offset_mm` moves along the arch curve.
+        """
         info = get_tooth_label(str(fdi))
         if not info:
             return None
-
-        is_mandible = info.quadrant in (3, 4)
-        jaw_id = self._jaw_id(is_mandible)
         arch = self._arch_for_fdi(str(fdi))
-
         tooth = self._get_tooth_info(str(fdi))
         if tooth is not None:
-            base_site_mm = tooth.centroid_mm
+            base_site_mm = np.asarray(tooth.centroid_mm, dtype=np.float64)
             site_source = "segmentation"
             is_approx_site = False
         elif arch is not None:
@@ -267,6 +257,27 @@ class MeasurementEngine:
             site_center_mm = arch.evaluate_at(t_target)
         else:
             site_center_mm = base_site_mm
+        return np.asarray(site_center_mm, dtype=np.float64), site_source, is_approx_site
+
+    def get_site_center_ras(self, fdi: str, offset_mm: float = 0.0) -> Optional[np.ndarray]:
+        """Return the RAS center of the arch cross-section for `fdi` (segmented centroid or estimated site)."""
+        resolved = self._site_center_with_provenance(str(fdi), offset_mm=offset_mm)
+        return None if resolved is None else resolved[0]
+
+    def measure_implant_site(self, fdi: str, offset_mm: float = 0.0) -> Optional[ImplantSiteMeasurement]:
+        """Compute implant planning metrics in the arch-frame cross-section (B4); returns None if unmeasurable."""
+        info = get_tooth_label(str(fdi))
+        if not info:
+            return None
+
+        is_mandible = info.quadrant in (3, 4)
+        jaw_id = self._jaw_id(is_mandible)
+        tooth = self._get_tooth_info(str(fdi))
+
+        resolved = self._site_center_with_provenance(str(fdi), offset_mm=offset_mm)
+        if resolved is None:
+            return None
+        site_center_mm, site_source, is_approx_site = resolved
 
         vital_candidates = self._vital_ids(info.quadrant, is_mandible)
         vital_id = next((vid for vid in vital_candidates if (self.mask == vid).any()), None)
@@ -293,11 +304,7 @@ class MeasurementEngine:
         mean_density_hu, nnt_summary = self._compute_site_bone_density_in_cs(
             u_coords, v_coords, mask_cs, img_cs, crest_v, is_mandible, bone_height_mm, jaw_id
         )
-        density_class = (
-            self._classify_misch_density(mean_density_hu)
-            if mean_density_hu is not None
-            else None
-        )
+        density_class = self._classify_misch_density(mean_density_hu) if mean_density_hu is not None else None
 
         suggested_diam, suggested_len, suggested_ang = self._suggest_implant(
             crest_w, mid_w, bone_height_mm, mesiodistal_mm
@@ -498,11 +505,7 @@ class MeasurementEngine:
         std_val = round(float(np.std(core_vals)), 1)
 
         shell_region = np.outer(v_mask, shell_u) & (mask_cs == jaw_id)
-        shell_mean = (
-            round(float(np.mean(img_cs[shell_region])), 1)
-            if np.any(shell_region)
-            else mean_val
-        )
+        shell_mean = round(float(np.mean(img_cs[shell_region])), 1) if np.any(shell_region) else mean_val
         misch_full = self._classify_misch_density(mean_val)
         misch_code = self.extract_misch_code(misch_full)
         summary = {
@@ -558,16 +561,14 @@ class MeasurementEngine:
         chosen_diam = valid_diams[-1] if valid_diams else None
 
         safe_height = bone_height - 2.0
-        valid_lens = [l for l in standard_lengths if l <= safe_height]
+        valid_lens = [length for length in standard_lengths if length <= safe_height]
         chosen_len = valid_lens[-1] if valid_lens else None
 
         if chosen_diam is None or chosen_len is None:
             return None, None, None
         return chosen_diam, chosen_len, 0.0
 
-    def _estimate_missing_tooth_site_with_provenance(
-        self, fdi: str
-    ) -> Tuple[np.ndarray, str, bool]:
+    def _estimate_missing_tooth_site_with_provenance(self, fdi: str) -> Tuple[np.ndarray, str, bool]:
         """B2: Estimate missing tooth site using segmented neighbors or mesiodistal width table."""
         info = get_tooth_label(fdi)
         arch = self._arch_for_fdi(fdi)

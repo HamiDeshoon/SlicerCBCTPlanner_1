@@ -21,9 +21,9 @@ MODULE_DIR = Path(__file__).resolve().parent
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
-from CBCTPlannerLib.CheckpointInference import CheckpointSpec
-from CBCTPlannerLib.Phase7Tools import run_headless_batch_pipeline
-from CBCTPlannerLib.core.volume_loader import CBCTVolume
+from CBCTPlannerLib.CheckpointInference import CheckpointSpec  # noqa: E402
+from CBCTPlannerLib.Phase7Tools import run_headless_batch_pipeline  # noqa: E402
+from CBCTPlannerLib.core.volume_loader import CBCTVolume  # noqa: E402
 
 
 def _load_volume_from_path(input_path: Path) -> CBCTVolume:

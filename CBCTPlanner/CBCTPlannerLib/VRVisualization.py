@@ -132,7 +132,9 @@ class VRVisualizationLogic:
         if not group_values or len(group_values) != len(seg_ids):
             group_values = []
 
-        was_modifying = displayNode.StartModify() if (displayNode and hasattr(displayNode, "StartModify")) else None
+        was_modifying = (
+            displayNode.StartModify() if (displayNode and hasattr(displayNode, "StartModify")) else None
+        )
         try:
             for index, seg_id in enumerate(seg_ids):
                 segment = segmentation.GetSegment(seg_id)
@@ -212,9 +214,7 @@ class VRVisualizationLogic:
         arr = np.asarray(volume_array)
         step = max(1, arr.size // 50000)
         sample = arr.reshape(-1)[::step].astype(np.float64)
-        p10, p55, p75, p90, p98, p995 = np.percentile(
-            sample, [10.0, 55.0, 75.0, 90.0, 98.0, 99.5]
-        )
+        p10, p55, p75, p90, p98, p995 = np.percentile(sample, [10.0, 55.0, 75.0, 90.0, 98.0, 99.5])
         # Ensure strictly increasing x values
         xs = np.maximum.accumulate([p10, p55, p75, p90, p98, p995])
         for i in range(1, len(xs)):
@@ -247,11 +247,7 @@ class VRVisualizationLogic:
         """Configure a CBCT-optimized bone + enamel transfer function (HU or percentile-adaptive)."""
         if not volumePropertyNode:
             return
-        was_mod = (
-            volumePropertyNode.StartModify()
-            if hasattr(volumePropertyNode, "StartModify")
-            else None
-        )
+        was_mod = volumePropertyNode.StartModify() if hasattr(volumePropertyNode, "StartModify") else None
         if hasattr(volumePropertyNode, "DisableModifiedEventOn"):
             volumePropertyNode.DisableModifiedEventOn()
         try:
@@ -347,11 +343,7 @@ class VRVisualizationLogic:
             if base_color_pts is None:
                 base_color_pts = curr_col
 
-        was_mod = (
-            volumePropertyNode.StartModify()
-            if hasattr(volumePropertyNode, "StartModify")
-            else None
-        )
+        was_mod = volumePropertyNode.StartModify() if hasattr(volumePropertyNode, "StartModify") else None
         if hasattr(volumePropertyNode, "DisableModifiedEventOn"):
             volumePropertyNode.DisableModifiedEventOn()
         try:

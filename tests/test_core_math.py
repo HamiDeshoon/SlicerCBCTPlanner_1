@@ -13,6 +13,7 @@ import math
 import sys
 import tempfile
 import unittest
+from typing import Optional
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,13 +24,13 @@ MODULE_DIR = REPO_ROOT / "CBCTPlanner"
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
-import CBCTPlanner
-from CBCTPlanner import (
+import CBCTPlanner  # noqa: E402
+from CBCTPlanner import (  # noqa: E402
     NOT_MEASURED,
     CBCTPlannerLogic,
     format_metric,
 )
-from CBCTPlannerLib import (
+from CBCTPlannerLib import (  # noqa: E402
     CLINICAL_DISCLAIMER_TEXT,
     CUSTOM_DENTAL_LIGHTBOX_LAYOUT_ID,
     CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML,
@@ -38,18 +39,18 @@ from CBCTPlannerLib import (
     VRVisualizationLogic,
     should_handle_navigation_shortcut,
 )
-from CBCTPlannerLib.core.arch_detector import (
+from CBCTPlannerLib.core.arch_detector import (  # noqa: E402
     DentalArch,
     compute_fdi_arc_positions_mm,
     fit_dental_arch_from_points,
     project_point_to_polyline_arc_mm,
 )
-from CBCTPlannerLib.core.labels import (
+from CBCTPlannerLib.core.labels import (  # noqa: E402
     FDI_TO_TOOTH_ID,
     match_segment_to_label_and_precedence,
 )
-from CBCTPlannerLib.core.measurements import MeasurementEngine
-from CBCTPlannerLib.core.volume_loader import CBCTVolume
+from CBCTPlannerLib.core.measurements import MeasurementEngine  # noqa: E402
+from CBCTPlannerLib.core.volume_loader import CBCTVolume  # noqa: E402
 
 
 class _MockPiecewiseFunction:
@@ -380,7 +381,9 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         assert meas_std is not None
         self.assertAlmostEqual(meas_std.bone_height_mm or 0.0, 17.0, delta=0.75)
         self.assertAlmostEqual(meas_std.crest_width_mm or 0.0, 7.0, delta=1.0)
-        self.assertIn("approximate (CBCT gray values are not calibrated HU)", meas_std.misch_density_class or "")
+        self.assertIn(
+            "approximate (CBCT gray values are not calibrated HU)", meas_std.misch_density_class or ""
+        )
 
         # 2. Flipped-K phantom: reverse array along axis 0 (K) and set affine[2, 2] = -1, affine[2, 3] = 49.0
         # Physical world coordinates of every voxel remain 100% identical!
@@ -453,9 +456,7 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         arch = DentalArch(self.ras_arch_pts, jaw_type="lower", ras_convention=True)
         for t_val in (0.1, 0.5, 0.9):
             f = arch.get_frame(t_val)
-            dx, dy, dz = PanoramicCurveLogic.compute_cpr_displacement_frame(
-                f.tangent, f.normal, f.binormal
-            )
+            dx, dy, dz = PanoramicCurveLogic.compute_cpr_displacement_frame(f.tangent, f.normal, f.binormal)
             det_disp = float(np.linalg.det(np.column_stack([dx, dy, dz])))
             self.assertAlmostEqual(det_disp, det_grid, places=6)
             np.testing.assert_allclose(dx, -f.normal, atol=1e-6)
@@ -499,7 +500,14 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
             def parent(self) -> object:
                 return self._parent
 
-        for input_cls in ("QDoubleSpinBox", "ctkSliderWidget", "QSlider", "QLineEdit", "QTableWidget", "QComboBox"):
+        for input_cls in (
+            "QDoubleSpinBox",
+            "ctkSliderWidget",
+            "QSlider",
+            "QLineEdit",
+            "QTableWidget",
+            "QComboBox",
+        ):
             self.assertFalse(should_handle_navigation_shortcut(_FakeWidget(input_cls)))
 
         slice_view = _FakeWidget("qMRMLSliceWidget")
@@ -520,17 +528,27 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
                 return preset_b
 
         hu_vol = np.linspace(-1000.0, 2500.0, 1000, dtype=np.float32)
-        vr.apply_preset_and_shift(prop, preset_name="CT-Dental-CBCT", shift_hu=100.0, preset_provider=_Provider(), volume_array=hu_vol)
+        vr.apply_preset_and_shift(
+            prop,
+            preset_name="CT-Dental-CBCT",
+            shift_hu=100.0,
+            preset_provider=_Provider(),
+            volume_array=hu_vol,
+        )
         self.assertEqual(prop.GetScalarOpacity().GetSize(), 6)
         self.assertAlmostEqual(prop.GetScalarOpacity()._pts[0][0], -900.0)
 
         # Switch to Preset B (2 points)
-        vr.apply_preset_and_shift(prop, preset_name="CT-MIP", shift_hu=50.0, preset_provider=_Provider(), volume_array=hu_vol)
+        vr.apply_preset_and_shift(
+            prop, preset_name="CT-MIP", shift_hu=50.0, preset_provider=_Provider(), volume_array=hu_vol
+        )
         self.assertEqual(prop.GetScalarOpacity().GetSize(), 2)
         self.assertAlmostEqual(prop.GetScalarOpacity()._pts[1][0], 1050.0)
 
         # Switch back to Preset A (CT-Dental-CBCT) with shift 0 -> must restore all 6 points cleanly!
-        vr.apply_preset_and_shift(prop, preset_name="CT-Dental-CBCT", shift_hu=0.0, preset_provider=_Provider(), volume_array=hu_vol)
+        vr.apply_preset_and_shift(
+            prop, preset_name="CT-Dental-CBCT", shift_hu=0.0, preset_provider=_Provider(), volume_array=hu_vol
+        )
         self.assertEqual(prop.GetScalarOpacity().GetSize(), 6)
         self.assertAlmostEqual(prop.GetScalarOpacity()._pts[0][0], -1000.0)
         self.assertGreater(prop.disabled_events_count, 0)
@@ -572,11 +590,15 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
                 self.thickness = float(th)
 
         snode = _FakeSliceNode()
-        CrossSectionNavigator.configure_slice_node_slab(snode, slab_enabled=False, slab_thickness_mm=5.0, slab_mode="Mean")
+        CrossSectionNavigator.configure_slice_node_slab(
+            snode, slab_enabled=False, slab_thickness_mm=5.0, slab_mode="Mean"
+        )
         self.assertFalse(snode.enabled)
         self.assertEqual(snode.slab_type, CrossSectionNavigator.resolve_vtk_slab_type("Mean"))
 
-        CrossSectionNavigator.configure_slice_node_slab(snode, slab_enabled=True, slab_thickness_mm=3.5, slab_mode="MIP")
+        CrossSectionNavigator.configure_slice_node_slab(
+            snode, slab_enabled=True, slab_thickness_mm=3.5, slab_mode="MIP"
+        )
         self.assertTrue(snode.enabled)
         self.assertEqual(snode.slab_type, CrossSectionNavigator.resolve_vtk_slab_type("MIP"))
         self.assertAlmostEqual(snode.thickness, 3.5)
@@ -601,7 +623,9 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
     def test_b19_segment_matching_exact_tokens_and_precedence(self) -> None:
         """B19: Verify 'Segment_11' is not matched as FDI #11, 'Tooth_11' is matched, and teeth > canal > jaw precedence holds."""
         # Segment_999 does not match any known ToothFairy3 or canonical ID -> unknown
-        lbl_generic, cat_generic, _, prec_generic = match_segment_to_label_and_precedence("Segment_999", "Segment_999")
+        lbl_generic, cat_generic, _, prec_generic = match_segment_to_label_and_precedence(
+            "Segment_999", "Segment_999"
+        )
         self.assertEqual(lbl_generic, 0)
         self.assertEqual(cat_generic, "unknown")
         self.assertEqual(prec_generic, 0)
@@ -616,7 +640,9 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertEqual(lbl_t11, FDI_TO_TOOTH_ID["11"])
         self.assertEqual(cat_t11, "tooth")
 
-        lbl_canal, cat_canal, _, prec_canal = match_segment_to_label_and_precedence("Segment_5", "Mandibular canal")
+        lbl_canal, cat_canal, _, prec_canal = match_segment_to_label_and_precedence(
+            "Segment_5", "Mandibular canal"
+        )
         lbl_jaw, cat_jaw, _, prec_jaw = match_segment_to_label_and_precedence("Segment_2", "Mandible")
         self.assertGreater(prec_t11, prec_canal)
         self.assertGreater(prec_canal, prec_jaw)
@@ -657,7 +683,9 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         # 3. Tapered arch
         tap_th = np.linspace(0.0, math.pi, 40)
         tap_r = 22.0 - 4.0 * np.sin(tap_th)
-        tap_cloud = np.column_stack([tap_r * np.cos(tap_th), 1.3 * tap_r * np.sin(tap_th), np.zeros_like(tap_th)])
+        tap_cloud = np.column_stack(
+            [tap_r * np.cos(tap_th), 1.3 * tap_r * np.sin(tap_th), np.zeros_like(tap_th)]
+        )
         tap_ctrl = fit_dental_arch_from_points(tap_cloud, num_control_points=11, ras_convention=True)
         self.assertGreater(tap_ctrl[0, 0], 18.0)
         self.assertLess(tap_ctrl[-1, 0], -18.0)

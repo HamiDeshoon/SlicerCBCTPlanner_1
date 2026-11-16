@@ -12,7 +12,7 @@ Provides:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional
 import numpy as np
 
 try:
@@ -205,7 +205,11 @@ class CanalTracerLogic:
 
         for q_pt in q_pts:
             arc_s, d_center, closest_pt = project_point_to_polyline_arc_mm(c_pts, cum_s, q_pt)
-            local_r = float(np.interp(arc_s, cum_s, canal.radii_mm)) if len(canal.radii_mm) == len(c_pts) else canal.mean_radius_mm
+            local_r = (
+                float(np.interp(arc_s, cum_s, canal.radii_mm))
+                if len(canal.radii_mm) == len(c_pts)
+                else canal.mean_radius_mm
+            )
             d_surf = max(0.0, d_center - local_r - float(query_radius_mm))
             if d_surf < best_surf_dist:
                 best_surf_dist = d_surf

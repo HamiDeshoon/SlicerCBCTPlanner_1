@@ -96,13 +96,11 @@ except ImportError:
         def removeObservers(self, *args: Any, **kwargs: Any) -> None:
             pass
 
+
 from CBCTPlannerLib import (
-    AUTOMATED_DENTAL_TOOLS_MODULES,
     CLINICAL_DISCLAIMER_TEXT,
-    DENTAL_SEGMENT_PRESETS,
     SOFTWARE_VERSION,
     AirwayAnalysisResult,
-    CanalProximityResult,
     CanalTracerLogic,
     CephalometricMeasurement,
     CheckpointInferenceEngine,
@@ -122,20 +120,15 @@ from CBCTPlannerLib import (
     VRVisualizationLogic,
     capture_slice_view_png_base64,
     compute_3d_cephalometry,
-    compute_angle_between_three_points_deg,
     compute_occlusal_plane_from_segmentation,
     compute_pharyngeal_airway_metrics,
-    compute_surface_to_surface_distance_mm,
     compute_tmj_condyle_frames,
     create_or_update_fdi_segmentation_overlays,
-    detect_automated_dental_tools_modules,
     export_dicom_seg_and_sr,
     export_html_to_pdf,
-    export_reformatted_dicom_series,
     registerAndSetDentalLayout,
     registerAndSetDentalLightboxLayout,
     run_automated_dental_tool,
-    run_headless_batch_pipeline,
     should_handle_navigation_shortcut,
 )
 from CBCTPlannerLib.core.arch_detector import (
@@ -341,7 +334,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         maskActionRow = qt.QHBoxLayout()
         self.btnLoadExternalMask = qt.QPushButton("Load AI Mask (.nii.gz/.nrrd)")
-        self.btnLoadExternalMask.setToolTip("Load a pre-computed AI mask (automatically orients S-I to match patient anatomy).")
+        self.btnLoadExternalMask.setToolTip(
+            "Load a pre-computed AI mask (automatically orients S-I to match patient anatomy)."
+        )
         maskActionRow.addWidget(self.btnLoadExternalMask)
         step1Layout.addRow("AI Mask:", maskActionRow)
 
@@ -360,11 +355,13 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         nnunetLayout.addRow("Model / Checkpoint:", modelRow)
 
         self.nnunetDeviceCombo = qt.QComboBox()
-        self.nnunetDeviceCombo.addItems([
-            "Auto (GPU FP32 / CPU INT8)",
-            "CPU (INT8 Quantized)",
-            "GPU (FP32 Full Precision)",
-        ])
+        self.nnunetDeviceCombo.addItems(
+            [
+                "Auto (GPU FP32 / CPU INT8)",
+                "CPU (INT8 Quantized)",
+                "GPU (FP32 Full Precision)",
+            ]
+        )
         nnunetLayout.addRow("Compute & Precision:", self.nnunetDeviceCombo)
 
         self.nnunetFoldCombo = qt.QComboBox()
@@ -417,9 +414,13 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "Switch to OnDemand3D/Romexis-style 3-slice Cross-Sectional Lightbox (CS-, CS0, CS+ on bottom; Pano, Axial, 3D on top)."
         )
         self.btnDentalLayout = qt.QPushButton("Single CS Layout")
-        self.btnDentalLayout.setToolTip("Switch to single Cross-Section Dental layout (Wide Pano top; Axial, CS, 3D bottom).")
+        self.btnDentalLayout.setToolTip(
+            "Switch to single Cross-Section Dental layout (Wide Pano top; Axial, CS, 3D bottom)."
+        )
         self.btnStandardMpr = qt.QPushButton("Standard MPR")
-        self.btnStandardMpr.setToolTip("Reset Axial (Red) and Sagittal (Yellow) views without clobbering Panoramic.")
+        self.btnStandardMpr.setToolTip(
+            "Reset Axial (Red) and Sagittal (Yellow) views without clobbering Panoramic."
+        )
         layoutBtnRow.addWidget(self.btnDentalLightbox)
         layoutBtnRow.addWidget(self.btnDentalLayout)
         layoutBtnRow.addWidget(self.btnStandardMpr)
@@ -451,7 +452,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.vrPresetCombo = qt.QComboBox()
         self.vrPresetCombo.addItems(list(VRVisualizationLogic.SUPPORTED_VR_PRESETS))
-        self.vrPresetCombo.setToolTip("Select Volume Rendering transfer function preset (re-applied cleanly on change, B8).")
+        self.vrPresetCombo.setToolTip(
+            "Select Volume Rendering transfer function preset (re-applied cleanly on change, B8)."
+        )
         step1Layout.addRow("VR Preset:", self.vrPresetCombo)
 
         self.vrShiftSlider = ctk.ctkSliderWidget()
@@ -460,7 +463,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.vrShiftSlider.singleStep = 25.0
         self.vrShiftSlider.value = 0.0
         self.vrShiftSlider.suffix = " HU"
-        self.vrShiftSlider.setToolTip("Shift Volume Rendering scalar opacity and color transfer functions (debounced 150 ms).")
+        self.vrShiftSlider.setToolTip(
+            "Shift Volume Rendering scalar opacity and color transfer functions (debounced 150 ms)."
+        )
         step1Layout.addRow("VR Threshold Shift:", self.vrShiftSlider)
 
         vrToggleRow = qt.QHBoxLayout()
@@ -500,7 +505,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         self.activeJawCombo = qt.QComboBox()
         self.activeJawCombo.addItems(["Lower", "Upper"])
-        self.activeJawCombo.setToolTip("Select which jaw arch curve (Lower Mandible or Upper Maxilla) is active.")
+        self.activeJawCombo.setToolTip(
+            "Select which jaw arch curve (Lower Mandible or Upper Maxilla) is active."
+        )
         archModeRow.addWidget(qt.QLabel("Mode:"))
         archModeRow.addWidget(self.archModeCombo)
         archModeRow.addWidget(qt.QLabel("Active Jaw:"))
@@ -518,7 +525,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         self.showCurvesCheckBox = qt.QCheckBox("Show Curve Handles")
         self.showCurvesCheckBox.setChecked(True)
-        self.showCurvesCheckBox.setToolTip("Show or hide dental arch curve control points in 2D and 3D views.")
+        self.showCurvesCheckBox.setToolTip(
+            "Show or hide dental arch curve control points in 2D and 3D views."
+        )
         archBtnRow.addWidget(self.btnAutoFitArch)
         archBtnRow.addWidget(self.btnDrawArchManual)
         archBtnRow.addWidget(self.showCurvesCheckBox)
@@ -531,7 +540,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.layout.addWidget(self.step3Box)
         step3Outer = qt.QVBoxLayout(self.step3Box)
 
-        self.step3HintLabel = qt.QLabel("Prerequisite: Requires an active dental arch curve (>= 4 points) in Step 2.")
+        self.step3HintLabel = qt.QLabel(
+            "Prerequisite: Requires an active dental arch curve (>= 4 points) in Step 2."
+        )
         self.step3HintLabel.setWordWrap(True)
         step3Outer.addWidget(self.step3HintLabel)
 
@@ -562,7 +573,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.panoOffsetSpin.singleStep = 0.5
         self.panoOffsetSpin.value = 0.0
         self.panoOffsetSpin.suffix = " mm"
-        self.panoOffsetSpin.setToolTip("Buccolingual offset of the panoramic slab relative to the arch curve (F3).")
+        self.panoOffsetSpin.setToolTip(
+            "Buccolingual offset of the panoramic slab relative to the arch curve (F3)."
+        )
 
         panoGeomRow.addWidget(qt.QLabel("Thickness:"))
         panoGeomRow.addWidget(self.panoThicknessSpin)
@@ -574,10 +587,22 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.panoProjCombo = qt.QComboBox()
         self.panoProjCombo.addItems(["Mean", "MIP", "MinIP", "RaySum"])
-        self.panoProjCombo.setToolTip("Intensity projection mode across the slab (including RaySum pseudo-pan, F3).")
+        self.panoProjCombo.setToolTip(
+            "Intensity projection mode across the slab (including RaySum pseudo-pan, F3)."
+        )
         step3Layout.addRow("Projection Mode:", self.panoProjCombo)
 
-        self.autoUpdatePanoCheckBox = qt.QCheckBox("Auto-update Panoramic when Curve Changes (Preview / Full-Res)")
+        self.panoFlipVerticalCheck = qt.QCheckBox("Flip vertical (Advanced)")
+        self.panoFlipVerticalCheck.setChecked(False)
+        self.panoFlipVerticalCheck.setToolTip(
+            "Flip the panoramic image superior-inferior. Only needed for legacy non-RAS data; "
+            "standardized RAS volumes do not require it."
+        )
+        step3Layout.addRow(self.panoFlipVerticalCheck)
+
+        self.autoUpdatePanoCheckBox = qt.QCheckBox(
+            "Auto-update Panoramic when Curve Changes (Preview / Full-Res)"
+        )
         self.autoUpdatePanoCheckBox.setChecked(True)
         self.autoUpdatePanoCheckBox.setToolTip(
             "Automatically regenerate a fast in-process preview while dragging curve points and full-resolution on release (O1)."
@@ -607,7 +632,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.layout.addWidget(self.step4Box)
         step4Outer = qt.QVBoxLayout(self.step4Box)
 
-        self.step4HintLabel = qt.QLabel("Prerequisite: Requires an active dental arch curve (>= 4 points) in Step 2.")
+        self.step4HintLabel = qt.QLabel(
+            "Prerequisite: Requires an active dental arch curve (>= 4 points) in Step 2."
+        )
         self.step4HintLabel.setWordWrap(True)
         step4Outer.addWidget(self.step4HintLabel)
 
@@ -641,7 +668,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.csTiltSlider.pageStep = 5.0
         self.csTiltSlider.value = 0.0
         self.csTiltSlider.suffix = "°"
-        self.csTiltSlider.setToolTip("Lean the cross-section plane mesiodistally between -30° and +30° around N.")
+        self.csTiltSlider.setToolTip(
+            "Lean the cross-section plane mesiodistally between -30° and +30° around N."
+        )
         self.btnResetTilt = qt.QPushButton("Reset 0°")
         self.btnResetTilt.setToolTip("Reset cross-section tilt to 0° (perpendicular to occlusal plane).")
         tiltRow.addWidget(self.csTiltSlider)
@@ -651,7 +680,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         lightboxRow = qt.QHBoxLayout()
         self.enableLightboxCheckBox = qt.QCheckBox("Enable Lightbox (CS- / CS0 / CS+)")
         self.enableLightboxCheckBox.setChecked(True)
-        self.enableLightboxCheckBox.setToolTip("Synchronize YellowMinus, Yellow, and YellowPlus cross-sections.")
+        self.enableLightboxCheckBox.setToolTip(
+            "Synchronize YellowMinus, Yellow, and YellowPlus cross-sections."
+        )
         self.lightboxStepSpin = qt.QDoubleSpinBox()
         self.lightboxStepSpin.minimum = 0.5
         self.lightboxStepSpin.maximum = 10.0
@@ -666,7 +697,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.lightboxCountSpin.value = 3
         self.lightboxCountSpin.setToolTip("Number of slices in Dynamic Lightbox sequence export (F5).")
         self.btnActivateLightboxLayout = qt.QPushButton("Open 3-Slice Lightbox View")
-        self.btnActivateLightboxLayout.setToolTip("Switch viewport layout to show CS-, CS0, and CS+ side by side.")
+        self.btnActivateLightboxLayout.setToolTip(
+            "Switch viewport layout to show CS-, CS0, and CS+ side by side."
+        )
         lightboxRow.addWidget(self.enableLightboxCheckBox)
         lightboxRow.addWidget(qt.QLabel("Step:"))
         lightboxRow.addWidget(self.lightboxStepSpin)
@@ -690,15 +723,21 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.csWidthSpin.maximum = 50.0
         self.csWidthSpin.value = 24.0
         self.csWidthSpin.suffix = " mm"
-        self.csWidthSpin.setToolTip("Buccolingual width of the active cross-section indicator line on the Axial view.")
+        self.csWidthSpin.setToolTip(
+            "Buccolingual width of the active cross-section indicator line on the Axial view."
+        )
 
         self.csSlabEnabledCheckBox = qt.QCheckBox("Slab")
         self.csSlabEnabledCheckBox.setChecked(False)
-        self.csSlabEnabledCheckBox.setToolTip("Explicitly enable thick-slab reconstruction on Cross-Section views (B12).")
+        self.csSlabEnabledCheckBox.setToolTip(
+            "Explicitly enable thick-slab reconstruction on Cross-Section views (B12)."
+        )
 
         self.csSlabModeCombo = qt.QComboBox()
         self.csSlabModeCombo.addItems(["Mean", "MIP", "MinIP"])
-        self.csSlabModeCombo.setToolTip("Cross-section slab reconstruction mode (Mean default, MIP option, B12).")
+        self.csSlabModeCombo.setToolTip(
+            "Cross-section slab reconstruction mode (Mean default, MIP option, B12)."
+        )
 
         self.csSlabSpin = qt.QDoubleSpinBox()
         self.csSlabSpin.minimum = 0.2
@@ -714,7 +753,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.tickSpacingSpin.singleStep = 1.0
         self.tickSpacingSpin.value = 2.0
         self.tickSpacingSpin.suffix = " mm"
-        self.tickSpacingSpin.setToolTip("Spacing in mm between adjacent ticks in the Axial cross-section tick fan.")
+        self.tickSpacingSpin.setToolTip(
+            "Spacing in mm between adjacent ticks in the Axial cross-section tick fan."
+        )
 
         csParamsRow.addWidget(qt.QLabel("Width:"))
         csParamsRow.addWidget(self.csWidthSpin)
@@ -727,7 +768,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.showAxialTicksCheckBox = qt.QCheckBox("Show Cross-Section Tick Fan on Axial (Red) View")
         self.showAxialTicksCheckBox.setChecked(True)
-        self.showAxialTicksCheckBox.setToolTip("Display faint perpendicular tick lines along the arch in the Red slice view only.")
+        self.showAxialTicksCheckBox.setToolTip(
+            "Display faint perpendicular tick lines along the arch in the Red slice view only."
+        )
         step4Layout.addRow(self.showAxialTicksCheckBox)
 
         self.csStatusLabel = qt.QLabel("Cursor: 0.0 mm | Tilt: 0° | Lightbox: -2.0 / 0.0 / +2.0 mm")
@@ -804,12 +847,16 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         step5Layout.addWidget(odontogramWidget)
 
         # Status Label showing current selection
-        self.step5SelectionStatusLabel = qt.QLabel("Active Site: Quadrant 4 (Mandibular Right) — 15 to 27 Cross-Sectional Slices")
+        self.step5SelectionStatusLabel = qt.QLabel(
+            "Active Site: Quadrant 4 (Mandibular Right) — 15 to 27 Cross-Sectional Slices"
+        )
         self.step5SelectionStatusLabel.setStyleSheet("font-weight: bold; color: #38bdf8; padding: 4px;")
         step5Layout.addWidget(self.step5SelectionStatusLabel)
 
         # Primary Action: 8x10 Print Layout Button
-        self.btnGenerate8x10PrintLayout = qt.QPushButton("🖨️ Generate 8×10″ Print Layout (Pano + 15–27 Cross-Sections + VR)")
+        self.btnGenerate8x10PrintLayout = qt.QPushButton(
+            "🖨️ Generate 8×10″ Print Layout (Pano + 15–27 Cross-Sections + VR)"
+        )
         self.btnGenerate8x10PrintLayout.setToolTip(
             "Generate standard 8x10 inch clinical film layout with panoramic reformat, "
             "15 to 27 sequential cross-sectional slices with overlaid measurement lines, and 3D quadrant VR."
@@ -835,7 +882,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "Create Height, Width, and Nerve rulers for the active tooth. Untouched rulers report None until dragged (B1)."
         )
         self.btnRecomputeSelected = qt.QPushButton("Refresh Measurements")
-        self.btnRecomputeSelected.setToolTip("Re-evaluate segmentation or user-modified manual rulers for planned teeth.")
+        self.btnRecomputeSelected.setToolTip(
+            "Re-evaluate segmentation or user-modified manual rulers for planned teeth."
+        )
         self.btnClearPlan = qt.QPushButton("Clear Plan")
         self.btnClearPlan.setToolTip("Clear all selected teeth from the treatment plan table.")
         rulerRow.addWidget(self.btnToggleActiveToothInPlan)
@@ -849,11 +898,17 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self.logic is not None:
             for entry in self.logic.implants.get_library_entries():
                 self.implantLibraryCombo.addItem(entry.label, entry.id)
-        self.implantLibraryCombo.setToolTip("Select generic cylinder implant dimensions from extensible JSON library (F2).")
+        self.implantLibraryCombo.setToolTip(
+            "Select generic cylinder implant dimensions from extensible JSON library (F2)."
+        )
         self.btnPlaceImplant = qt.QPushButton("Place / Update Implant at Active Tooth")
-        self.btnPlaceImplant.setToolTip("Place cylinder implant at active tooth site with safety zone verification (F2).")
+        self.btnPlaceImplant.setToolTip(
+            "Place cylinder implant at active tooth site with safety zone verification (F2)."
+        )
         self.btnImplantCentricView = qt.QPushButton("Implant-Centric View")
-        self.btnImplantCentricView.setToolTip("Align cross-section slice along the placed implant's long axis (F2).")
+        self.btnImplantCentricView.setToolTip(
+            "Align cross-section slice along the placed implant's long axis (F2)."
+        )
         self.btnConfirmAiSuggestion = qt.QPushButton("Confirm AI Suggestion")
         self.btnConfirmAiSuggestion.setToolTip(
             "Explicitly confirm an AI-suggested implant size so it can enter exported clinical reports (F19)."
@@ -887,7 +942,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         advancedStep5Layout.addWidget(self.planTable)
 
         exportOptRow = qt.QHBoxLayout()
-        self.includePatientMetaCheckBox = qt.QCheckBox("Include Patient Metadata in Report (Opt-In; Anonymized by Default)")
+        self.includePatientMetaCheckBox = qt.QCheckBox(
+            "Include Patient Metadata in Report (Opt-In; Anonymized by Default)"
+        )
         self.includePatientMetaCheckBox.setChecked(False)
         self.includePatientMetaCheckBox.setToolTip(
             "When unchecked, exported HTML/PDF/DICOM reports anonymize Patient Name and ID to 'Anonymous' (B22)."
@@ -922,7 +979,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.layout.addWidget(self.step6Box)
         step6Outer = qt.QVBoxLayout(self.step6Box)
 
-        self.step6HintLabel = qt.QLabel("Extract/trace Mandibular Canals (F1), export 3D-printable surgical guide STL (F14), or DICOM SEG/SR.")
+        self.step6HintLabel = qt.QLabel(
+            "Extract/trace Mandibular Canals (F1), export 3D-printable surgical guide STL (F14), or DICOM SEG/SR."
+        )
         self.step6HintLabel.setWordWrap(True)
         step6Outer.addWidget(self.step6HintLabel)
 
@@ -932,7 +991,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         canalRow = qt.QHBoxLayout()
         self.btnExtractCanals = qt.QPushButton("Extract Canals from Seg")
-        self.btnExtractCanals.setToolTip("Extract Left and Right Mandibular Canals (IAN) from segmentation mask (F1).")
+        self.btnExtractCanals.setToolTip(
+            "Extract Left and Right Mandibular Canals (IAN) from segmentation mask (F1)."
+        )
         self.btnTraceRightCanal = qt.QPushButton("Trace Right")
         self.btnTraceRightCanal.setToolTip("Manually trace Right Mandibular Canal (F1).")
         self.btnTraceLeftCanal = qt.QPushButton("Trace Left")
@@ -943,7 +1004,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.canalMarginSpin.singleStep = 0.5
         self.canalMarginSpin.value = 2.0
         self.canalMarginSpin.suffix = " mm"
-        self.canalMarginSpin.setToolTip("Configurable safety margin around the mandibular canal (default 2.0 mm, F1).")
+        self.canalMarginSpin.setToolTip(
+            "Configurable safety margin around the mandibular canal (default 2.0 mm, F1)."
+        )
         canalRow.addWidget(self.btnExtractCanals)
         canalRow.addWidget(self.btnTraceRightCanal)
         canalRow.addWidget(self.btnTraceLeftCanal)
@@ -960,7 +1023,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             for p_entry in self.logic.surgical_guides.presets.values():
                 self.printerPresetCombo.addItem(p_entry.label, p_entry.id)
         self.btnExportSurgicalGuide = qt.QPushButton("Export Surgical Guide STL")
-        self.btnExportSurgicalGuide.setToolTip("Build surgical guide mesh with open drill sleeve bores and export to STL + JSON (F14).")
+        self.btnExportSurgicalGuide.setToolTip(
+            "Build surgical guide mesh with open drill sleeve bores and export to STL + JSON (F14)."
+        )
         guideRow.addWidget(self.guideSupportCombo)
         guideRow.addWidget(self.printerPresetCombo)
         guideRow.addWidget(self.btnExportSurgicalGuide)
@@ -968,11 +1033,66 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         exportRow = qt.QHBoxLayout()
         self.btnExportDicomSegSr = qt.QPushButton("Export DICOM SEG + SR")
-        self.btnExportDicomSegSr.setToolTip("Export segmentation and treatment plan as DICOM-SEG and DICOM BasicTextSR (F15).")
+        self.btnExportDicomSegSr.setToolTip(
+            "Export segmentation and treatment plan as DICOM-SEG and DICOM BasicTextSR (F15)."
+        )
         self.btnProposeCrowns = qt.QPushButton("Propose Crowns & Abutments")
         exportRow.addWidget(self.btnExportDicomSegSr)
         exportRow.addWidget(self.btnProposeCrowns)
         step6Layout.addRow("DICOM & Prosthetics:", exportRow)
+
+        airwayRow = qt.QHBoxLayout()
+        self.btnAnalyzeAirway = qt.QPushButton("Analyze Airway")
+        self.btnAnalyzeAirway.setToolTip(
+            "Segment pharyngeal airway and report volume / minimum cross-sectional area (F7)."
+        )
+        self.btnTmjRightSag = qt.QPushButton("TMJ Right")
+        self.btnTmjRightSag.setToolTip("Show sagittal TMJ condyle frame for the right joint (F8).")
+        self.btnTmjLeftSag = qt.QPushButton("TMJ Left")
+        self.btnTmjLeftSag.setToolTip("Show sagittal TMJ condyle frame for the left joint (F8).")
+        airwayRow.addWidget(self.btnAnalyzeAirway)
+        airwayRow.addWidget(self.btnTmjRightSag)
+        airwayRow.addWidget(self.btnTmjLeftSag)
+        step6Layout.addRow("Airway & TMJ:", airwayRow)
+
+        # ==================== STEP 7: ADVANCED TOOLING ====================
+        self.step7Box = ctk.ctkCollapsibleButton()
+        self.step7Box.text = "Step 7: 3D Cephalometry & Automated Dental Tools"
+        self.step7Box.collapsed = True
+        self.layout.addWidget(self.step7Box)
+        step7Outer = qt.QVBoxLayout(self.step7Box)
+
+        self.step7HintLabel = qt.QLabel(
+            "Place S, N, A, B, Go, Gn fiducials for 3D cephalometry, or launch an installed "
+            "SlicerAutomatedDentalTools module."
+        )
+        self.step7HintLabel.setWordWrap(True)
+        step7Outer.addWidget(self.step7HintLabel)
+
+        self.step7ContentWidget = qt.QWidget()
+        step7Layout = qt.QFormLayout(self.step7ContentWidget)
+        step7Outer.addWidget(self.step7ContentWidget)
+
+        cephRow = qt.QHBoxLayout()
+        self.btnCompute3DCeph = qt.QPushButton("Compute 3D Cephalometry")
+        self.btnCompute3DCeph.setToolTip(
+            "Compute SNA/SNB/ANB and related angles from S,N,A,B,Go,Gn fiducials (F17)."
+        )
+        cephRow.addWidget(self.btnCompute3DCeph)
+        step7Layout.addRow("Cephalometry:", cephRow)
+
+        adtRow = qt.QHBoxLayout()
+        self.adtToolCombo = qt.QComboBox()
+        for tool in ("ASO", "AMASSS", "ALI", "AReg", "AutoCrop3D", "BatchDentalSegmentator", "MRI2CBCT"):
+            self.adtToolCombo.addItem(tool, tool)
+        self.adtToolCombo.setToolTip("Installed SlicerAutomatedDentalTools module to launch (F18).")
+        self.btnLaunchAdtTool = qt.QPushButton("Launch Tool")
+        self.btnLaunchAdtTool.setToolTip(
+            "Launch the selected SlicerAutomatedDentalTools module if installed (F18)."
+        )
+        adtRow.addWidget(self.adtToolCombo)
+        adtRow.addWidget(self.btnLaunchAdtTool)
+        step7Layout.addRow("Automated Dental Tools:", adtRow)
 
         self.layout.addStretch()
 
@@ -1011,6 +1131,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.panoHeightSpin.valueChanged.connect(self.onPanoParamChanged)
         self.panoOffsetSpin.valueChanged.connect(self.onPanoParamChanged)
         self.panoProjCombo.currentTextChanged.connect(self.onPanoParamChanged)
+        self.panoFlipVerticalCheck.toggled.connect(self.onPanoParamChanged)
         self.btnGeneratePanoramic.clicked.connect(self.onGeneratePanoramicClicked)
         self.btnCancelPanoramic.clicked.connect(self.onCancelPanoramicClicked)
 
@@ -1116,9 +1237,13 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             settings.setValue(self.SETTINGS_PREFIX + "lightboxStepMm", self.lightboxStepSpin.value)
             settings.setValue(self.SETTINGS_PREFIX + "vrPreset", self.vrPresetCombo.currentText)
             if self.checkpointPathEdit.currentPath:
-                settings.setValue(self.SETTINGS_PREFIX + "lastCheckpointPath", self.checkpointPathEdit.currentPath)
+                settings.setValue(
+                    self.SETTINGS_PREFIX + "lastCheckpointPath", self.checkpointPathEdit.currentPath
+                )
         except Exception:
-            pass
+            logger.debug(
+                "Best-effort operation failed", exc_info=True
+            )  # silent-ok: non-critical cleanup/probe
 
     # ------------------------------------------------------------------
     # ParameterNode Lifecycle & Full State Round-Trip (B14, B15, B16, B18)
@@ -1136,10 +1261,14 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def setParameterNode(self, inputParameterNode: Any) -> None:
         if self._parameterNode is not None and vtk is not None:
-            self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self.updateGUIFromParameterNode)
+            self.removeObserver(
+                self._parameterNode, vtk.vtkCommand.ModifiedEvent, self.updateGUIFromParameterNode
+            )
         self._parameterNode = inputParameterNode
         if self._parameterNode is not None and vtk is not None:
-            self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self.updateGUIFromParameterNode)
+            self.addObserver(
+                self._parameterNode, vtk.vtkCommand.ModifiedEvent, self.updateGUIFromParameterNode
+            )
         self.updateGUIFromParameterNode()
 
     def onSceneStartClose(self, _caller: Any, _event: Any) -> None:
@@ -1198,12 +1327,23 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 (self._parameterNode.GetParameter("LightboxEnabled") or "true").lower() == "true"
             )
             self.lightboxStepSpin.setValue(float(self._parameterNode.GetParameter("LightboxStepMm") or 2.0))
-            self.lightboxCountSpin.setValue(int(float(self._parameterNode.GetParameter("LightboxCount") or 3)))
-            self.panoThicknessSpin.setValue(float(self._parameterNode.GetParameter("PanoThicknessMm") or 18.0))
+            self.lightboxCountSpin.setValue(
+                int(float(self._parameterNode.GetParameter("LightboxCount") or 3))
+            )
+            self.panoThicknessSpin.setValue(
+                float(self._parameterNode.GetParameter("PanoThicknessMm") or 18.0)
+            )
             self.panoHeightSpin.setValue(float(self._parameterNode.GetParameter("PanoHeightMm") or 50.0))
             self.panoOffsetSpin.setValue(float(self._parameterNode.GetParameter("PanoOffsetMm") or 0.0))
-            self.panoProjCombo.setCurrentText(self._parameterNode.GetParameter("PanoProjectionMode") or "Mean")
-            self.canalMarginSpin.setValue(float(self._parameterNode.GetParameter("CanalSafetyMarginMm") or 2.0))
+            self.panoProjCombo.setCurrentText(
+                self._parameterNode.GetParameter("PanoProjectionMode") or "Mean"
+            )
+            self.panoFlipVerticalCheck.setChecked(
+                (self._parameterNode.GetParameter("PanoFlipVertical") or "false").lower() == "true"
+            )
+            self.canalMarginSpin.setValue(
+                float(self._parameterNode.GetParameter("CanalSafetyMarginMm") or 2.0)
+            )
             self.includePatientMetaCheckBox.setChecked(
                 (self._parameterNode.GetParameter("IncludePatientMetadata") or "false").lower() == "true"
             )
@@ -1257,12 +1397,24 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
             if not has_vol:
                 self.step1HintLabel.setText("Status: Waiting for an input CBCT volume.")
-                self.step2HintLabel.setText("Prerequisite missing: Select an input CBCT volume in Step 1 first.")
-                self.step3HintLabel.setText("Prerequisite missing: Load a CBCT volume and define a dental arch curve (>= 4 points).")
-                self.step4HintLabel.setText("Prerequisite missing: Load a CBCT volume and define a dental arch curve (>= 4 points).")
-                self.step5HintLabel.setText("Prerequisite missing: Load a CBCT volume and define a dental arch curve (>= 4 points).")
+                self.step2HintLabel.setText(
+                    "Prerequisite missing: Select an input CBCT volume in Step 1 first."
+                )
+                self.step3HintLabel.setText(
+                    "Prerequisite missing: Load a CBCT volume and define a dental arch curve (>= 4 points)."
+                )
+                self.step4HintLabel.setText(
+                    "Prerequisite missing: Load a CBCT volume and define a dental arch curve (>= 4 points)."
+                )
+                self.step5HintLabel.setText(
+                    "Prerequisite missing: Load a CBCT volume and define a dental arch curve (>= 4 points)."
+                )
             else:
-                seg_status = f"Segmentation: {segNode.GetName()}" if segNode else "Unsegmented (Manual Ruler or AI Checkpoint mode)"
+                seg_status = (
+                    f"Segmentation: {segNode.GetName()}"
+                    if segNode
+                    else "Unsegmented (Manual Ruler or AI Checkpoint mode)"
+                )
                 self.step1HintLabel.setText(f"Loaded: {volNode.GetName()} | {seg_status}")
                 if self.step2Box.collapsed and not has_curve:
                     self.step2Box.collapsed = False
@@ -1274,11 +1426,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                         if hasattr(curveNode, "GetCurveLengthWorld")
                         else 100.0
                     )
-                    edit_tag = "User-edited (locked against silent overwrite)" if user_edited else "Auto-fitted"
+                    edit_tag = (
+                        "User-edited (locked against silent overwrite)" if user_edited else "Auto-fitted"
+                    )
                     self.step2HintLabel.setText(
                         f"{effective_jaw} Arch Curve: {curveNode.GetNumberOfControlPoints()} points, {total_len:.1f} mm ({edit_tag})."
                     )
-                    self.step3HintLabel.setText("Ready: Generate or auto-refresh in-process Curved Planar Reformation.")
+                    self.step3HintLabel.setText(
+                        "Ready: Generate or auto-refresh in-process Curved Planar Reformation."
+                    )
                     self.step4HintLabel.setText(
                         "Ready: Drag the cyan line in Axial (Red) or Panoramic (Green), adjust +-30° tilt, or inspect Lightbox."
                     )
@@ -1304,7 +1460,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         finally:
             self._updatingGUIFromParameterNode = False
 
-    def _currentCursorSettings(self, sync_axial_slice: bool = False, site_label: Optional[str] = None) -> CursorSettings:
+    def _currentCursorSettings(
+        self, sync_axial_slice: bool = False, site_label: Optional[str] = None
+    ) -> CursorSettings:
         """O4: Build a CursorSettings dataclass from the current UI / ParameterNode state."""
         return CursorSettings(
             width_mm=float(self.csWidthSpin.value),
@@ -1354,11 +1512,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.onRefreshAllSelectedTeeth()
         if node is not None:
             self.autoSynchronizeSIOrientation()
+
     def onBrowseNNUNetModelClicked(self) -> None:
         path = qt.QFileDialog.getExistingDirectory(self.parent, "Select nnU-Net ToothFairy3 Model Folder")
         if not path:
             path = qt.QFileDialog.getOpenFileName(
-                self.parent, "Select nnU-Net Checkpoint", "", "PyTorch Checkpoints (*.pth *.pt);;All Files (*)"
+                self.parent,
+                "Select nnU-Net Checkpoint",
+                "",
+                "PyTorch Checkpoints (*.pth *.pt);;All Files (*)",
             )
         if path:
             self.nnunetModelPathEdit.setText(path)
@@ -1382,9 +1544,11 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         fold = self.nnunetFoldCombo.currentText.strip() or "0"
         try:
             from CBCTPlannerLib.AdvancedTools import run_nnunet_toothfairy3_inference
+
             def _progress(pct, msg):
                 if hasattr(self, "globalStatusLabel"):
                     self.globalStatusLabel.setText(f"[{pct}%] {msg}")
+
             segNode = run_nnunet_toothfairy3_inference(
                 volNode,
                 model_path,
@@ -1405,15 +1569,20 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.util.warningDisplay("Please select both a CBCT volume and a ToothFairy3 segmentation.")
             return
         from CBCTPlannerLib.core.labels import LABELS_BY_ID, match_segment_to_label_and_precedence
+
         segmentation = segNode.GetSegmentation()
-        if not segmentation.ContainsRepresentation(slicer.vtkSegmentationConverter.GetClosedSurfaceRepresentationName()):
+        if not segmentation.ContainsRepresentation(
+            slicer.vtkSegmentationConverter.GetClosedSurfaceRepresentationName()
+        ):
             segmentation.CreateClosedSurfaceRepresentation()
         detected_teeth = []
         for idx in range(segmentation.GetNumberOfSegments()):
             seg = segmentation.GetNthSegment(idx)
             sid = segmentation.GetNthSegmentID(idx)
             fdi_tag = seg.GetTag("CBCTPlanner.FDI") if hasattr(seg, "GetTag") else None
-            label_id, category, _, _ = match_segment_to_label_and_precedence(sid, seg.GetName(), fdi_attribute=fdi_tag)
+            label_id, category, _, _ = match_segment_to_label_and_precedence(
+                sid, seg.GetName(), fdi_attribute=fdi_tag
+            )
             info = LABELS_BY_ID.get(label_id)
             if info is not None:
                 seg.SetName(info.name)
@@ -1428,9 +1597,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             for fdi in detected_teeth:
                 self.selectedTeeth.add(int(fdi))
         if hasattr(self, "onAutoFitArchClicked"):
+            # Auto-Fit generates the panoramic exactly once; do not duplicate it here.
             self.onAutoFitArchClicked()
-        if hasattr(self, "onGeneratePanoramicClicked"):
-            self.onGeneratePanoramicClicked()
         if hasattr(self, "onExtractCanalsClicked"):
             self.onExtractCanalsClicked()
         if hasattr(self, "onRefreshAllSelectedTeeth"):
@@ -1452,6 +1620,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             lbl = slicer.util.loadLabelVolume(path)
             # Check if ToothFairy3 remapping is needed on label volume
             from CBCTPlannerLib.core.labels import remap_toothfairy3_array
+
             lbl_arr = slicer.util.arrayFromVolume(lbl)
             if lbl_arr is not None and np.any((lbl_arr > 0) & (lbl_arr <= 77)):
                 remapped = remap_toothfairy3_array(lbl_arr)
@@ -1475,7 +1644,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if volNode is None:
             return
 
-        vol_flipped = (volNode.GetAttribute("CBCTPlanner.SIFlipped") == "1")
+        vol_flipped = volNode.GetAttribute("CBCTPlanner.SIFlipped") == "1"
         mat = vtk.vtkMatrix4x4()
         volNode.GetIJKToRASMatrix(mat)
         z_dir_s = mat.GetElement(2, 2)
@@ -1488,7 +1657,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         # 2. Inspect segmentation vs volume: ensure segmentation matches volume orientation
         if segNode is not None:
-            seg_flipped = (segNode.GetAttribute("CBCTPlanner.SIFlipped") == "1")
+            seg_flipped = segNode.GetAttribute("CBCTPlanner.SIFlipped") == "1"
             if vol_flipped != seg_flipped:
                 self.flipSIOrientationNodes([segNode])
                 segNode.SetAttribute("CBCTPlanner.SIFlipped", "1" if vol_flipped else "0")
@@ -1524,7 +1693,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         volNode = self.volumeSelector.currentNode()
         segNode = self.segmentationSelector.currentNode()
         if volNode:
-            current_flip = (volNode.GetAttribute("CBCTPlanner.SIFlipped") == "1")
+            current_flip = volNode.GetAttribute("CBCTPlanner.SIFlipped") == "1"
             new_flip = "0" if current_flip else "1"
             volNode.SetAttribute("CBCTPlanner.SIFlipped", new_flip)
             if segNode:
@@ -1537,7 +1706,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         ckpt_str = str(self.checkpointPathEdit.currentPath or "").strip()
         if not volNode or not ckpt_str or not self.logic:
             if slicer:
-                slicer.util.warningDisplay("Please select both an Input CBCT Volume and an AI Model Checkpoint file/folder.")
+                slicer.util.warningDisplay(
+                    "Please select both an Input CBCT Volume and an AI Model Checkpoint file/folder."
+                )
             return
         custom_py = str(self.customArchPathEdit.currentPath or "").strip()
         scheme = str(self.ckptSchemeCombo.currentData or "5class")
@@ -1710,8 +1881,11 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if hasattr(self, "onGeneratePanoramicClicked"):
                 try:
                     self.onGeneratePanoramicClicked()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.exception("Panoramic generation after Auto-Fit failed")
+                    if slicer:
+                        slicer.util.showStatusMessage(f"Panoramic generation failed: {exc}", 5000)
+                        slicer.util.errorDisplay(f"Panoramic generation failed:\n{exc}")
 
     def onDrawArchManualClicked(self) -> None:
         volNode = self.volumeSelector.currentNode()
@@ -1731,8 +1905,14 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if cid in self._observedCurveNodeIDs:
             return
         self._observedCurveNodeIDs.add(cid)
-        point_mod_evt = getattr(getattr(slicer, "vtkMRMLMarkupsNode", None), "PointModifiedEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
-        end_inter_evt = getattr(vtk.vtkCommand, "EndInteractionEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
+        point_mod_evt = getattr(
+            getattr(slicer, "vtkMRMLMarkupsNode", None),
+            "PointModifiedEvent",
+            getattr(vtk.vtkCommand, "ModifiedEvent", 33),
+        )
+        end_inter_evt = getattr(
+            vtk.vtkCommand, "EndInteractionEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33)
+        )
         self.addObserver(curveNode, point_mod_evt, self._onCurvePointDragged)
         self.addObserver(curveNode, end_inter_evt, self._onCurveInteractionEnded)
 
@@ -1760,12 +1940,17 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # ------------------------------------------------------------------
     def onPanoParamChanged(self, *_args: Any) -> None:
         if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
-            was_mod = self._parameterNode.StartModify() if hasattr(self._parameterNode, "StartModify") else None
+            was_mod = (
+                self._parameterNode.StartModify() if hasattr(self._parameterNode, "StartModify") else None
+            )
             try:
                 self._parameterNode.SetParameter("PanoThicknessMm", f"{self.panoThicknessSpin.value:.1f}")
                 self._parameterNode.SetParameter("PanoHeightMm", f"{self.panoHeightSpin.value:.1f}")
                 self._parameterNode.SetParameter("PanoOffsetMm", f"{self.panoOffsetSpin.value:.1f}")
                 self._parameterNode.SetParameter("PanoProjectionMode", self.panoProjCombo.currentText)
+                self._parameterNode.SetParameter(
+                    "PanoFlipVertical", "true" if self.panoFlipVerticalCheck.checked else "false"
+                )
             finally:
                 if was_mod is not None and hasattr(self._parameterNode, "EndModify"):
                     self._parameterNode.EndModify(was_mod)
@@ -1791,7 +1976,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         curveNode = self.logic.get_curve_node_for_jaw(volNode, jaw, parameterNode=self._parameterNode)
         if not curveNode or curveNode.GetNumberOfControlPoints() < 4:
             if not preview and slicer:
-                slicer.util.warningDisplay(f"Please create or fit a {jaw} dental arch curve (>= 4 points) first.")
+                slicer.util.warningDisplay(
+                    f"Please create or fit a {jaw} dental arch curve (>= 4 points) first."
+                )
             return
 
         spacing = 1.5 if preview else 0.5
@@ -1825,12 +2012,17 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 on_complete=_on_done,
                 on_progress=_on_progress,
                 parameterNode=self._parameterNode,
-                force_fit=False, flip_vertical=self.panoFlipVerticalCheck.checked,
+                force_fit=False,
+                flip_vertical=self.panoFlipVerticalCheck.checked,
             )
         except Exception as exc:
             self.panoProgressBar.setVisible(False)
             self.btnCancelPanoramic.setEnabled(False)
-            logger.error("Panoramic generation failed: %s", exc)
+            logger.exception("Panoramic generation failed")
+            if slicer:
+                slicer.util.showStatusMessage(f"Panoramic generation failed: {exc}", 5000)
+                if not preview:
+                    slicer.util.errorDisplay(f"Panoramic generation failed:\n{exc}")
 
     # ------------------------------------------------------------------
     # Step 4 Callbacks: Cursor, Lock-to-Tooth (B17), Lightbox & Tilt
@@ -1864,7 +2056,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onArcSliderChanged(self, arc_mm: float) -> None:
         if self._updatingGUIFromParameterNode:
             return
-        prev_arc = float(self._parameterNode.GetParameter("CursorArcMm") or 0.0) if self._parameterNode else 0.0
+        prev_arc = (
+            float(self._parameterNode.GetParameter("CursorArcMm") or 0.0) if self._parameterNode else 0.0
+        )
         self._releaseToothLockOnManualMove()
         if self.logic is not None and abs(float(arc_mm) - prev_arc) >= 1.0:
             self.logic.undo_redo.push(
@@ -1911,7 +2105,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onCsDisplayParamChanged(self, *_args: Any) -> None:
         """B16 & O7: Persist all cross-section, slab, tick, and lightbox parameters into ParameterNode."""
         if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
-            was_mod = self._parameterNode.StartModify() if hasattr(self._parameterNode, "StartModify") else None
+            was_mod = (
+                self._parameterNode.StartModify() if hasattr(self._parameterNode, "StartModify") else None
+            )
             try:
                 self._parameterNode.SetParameter("CrossSectionWidthMm", f"{self.csWidthSpin.value:.1f}")
                 self._parameterNode.SetParameter(
@@ -2106,9 +2302,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             mesiodistal_tilt_deg=float(self.csTiltSlider.value),
         )
         self.selectedTeeth.add(fdi)
-        self.treatmentPlanByFDI[fdi] = self.logic.analyze_single_tooth(
-            fdi, volNode, segmentationNode=segNode
-        )
+        self.treatmentPlanByFDI[fdi] = self.logic.analyze_single_tooth(fdi, volNode, segmentationNode=segNode)
         self._syncSelectedTeethToParameterNode()
         self._updateSelectionStatusLabel()
         self._refreshPlanTableFromCache()
@@ -2197,7 +2391,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         fdi = self.activeToothFDI or (next(iter(self.selectedTeeth)) if self.selectedTeeth else 46)
         num_slices = 21  # Standard clinical 21-slice series (between 15 and 28)
-        step_mm = 0.75   # 0.75 mm interval along arch
+        step_mm = 0.75  # 0.75 mm interval along arch
         dlg = qt.QDialog(self.parent)
         dlg.setWindowTitle(f"Cross-Sectional Slice Series — Site #{fdi} ({num_slices} Slices)")
         dlg.resize(950, 700)
@@ -2235,13 +2429,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             card_layout = qt.QVBoxLayout(card)
             card_layout.setContentsMargins(4, 4, 4, 4)
 
-            title_lbl = qt.QLabel(f"<b>Slice {idx+1}/{num_slices}</b> ({item['offset_mm']:+.1f} mm)")
+            title_lbl = qt.QLabel(f"<b>Slice {idx + 1}/{num_slices}</b> ({item['offset_mm']:+.1f} mm)")
             title_lbl.setAlignment(qt.Qt.AlignCenter)
             card_layout.addWidget(title_lbl)
 
             img_lbl = qt.QLabel()
             if item.get("pixmap") is not None:
-                img_lbl.setPixmap(item["pixmap"].scaled(160, 200, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation))
+                img_lbl.setPixmap(
+                    item["pixmap"].scaled(160, 200, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+                )
             img_lbl.setAlignment(qt.Qt.AlignCenter)
             card_layout.addWidget(img_lbl)
 
@@ -2313,14 +2509,16 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not hasattr(self, "step5SelectionStatusLabel"):
             return
         if not self.selectedTeeth:
-            self.step5SelectionStatusLabel.setText("Active Site: None selected (Click a quadrant or teeth above)")
+            self.step5SelectionStatusLabel.setText(
+                "Active Site: None selected (Click a quadrant or teeth above)"
+            )
             return
         count = len(self.selectedTeeth)
         fdis_sorted = sorted(list(self.selectedTeeth))
         q = str(fdis_sorted[0])[0]
         n_slices = 15 if count == 1 else (21 if count <= 3 else 27)
         self.step5SelectionStatusLabel.setText(
-            f"Active Site: Quadrant {q} ({count} tooth site{'s' if count>1 else ''}: {', '.join(f'#{f}' for f in fdis_sorted)}) — {n_slices} Cross-Section Slices"
+            f"Active Site: Quadrant {q} ({count} tooth site{'s' if count > 1 else ''}: {', '.join(f'#{f}' for f in fdis_sorted)}) — {n_slices} Cross-Section Slices"
         )
 
     def onGenerate8x10PrintLayout(self) -> None:
@@ -2351,21 +2549,28 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                         sid = segmentation.GetNthSegmentID(i)
                         seg = segmentation.GetSegment(sid)
                         name = (seg.GetName() or "").lower()
-                        vis = ("mandible" in name or "maxilla" in name or "jaw" in name or "canal" in name)
+                        vis = "mandible" in name or "maxilla" in name or "jaw" in name or "canal" in name
                         for f in selected_fdis:
                             if str(f) in name or f"#{f}" in name:
                                 vis = True
                                 break
                         dNode.SetSegmentVisibility(sid, vis)
             except Exception:
-                pass
+                logger.debug(
+                    "Best-effort operation failed", exc_info=True
+                )  # silent-ok: non-critical cleanup/probe
 
         from CBCTPlannerLib.PrintLayoutEngine import PrintLayoutEngine
+
         engine = PrintLayoutEngine(logic=self.logic)
         pNode = self.getParameterNode() if slicer else None
         p_name = pNode.GetParameter("PatientName") if pNode else "Anonymous"
         p_id = pNode.GetParameter("PatientID") if pNode else "Anonymous"
-        include_meta = self.includePatientMetaCheckBox.isChecked() if hasattr(self, "includePatientMetaCheckBox") else False
+        include_meta = (
+            self.includePatientMetaCheckBox.isChecked()
+            if hasattr(self, "includePatientMetaCheckBox")
+            else False
+        )
 
         out_dir = Path(slicer.app.temporaryPath if slicer else ".")
         html_file, pdf_file, slices_data = engine.generate_8x10_layout(
@@ -2404,9 +2609,13 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         top_bar.addStretch()
 
         btn_open_pdf = qt.QPushButton("📄 Open PDF (Print)")
-        btn_open_pdf.clicked.connect(lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(pdf_path))))
+        btn_open_pdf.clicked.connect(
+            lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(pdf_path)))
+        )
         btn_open_html = qt.QPushButton("🌐 Open in Browser (HTML)")
-        btn_open_html.clicked.connect(lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(html_path))))
+        btn_open_html.clicked.connect(
+            lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(html_path)))
+        )
         top_bar.addWidget(btn_open_pdf)
         top_bar.addWidget(btn_open_html)
         d_layout.addLayout(top_bar)
@@ -2474,7 +2683,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 slicer.util.warningDisplay("Select both a CBCT volume and a Segmentation node first.")
             return
         canals = self.logic.extract_and_display_mandibular_canals(volNode, segNode)
-        self.step6HintLabel.setText(f"Extracted {len(canals)} mandibular canal(s): {', '.join(canals.keys()) or 'None'}")
+        self.step6HintLabel.setText(
+            f"Extracted {len(canals)} mandibular canal(s): {', '.join(canals.keys()) or 'None'}"
+        )
 
     def onTraceCanalManual(self, side: str) -> None:
         volNode = self.volumeSelector.currentNode()
@@ -2509,7 +2720,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         volNode = self.volumeSelector.currentNode()
         if not volNode or not self.logic:
             return
-        out_dir_str = qt.QFileDialog.getExistingDirectory(self.parent, "Select Surgical Guide Output Directory")
+        out_dir_str = qt.QFileDialog.getExistingDirectory(
+            self.parent, "Select Surgical Guide Output Directory"
+        )
         out_dir = Path(out_dir_str) if out_dir_str else Path(slicer.app.temporaryPath)
         stl_path, json_path, sleeves = self.logic.generate_and_export_surgical_guide(
             volumeNode=volNode,
@@ -2532,7 +2745,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         table = self.logic.compute_3d_cephalometry_from_scene()
         summary = ", ".join(f"{m.name}={m.value:.1f}{m.unit} ({m.interpretation})" for m in table[:3])
-        self.step7HintLabel.setText(f"3D Cephalometry: {summary or 'Place S, N, A, B, Go, Gn fiducials first'}")
+        self.step7HintLabel.setText(
+            f"3D Cephalometry: {summary or 'Place S, N, A, B, Go, Gn fiducials first'}"
+        )
 
     def onExportDicomSegSrClicked(self) -> None:
         volNode = self.volumeSelector.currentNode()
@@ -2588,7 +2803,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             try:
                 node.RemoveObserver(tag)
             except Exception:
-                pass
+                logger.debug(
+                    "Best-effort operation failed", exc_info=True
+                )  # silent-ok: non-critical cleanup/probe
         self._ruler_observers.clear()
         self._cached_engine = None
         self._cached_engine_key = None
@@ -2610,7 +2827,10 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     @staticmethod
     def _setDefaultParameters(parameterNode: Any) -> None:
         """B16, O6, O7: Initialize all ParameterNode keys once inside a single StartModify/EndModify batch."""
-        if hasattr(parameterNode, "GetAttribute") and parameterNode.GetAttribute("CBCTPlanner.DefaultsInitialized") == "1":
+        if (
+            hasattr(parameterNode, "GetAttribute")
+            and parameterNode.GetAttribute("CBCTPlanner.DefaultsInitialized") == "1"
+        ):
             return
         defaults = {
             "ActiveJaw": "Lower",
@@ -2630,6 +2850,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "PanoHeightMm": "50.0",
             "PanoOffsetMm": "0.0",
             "PanoProjectionMode": "Mean",
+            "PanoFlipVertical": "false",
             "ShowAxialTicks": "true",
             "OcclusalNormalX": "0.0",
             "OcclusalNormalY": "0.0",
@@ -2690,6 +2911,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "PanoHeightMm",
             "PanoOffsetMm",
             "PanoProjectionMode",
+            "PanoFlipVertical",
             "ShowAxialTicks",
             "OcclusalNormalX",
             "OcclusalNormalY",
@@ -2716,7 +2938,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         patch_size_zyx: Tuple[int, int, int] = (96, 96, 96),
         custom_arch_py_path: Optional[Path] = None,
         custom_arch_class_name: Optional[str] = None,
-        on_progress: Optional[ Any ] = None,
+        on_progress: Optional[Any] = None,
     ) -> Tuple[Any, CheckpointLoadSummary]:
         """Run user-supplied checkpoint on `volumeNode` and populate a styled `vtkMRMLSegmentationNode`."""
         if slicer is None or volumeNode is None:
@@ -2888,7 +3110,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             return None, mat_4x4
 
         pNode = parameterNode or self.getParameterNode()
-        tfNode = pNode.GetNodeReference("OcclusalTransform") if (pNode and hasattr(pNode, "GetNodeReference")) else None
+        tfNode = (
+            pNode.GetNodeReference("OcclusalTransform")
+            if (pNode and hasattr(pNode, "GetNodeReference"))
+            else None
+        )
         if tfNode is None:
             vol_name = volumeNode.GetName() if hasattr(volumeNode, "GetName") else "CBCT"
             tf_name = f"{vol_name}_OcclusalAlignmentTransform"
@@ -2930,14 +3156,20 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 try:
                     slicer.mrmlScene.RemoveNode(tfNode)
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Best-effort operation failed", exc_info=True
+                    )  # silent-ok: non-critical cleanup/probe
                 pNode.SetNodeReferenceID("OcclusalTransform", "")
 
     def start_place_occlusal_points(self, volumeNode: Any, parameterNode: Any = None) -> Any:
         if slicer is None or not volumeNode:
             return None
         pNode = parameterNode or self.getParameterNode()
-        fidNode = pNode.GetNodeReference("OcclusalFiducials") if (pNode and hasattr(pNode, "GetNodeReference")) else None
+        fidNode = (
+            pNode.GetNodeReference("OcclusalFiducials")
+            if (pNode and hasattr(pNode, "GetNodeReference"))
+            else None
+        )
         if fidNode is None:
             name = f"{volumeNode.GetName()}_OcclusalPlanePoints"
             fidNode = slicer.mrmlScene.GetFirstNodeByName(name)
@@ -2968,7 +3200,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         if slicer is None or not volumeNode:
             return None
         pNode = self.getParameterNode()
-        fidNode = pNode.GetNodeReference("OcclusalFiducials") if (pNode and hasattr(pNode, "GetNodeReference")) else None
+        fidNode = (
+            pNode.GetNodeReference("OcclusalFiducials")
+            if (pNode and hasattr(pNode, "GetNodeReference"))
+            else None
+        )
         if fidNode is None:
             name = f"{volumeNode.GetName()}_OcclusalPlanePoints"
             fidNode = slicer.mrmlScene.GetFirstNodeByName(name)
@@ -3045,9 +3281,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     # ------------------------------------------------------------------
     # Arch Curve Management (B15 Node Refs, B20 Spline without Skull Fallback, F3 Single Arch)
     # ------------------------------------------------------------------
-    def get_curve_node_for_jaw(
-        self, volumeNode: Any, jaw: str, parameterNode: Any = None
-    ) -> Any:
+    def get_curve_node_for_jaw(self, volumeNode: Any, jaw: str, parameterNode: Any = None) -> Any:
         """B15 & F3: Resolve curve node via ParameterNode reference ID first; migrate per-jaw curve for Shared mode."""
         pNode = parameterNode or (self.getParameterNode() if slicer is not None else None)
         node = self.panoramic.resolve_curve_node(volumeNode, jaw=jaw, parameterNode=pNode)
@@ -3136,7 +3370,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 try:
                     segmentation.CreateClosedSurfaceRepresentation()
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Best-effort operation failed", exc_info=True
+                    )  # silent-ok: non-critical cleanup/probe
             collected: List[np.ndarray] = []
             for seg in tooth_segments:
                 poly = seg.GetRepresentation(rep_name)
@@ -3393,7 +3629,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         if frame_info is None:
             return None
         _, _, _, _, arc_mm, _ = frame_info
-        panoNode = pNode.GetNodeReference("PanoramicVolume") if (pNode and hasattr(pNode, "GetNodeReference")) else None
+        panoNode = (
+            pNode.GetNodeReference("PanoramicVolume")
+            if (pNode and hasattr(pNode, "GetNodeReference"))
+            else None
+        )
         if pNode is not None:
             pNode.SetParameter("CursorArcMm", f"{arc_mm:.2f}")
 
@@ -3462,12 +3702,16 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                         if seg.GetTag("TerminologyEntry", t_val):
                             term_str = str(t_val)
                     except Exception:
-                        pass
+                        logger.debug(
+                            "Best-effort operation failed", exc_info=True
+                        )  # silent-ok: non-critical cleanup/probe
             if fdi_attr is None and seg is not None and hasattr(seg, "GetAttribute"):
                 try:
                     fdi_attr = seg.GetAttribute("CBCTPlanner.FDI")
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Best-effort operation failed", exc_info=True
+                    )  # silent-ok: non-critical cleanup/probe
 
             label_val, _cat, seg_is_5class, prec = match_segment_to_label_and_precedence(
                 sid, seg_name, fdi_attribute=fdi_attr, terminology_str=term_str
@@ -3483,15 +3727,15 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     continue
 
             try:
-                seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(
-                    segmentationNode, sid, volumeNode
-                )
+                seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, sid, volumeNode)
                 if seg_arr is not None and seg_arr.shape == combined.shape:
                     write_mask = (seg_arr > 0) & (prec >= precedence_buf)
                     combined[write_mask] = label_val
                     precedence_buf[write_mask] = prec
             except Exception:
-                pass
+                logger.debug(
+                    "Best-effort operation failed", exc_info=True
+                )  # silent-ok: non-critical cleanup/probe
 
         if not np.any(combined):
             return None, False
@@ -3502,11 +3746,15 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         """B1: Return True ONLY if the ruler node has been modified by the user (or placed interactively)."""
         if node is None:
             return False
-        user_mod_attr = node.GetAttribute("CBCTPlanner.UserModified") if hasattr(node, "GetAttribute") else None
+        user_mod_attr = (
+            node.GetAttribute("CBCTPlanner.UserModified") if hasattr(node, "GetAttribute") else None
+        )
         if user_mod_attr == "1":
             return True
 
-        init_json = node.GetAttribute("CBCTPlanner.InitialEndpoints") if hasattr(node, "GetAttribute") else None
+        init_json = (
+            node.GetAttribute("CBCTPlanner.InitialEndpoints") if hasattr(node, "GetAttribute") else None
+        )
         if init_json and hasattr(node, "GetNumberOfControlPoints") and node.GetNumberOfControlPoints() >= 2:
             try:
                 init_pts = np.asarray(json.loads(init_json), dtype=np.float64)
@@ -3519,7 +3767,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                         node.SetAttribute("CBCTPlanner.UserModified", "1")
                     return True
             except Exception:
-                pass
+                logger.debug(
+                    "Best-effort operation failed", exc_info=True
+                )  # silent-ok: non-critical cleanup/probe
         return False
 
     @classmethod
@@ -3585,12 +3835,19 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     rNode.AddControlPoint(*p1_list)
 
                 if vtk is not None and hasattr(rNode, "AddObserver"):
+
                     def _on_ruler_interacted(caller: Any, _evt: Any) -> None:
                         cls_ref = self.__class__
                         cls_ref._is_ruler_user_modified(caller)
 
-                    point_mod_evt = getattr(getattr(slicer, "vtkMRMLMarkupsNode", None), "PointModifiedEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
-                    end_inter_evt = getattr(vtk.vtkCommand, "EndInteractionEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
+                    point_mod_evt = getattr(
+                        getattr(slicer, "vtkMRMLMarkupsNode", None),
+                        "PointModifiedEvent",
+                        getattr(vtk.vtkCommand, "ModifiedEvent", 33),
+                    )
+                    end_inter_evt = getattr(
+                        vtk.vtkCommand, "EndInteractionEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33)
+                    )
                     for evt in (point_mod_evt, end_inter_evt):
                         tag = rNode.AddObserver(evt, _on_ruler_interacted)
                         self._ruler_observers.append((rNode, tag))
@@ -3703,9 +3960,17 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     ) -> Dict[str, Any]:
         is_lower = int(fdi) >= 31
         jaw = "lower" if is_lower else "upper"
-        site_map = self.get_fdi_arc_site_map(volumeNode, jaw=jaw, segmentationNode=segmentationNode) if volumeNode else {}
+        site_map = (
+            self.get_fdi_arc_site_map(volumeNode, jaw=jaw, segmentationNode=segmentationNode)
+            if volumeNode
+            else {}
+        )
         site_obj = site_map.get(str(fdi))
-        frame_info = self.get_tooth_arc_mm_and_frame(int(fdi), volumeNode, segmentationNode=segmentationNode) if volumeNode else None
+        frame_info = (
+            self.get_tooth_arc_mm_and_frame(int(fdi), volumeNode, segmentationNode=segmentationNode)
+            if volumeNode
+            else None
+        )
         P = frame_info[0] if frame_info is not None else None
 
         height_mm: Optional[float] = None
@@ -3761,9 +4026,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         )
 
         pos_ras: Optional[List[float]] = (
-            [round(float(P[0]), 2), round(float(P[1]), 2), round(float(P[2]), 2)]
-            if P is not None
-            else None
+            [round(float(P[0]), 2), round(float(P[1]), 2), round(float(P[2]), 2)] if P is not None else None
         )
         return {
             "fdi": int(fdi),
@@ -3805,9 +4068,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     # ------------------------------------------------------------------
     # F1, F2, F4, F7, F8, F14, F15, F16, F17: Clinical & Phase 7 Operations
     # ------------------------------------------------------------------
-    def extract_and_display_mandibular_canals(
-        self, volumeNode: Any, segmentationNode: Any
-    ) -> Dict[str, Any]:
+    def extract_and_display_mandibular_canals(self, volumeNode: Any, segmentationNode: Any) -> Dict[str, Any]:
         """F1: Extract Left and Right Mandibular Canals from segmentation and display 2D/3D tubes."""
         mask, is_5class = self._extract_combined_label_mask(volumeNode, segmentationNode)
         if mask is None:
@@ -3839,7 +4100,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             N = np.array([0.0, 1.0, 0.0], dtype=np.float64)
             B = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
-        vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False) if (slicer and volumeNode) else None
+        vol = (
+            CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+            if (slicer and volumeNode)
+            else None
+        )
         mask, is_5class = (
             self._extract_combined_label_mask(volumeNode, segmentationNode)
             if (slicer and volumeNode and segmentationNode)
@@ -3893,7 +4158,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         self, volumeNode: Any, segmentationNode: Any = None, side: str = "Right"
     ) -> Optional[TMJCondyleFrame]:
         """F8: Align Yellow (Sagittal) and Green/Red (Coronal) views to the Left or Right mandibular condyle."""
-        vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False) if (slicer and volumeNode) else None
+        vol = (
+            CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+            if (slicer and volumeNode)
+            else None
+        )
         mask, _ = (
             self._extract_combined_label_mask(volumeNode, segmentationNode)
             if (slicer and volumeNode and segmentationNode)
@@ -3911,9 +4180,15 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     N_sag = frame.sagittal_normal_ras
                     R_sag = frame.sagittal_right_ras
                     sNode.SetSliceToRASByNTP(
-                        float(N_sag[0]), float(N_sag[1]), float(N_sag[2]),
-                        float(R_sag[0]), float(R_sag[1]), float(R_sag[2]),
-                        float(P[0]), float(P[1]), float(P[2]),
+                        float(N_sag[0]),
+                        float(N_sag[1]),
+                        float(N_sag[2]),
+                        float(R_sag[0]),
+                        float(R_sag[1]),
+                        float(R_sag[2]),
+                        float(P[0]),
+                        float(P[1]),
+                        float(P[2]),
                         0,
                     )
         return frame
@@ -3956,7 +4231,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
 
         half_span = (float(num_slices) - 1.0) / 2.0
         offsets = [(i - half_span) * float(step_mm) for i in range(num_slices)]
-        engine = self._get_or_create_measurement_engine(volumeNode, segmentationNode)
+        engine = self._get_or_build_measurement_engine(volumeNode, segmentationNode)
 
         for off in offsets:
             meas = None
@@ -4015,14 +4290,16 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
 
                 painter.end()
 
-            results.append({
-                "offset_mm": off,
-                "height_mm": h_str,
-                "w_crest_mm": w0_str,
-                "w_3mm": w3_str,
-                "w_5mm": w5_str,
-                "pixmap": pix,
-            })
+            results.append(
+                {
+                    "offset_mm": off,
+                    "height_mm": h_str,
+                    "w_crest_mm": w0_str,
+                    "w_3mm": w3_str,
+                    "w_5mm": w5_str,
+                    "pixmap": pix,
+                }
+            )
         return results
 
     def propose_crowns_and_abutments_for_placed_implants(
@@ -4100,9 +4377,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         return capture_slice_view_png_base64(slice_name)
 
     @staticmethod
-    def export_treatment_plan_files(
-        plan_data: Sequence[Dict[str, Any]], out_dir: Path
-    ) -> Tuple[Path, Path]:
+    def export_treatment_plan_files(plan_data: Sequence[Dict[str, Any]], out_dir: Path) -> Tuple[Path, Path]:
         """B22: Export JSON and CSV where numeric columns are empty `""` when unmeasured (never string 'not measured')."""
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
@@ -4212,8 +4487,12 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         """B21, B22, F2, F19: Generate HTML report with dynamic lightbox labels, opt-in patient metadata, and disclaimer."""
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
-        raw_vol_name = volumeNode.GetName() if (volumeNode and hasattr(volumeNode, "GetName")) else "CBCT_Scan"
-        safe_stem = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw_vol_name).strip("_") or "CBCT_Scan"
+        raw_vol_name = (
+            volumeNode.GetName() if (volumeNode and hasattr(volumeNode, "GetName")) else "CBCT_Scan"
+        )
+        safe_stem = (
+            "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw_vol_name).strip("_") or "CBCT_Scan"
+        )
         escaped_vol_name = html.escape(raw_vol_name)
         report_file = out_path / f"{safe_stem}_Treatment_Plan_Report.html"
 
@@ -4223,7 +4502,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         step_val = float(lightbox_step_mm)
         step_str = f"{step_val:.1f}".rstrip("0").rstrip(".")
 
-        eff_patient_name = html.escape(str(patient_name or "Patient") if include_patient_metadata else "Anonymous")
+        eff_patient_name = html.escape(
+            str(patient_name or "Patient") if include_patient_metadata else "Anonymous"
+        )
         eff_patient_id = html.escape(str(patient_id or "N/A") if include_patient_metadata else "Anonymous")
         report_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -4346,7 +4627,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             f"<strong>Software Version:</strong> SlicerCBCTPlanner v{html.escape(SOFTWARE_VERSION)}"
             f"</div>"
             "<p><em>Note: Unsegmented sites without user-adjusted manual rulers are explicitly reported as "
-            f"\"not measured\". {html.escape(MISCH_APPROXIMATE_DISCLAIMER)}.</em></p>"
+            f'"not measured". {html.escape(MISCH_APPROXIMATE_DISCLAIMER)}.</em></p>'
             f"{screenshots_html}"
             "<table><thead><tr>"
             "<th>FDI</th><th>Jaw</th><th>Source</th><th>Ridge Height</th><th>Crest Width</th>"

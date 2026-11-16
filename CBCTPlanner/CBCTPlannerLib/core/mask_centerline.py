@@ -42,9 +42,7 @@ class CenterlineCurve:
         self.control_points = np.asarray(control_points, dtype=np.float64)
         self.source = source
         if len(self.control_points) < 4:
-            raise ValueError(
-                f"CenterlineCurve needs >= 4 control points, got {len(self.control_points)}"
-            )
+            raise ValueError(f"CenterlineCurve needs >= 4 control points, got {len(self.control_points)}")
         self._build_spline()
 
     def _build_spline(self) -> None:
@@ -91,9 +89,7 @@ class CenterlineCurve:
             from scipy import interpolate  # type: ignore
 
             return np.column_stack(interpolate.splev(u_arr, self.tck))
-        return np.column_stack(
-            [np.interp(u_arr, self._u_ctrl, self.control_points[:, d]) for d in range(3)]
-        )
+        return np.column_stack([np.interp(u_arr, self._u_ctrl, self.control_points[:, d]) for d in range(3)])
 
     def _u_for_t(self, t: float) -> float:
         t = float(np.clip(t, 0.0, 1.0))
@@ -214,9 +210,7 @@ def _order_skeleton_path(skel: np.ndarray, start_zyx, end_zyx) -> Optional[np.nd
             cols.append(j)
             data.append(1.0)
     graph = scipy_sparse.csr_matrix((data, (rows, cols)), shape=(n, n))
-    dists, predecessors = scipy_csgraph.dijkstra(
-        graph, directed=False, indices=s, return_predecessors=True
-    )
+    dists, predecessors = scipy_csgraph.dijkstra(graph, directed=False, indices=s, return_predecessors=True)
     if not np.isfinite(dists[tgt]):
         return None
     path: List[int] = []
@@ -265,9 +259,7 @@ def _centerline_from_binary(
 ) -> Optional[Tuple[CenterlineCurve, int]]:
     if not binary.any():
         return None
-    skimage_morph = ensure_optional_package(
-        "skimage.morphology", "scikit-image", "3D mask skeletonization"
-    )
+    skimage_morph = ensure_optional_package("skimage.morphology", "scikit-image", "3D mask skeletonization")
     skel = skimage_morph.skeletonize(binary)
     if not skel.any():
         return None
@@ -323,9 +315,7 @@ def extract_arch_centerline_3d(
     structure = np.isin(mask, [jaw_id] + list(tooth_ids))
     if not structure.any():
         return None
-    skimage_morph = ensure_optional_package(
-        "skimage.morphology", "scikit-image", "3D arch skeletonization"
-    )
+    skimage_morph = ensure_optional_package("skimage.morphology", "scikit-image", "3D arch skeletonization")
     skel = skimage_morph.skeletonize(structure)
     if not skel.any():
         return None

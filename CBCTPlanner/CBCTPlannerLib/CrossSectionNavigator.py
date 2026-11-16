@@ -44,8 +44,8 @@ SNAP_EPSILON_MM = 0.05
 
 # Colors matching the custom Lightbox slice view headers:
 COLOR_CS_MINUS = (0.96, 0.62, 0.04)  # Amber (#F59E0B) for -step_mm
-COLOR_CS_ZERO = (0.00, 0.90, 1.00)   # Cyan (#06B6D4) for 0.0 mm
-COLOR_CS_PLUS = (0.06, 0.73, 0.51)   # Emerald (#10B981) for +step_mm
+COLOR_CS_ZERO = (0.00, 0.90, 1.00)  # Cyan (#06B6D4) for 0.0 mm
+COLOR_CS_PLUS = (0.06, 0.73, 0.51)  # Emerald (#10B981) for +step_mm
 
 
 @dataclass
@@ -77,9 +77,9 @@ class CrossSectionNavigator:
         self.panoramic = panoramic_logic or PanoramicCurveLogic(max_cache_entries=max_cache_entries)
         self._is_updating: bool = False
         # B9: Bounded LRU cache for tick fan polydata
-        self._poly_cache: BoundedLRUCache[
-            Tuple[str, int, float, float, Tuple[float, float, float]], Any
-        ] = BoundedLRUCache(max_entries=max_cache_entries)
+        self._poly_cache: BoundedLRUCache[Tuple[str, int, float, float, Tuple[float, float, float]], Any] = (
+            BoundedLRUCache(max_entries=max_cache_entries)
+        )
         # O2: Persistent observer registry keyed by node ID
         self._line_observers: List[Tuple[Any, int]] = []
         self._observed_node_ids: Dict[str, Any] = {}
@@ -216,10 +216,7 @@ class CrossSectionNavigator:
         step = max(0.1, float(step_mm))
         s0 = float(np.clip(center_arc_mm, 0.0, total_len_mm))
         half = n // 2
-        offsets = [
-            round(float(np.clip(s0 + (i - half) * step, 0.0, total_len_mm)), 3)
-            for i in range(n)
-        ]
+        offsets = [round(float(np.clip(s0 + (i - half) * step, 0.0, total_len_mm)), 3) for i in range(n)]
         return offsets
 
     @staticmethod
@@ -276,9 +273,8 @@ class CrossSectionNavigator:
         bg_node = slicer.mrmlScene.GetNodeByID(bg_id)
         if not bg_node:
             return False
-        return (
-            bg_node.GetAttribute("CBCTPlanner.IsPanoramic") == "1"
-            or (bg_node.GetName() or "").endswith("_Panoramic")
+        return bg_node.GetAttribute("CBCTPlanner.IsPanoramic") == "1" or (bg_node.GetName() or "").endswith(
+            "_Panoramic"
         )
 
     @staticmethod
@@ -402,8 +398,14 @@ class CrossSectionNavigator:
             nid = node.GetID() if hasattr(node, "GetID") else str(id(node))
             if nid in self._observed_node_ids:
                 continue
-            point_mod_evt = getattr(getattr(slicer, "vtkMRMLMarkupsNode", None), "PointModifiedEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
-            end_inter_evt = getattr(vtk.vtkCommand, "EndInteractionEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33))
+            point_mod_evt = getattr(
+                getattr(slicer, "vtkMRMLMarkupsNode", None),
+                "PointModifiedEvent",
+                getattr(vtk.vtkCommand, "ModifiedEvent", 33),
+            )
+            end_inter_evt = getattr(
+                vtk.vtkCommand, "EndInteractionEvent", getattr(vtk.vtkCommand, "ModifiedEvent", 33)
+            )
             for evt in (point_mod_evt, end_inter_evt):
                 tag = node.AddObserver(evt, handler)
                 self._line_observers.append((node, tag))
@@ -875,9 +877,15 @@ class CrossSectionNavigator:
         was_mod = sNode.StartModify() if hasattr(sNode, "StartModify") else None
         try:
             sNode.SetSliceToRASByNTP(
-                float(T_tilted[0]), float(T_tilted[1]), float(T_tilted[2]),
-                float(-N[0]), float(-N[1]), float(-N[2]),
-                float(P[0]), float(P[1]), float(P[2]),
+                float(T_tilted[0]),
+                float(T_tilted[1]),
+                float(T_tilted[2]),
+                float(-N[0]),
+                float(-N[1]),
+                float(-N[2]),
+                float(P[0]),
+                float(P[1]),
+                float(P[2]),
                 0,
             )
             cls.configure_slice_node_slab(
@@ -940,9 +948,15 @@ class CrossSectionNavigator:
                 was_mod = sNode.StartModify() if hasattr(sNode, "StartModify") else None
                 try:
                     sNode.SetSliceToRASByNTP(
-                        float(N[0]), float(N[1]), float(N[2]),
-                        float(T[0]), float(T[1]), float(T[2]),
-                        float(P[0]), float(P[1]), float(P[2]),
+                        float(N[0]),
+                        float(N[1]),
+                        float(N[2]),
+                        float(T[0]),
+                        float(T[1]),
+                        float(T[2]),
+                        float(P[0]),
+                        float(P[1]),
+                        float(P[2]),
                         0,
                     )
                 finally:

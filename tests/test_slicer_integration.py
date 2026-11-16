@@ -26,8 +26,8 @@ MODULE_DIR = REPO_ROOT / "CBCTPlanner"
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
-from CBCTPlanner import CBCTPlannerLogic
-from CBCTPlannerLib import (
+from CBCTPlanner import CBCTPlannerLogic  # noqa: E402
+from CBCTPlannerLib import (  # noqa: E402
     CanalTracerLogic,
     CrossSectionNavigator,
     CursorSettings,
@@ -43,7 +43,7 @@ from CBCTPlannerLib import (
     detect_automated_dental_tools_modules,
     export_reformatted_dicom_series,
 )
-from CBCTPlannerLib.core.volume_loader import CBCTVolume
+from CBCTPlannerLib.core.volume_loader import CBCTVolume  # noqa: E402
 
 
 class _MockDisplayNode:
@@ -327,8 +327,7 @@ class _MockSlicerEnv:
     def __init__(self) -> None:
         self.mrmlScene = _MockMRMLScene()
         self.slice_widgets = {
-            t: _MockSliceWidget(t)
-            for t in ("Red", "Green", "Yellow", "YellowMinus", "YellowPlus")
+            t: _MockSliceWidget(t) for t in ("Red", "Green", "Yellow", "YellowMinus", "YellowPlus")
         }
 
         class _LM:
@@ -381,9 +380,11 @@ class TestSlicerIntegrationAndFeatures(unittest.TestCase):
     def test_b10_b11_b14_b15_b16_b17_b18_mrml_slice_and_parameter_node_behaviors(self) -> None:
         """Verify B10 (zoom preserved), B11 (Red scroll preserved), B15 (volume rename safe), and B16 (ParameterNode round-trip)."""
         mock_slicer = _MockSlicerEnv()
-        with patch("CBCTPlanner.slicer", mock_slicer), patch(
-            "CBCTPlannerLib.PanoramicCurveLogic.slicer", mock_slicer
-        ), patch("CBCTPlannerLib.CrossSectionNavigator.slicer", mock_slicer):
+        with (
+            patch("CBCTPlanner.slicer", mock_slicer),
+            patch("CBCTPlannerLib.PanoramicCurveLogic.slicer", mock_slicer),
+            patch("CBCTPlannerLib.CrossSectionNavigator.slicer", mock_slicer),
+        ):
             logic = CBCTPlannerLogic()
             pNode = mock_slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScriptedModuleNode", "Params")
             logic._parameterNode = pNode
@@ -416,7 +417,9 @@ class TestSlicerIntegrationAndFeatures(unittest.TestCase):
 
             red_snode = mock_slicer.slice_widgets["Red"].GetSliceNode()
             red_snode.SetSliceOffset(14.5)
-            settings_drag = CursorSettings(sync_axial_slice=False, slab_enabled=True, slab_mode="MIP", slab_thickness_mm=2.5)
+            settings_drag = CursorSettings(
+                sync_axial_slice=False, slab_enabled=True, slab_mode="MIP", slab_thickness_mm=2.5
+            )
             logic.navigator.update_cursor_at_arc_mm(
                 volNode, curveNode, arc_mm=40.0, settings=settings_drag, parameterNode=pNode
             )
@@ -637,7 +640,13 @@ class TestSlicerIntegrationAndFeatures(unittest.TestCase):
     def test_f6_f7_f8_f9_f11_f13_f18_advanced_clinical_tools(self) -> None:
         """F6, F7, F8, F9, F11, F13, F18, B21: Verify occlusal SVD, airway mCSA, TMJ frames, angle/surface distance, DICOM, screenshot, and Undo/Redo."""
         cusps = np.array(
-            [[25.0, -15.0, 5.0], [15.0, 10.0, 5.0], [0.0, 20.0, 5.0], [-15.0, 10.0, 5.0], [-25.0, -15.0, 5.0]],
+            [
+                [25.0, -15.0, 5.0],
+                [15.0, 10.0, 5.0],
+                [0.0, 20.0, 5.0],
+                [-15.0, 10.0, 5.0],
+                [-25.0, -15.0, 5.0],
+            ],
             dtype=np.float64,
         )
         normal, center = compute_occlusal_plane_from_segmentation(cusps)
@@ -813,8 +822,8 @@ class TestPhase7AndCheckpointInference(unittest.TestCase):
         dummy_mod = _DummyModule()
         candidate_sd = {
             "enc1.0.weight": _DummyParam((16, 1, 3, 3, 3)),  # matches
-            "head.weight": _DummyParam((32, 16, 1, 1, 1)),   # mismatched class count (32 vs 6)
-            "extra.layer": _DummyParam((8, 8)),              # unexpected key
+            "head.weight": _DummyParam((32, 16, 1, 1, 1)),  # mismatched class count (32 vs 6)
+            "extra.layer": _DummyParam((8, 8)),  # unexpected key
         }
         loaded_count, skipped_mismatch = load_state_dict_shape_safe(dummy_mod, candidate_sd)
         self.assertEqual(loaded_count, 1)
@@ -973,9 +982,9 @@ class TestPhase7AndCheckpointInference(unittest.TestCase):
             vol_syn = np.full((24, 32, 32), -200.0, dtype=np.float32)
             vol_syn[4:20, 8:24, 6:26] = 750.0
             ckpt_syn = np.zeros((24, 32, 32), dtype=np.uint8)
-            ckpt_syn[4:16, 8:24, 6:26] = 2   # Mandible
+            ckpt_syn[4:16, 8:24, 6:26] = 2  # Mandible
             ckpt_syn[14:19, 10:22, 8:24] = 4  # Lower teeth
-            ckpt_syn[6:8, 12:20, 6:26] = 5    # Canal
+            ckpt_syn[6:8, 12:20, 6:26] = 5  # Canal
 
             ckpt_path = tmp_path / "custom_ckpt.npy"
             out_batch = tmp_path / "batch_out"
