@@ -191,9 +191,9 @@ def resample_to_ras(
     extent = world.max(axis=0) - origin
     # World extents are (x, y, z); array shape is (Z, Y, X).
     output_shape = (
-        int(np.floor(extent[2] / spacing[2] + 1e-6)) + 1,
-        int(np.floor(extent[1] / spacing[1] + 1e-6)) + 1,
-        int(np.floor(extent[0] / spacing[0] + 1e-6)) + 1,
+        int(np.ceil(extent[2] / spacing[2] - 1e-6)) + 1,
+        int(np.ceil(extent[1] / spacing[1] - 1e-6)) + 1,
+        int(np.ceil(extent[0] / spacing[0] - 1e-6)) + 1,
     )
     new_affine = np.eye(4, dtype=np.float64)
     new_affine[:3, :3] = np.diag(spacing)
@@ -205,8 +205,15 @@ def resample_to_ras(
     inv = np.linalg.inv(matrix)
     vox = (inv[:3, :3] @ world_flat.T).T + inv[:3, 3][None, :]
     coords = np.vstack([vox[:, 2], vox[:, 1], vox[:, 0]])
+    # An unsigned integer volume cannot represent -1000; casting it would produce a
+    # bright 64536/24 halo outside the source and corrupt windowing. Use 0 instead.
+    background = (
+        float(cval)
+        if np.issubdtype(image.dtype, np.floating) or np.issubdtype(image.dtype, np.signedinteger)
+        else 0.0
+    )
     sampled = ndimage.map_coordinates(
-        image, coords, order=order, mode="constant", cval=float(cval), prefilter=order > 1
+        image, coords, order=order, mode="constant", cval=background, prefilter=order > 1
     )
     return CanonResult(
         image_zyx=np.asarray(sampled).reshape(output_shape).astype(image.dtype),

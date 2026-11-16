@@ -245,6 +245,56 @@ class TestVerifyOrientation(unittest.TestCase):
             )
         )
 
+    def test_oblique_ras_resampling_preserves_unsigned_background_and_full_extent(self) -> None:
+        """Unsigned CT must not get a 64536 halo, and no world corner may be cropped."""
+        from CBCTPlannerLib.core.orientation import resample_to_ras
+
+        angle = np.deg2rad(17.0)
+        rotation = np.array(
+            [[np.cos(angle), -np.sin(angle), 0.0], [np.sin(angle), np.cos(angle), 0.0], [0.0, 0.0, 1.0]]
+        )
+        affine = np.eye(4)
+        affine[:3, :3] = rotation @ np.diag([0.3, 0.35, 0.5])
+        affine[:3, 3] = [-12.3, -10.1, -9.7]
+        image = np.zeros((21, 25, 31), dtype=np.uint16)
+        image[8:13, 10:15, 12:18] = 1200
+        result = resample_to_ras(image, affine)
+        self.assertEqual(result.image_zyx.dtype, np.uint16)
+        self.assertLessEqual(int(result.image_zyx.max()), 1200)
+
+        z, y, x = np.indices(image.shape)
+        corners = np.stack([x.ravel(), y.ravel(), z.ravel(), np.ones(image.size)], axis=0)
+        world = (affine @ corners)[:3]
+        lo, hi = world.min(axis=1), world.max(axis=1)
+        spacing = np.linalg.norm(result.affine[:3, :3], axis=0)
+        got_lo = result.affine[:3, 3]
+        got_hi = got_lo + (np.array(result.image_zyx.shape[::-1]) - 1) * spacing
+        self.assertTrue(np.all(got_lo <= lo + 1e-6), (got_lo, lo))
+        self.assertTrue(np.all(got_hi >= hi - 1e-6), (got_hi, hi))
+
+    def test_oblique_ras_mask_resampling_preserves_label_identity(self) -> None:
+        from CBCTPlannerLib.core.orientation import resample_mask_to_grid, resample_to_ras
+
+        angle = np.deg2rad(13.0)
+        rotation = np.array(
+            [[1.0, 0.0, 0.0], [0.0, np.cos(angle), -np.sin(angle)], [0.0, np.sin(angle), np.cos(angle)]]
+        )
+        affine = np.eye(4)
+        affine[:3, :3] = rotation
+        image = np.zeros((28, 36, 44), dtype=np.int16)
+        mask = np.zeros_like(image, dtype=np.uint16)
+        mask[10:16, 14:24, 18:30] = 46
+        mask[12:14, 17:20, 21:24] = 38
+        result = resample_to_ras(image, affine)
+        out_mask = resample_mask_to_grid(mask, affine, result.affine, result.image_zyx.shape)
+        self.assertEqual(out_mask.dtype, np.uint16)
+        self.assertEqual(set(np.unique(out_mask)) - {0}, {38, 46})
+        for label in (38, 46):
+            src_n = int(np.count_nonzero(mask == label))
+            dst_n = int(np.count_nonzero(out_mask == label))
+            self.assertGreater(dst_n, 0)
+            self.assertLess(abs(dst_n - src_n) / src_n, 0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

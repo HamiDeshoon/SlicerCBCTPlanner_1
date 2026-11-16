@@ -2124,8 +2124,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if curveNode is not None and curveNode.GetNumberOfControlPoints() >= 4 and fit is not None:
             self._observeCurveEdits(curveNode)
             self.step2HintLabel.setText(
-                f"Fitted {len(fit.points_ras)} pts, {fit.arc_length_mm:.1f} mm, "
-                f"RMS {fit.residual_rms_mm:.1f} mm ({fit.method})"
+                f"Fitted {len(fit.points_ras)} pts, tooth-bearing {fit.tooth_bearing_arc_mm:.1f} mm, "
+                f"curve {fit.arc_length_mm:.1f} mm, RMS {fit.residual_rms_mm:.1f} mm ({fit.method})"
             )
             self.step3Box.collapsed = False
             self.updateGUIFromParameterNode()
@@ -2877,8 +2877,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._observeCurveEdits(curveNode)
             if fit is not None:
                 self.step2HintLabel.setText(
-                    f"Fitted {len(fit.points_ras)} pts, {fit.arc_length_mm:.1f} mm, "
-                    f"RMS {fit.residual_rms_mm:.1f} mm ({fit.method})"
+                    f"Fitted {len(fit.points_ras)} pts, tooth-bearing {fit.tooth_bearing_arc_mm:.1f} mm, "
+                    f"curve {fit.arc_length_mm:.1f} mm, RMS {fit.residual_rms_mm:.1f} mm ({fit.method})"
                 )
             self.step3Box.collapsed = False
             self.globalStatusLabel.setText("Pipeline: generating panoramic CPR...")
@@ -3700,6 +3700,8 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         sourceVolumeNode: Any,
         targetVolumeNode: Any,
         func: Callable[[np.ndarray], np.ndarray],
+        *,
+        preloaded_arrays: Optional[dict[str, np.ndarray]] = None,
     ) -> int:
         """Apply `func` to every segment binary labelmap and write it against `targetVolumeNode`.
 
@@ -3724,9 +3726,12 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         updated = 0
         for index in range(segmentation.GetNumberOfSegments()):
             segment_id = segmentation.GetNthSegmentID(index)
-            seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(
-                segmentationNode, segment_id, sourceVolumeNode
-            )
+            if preloaded_arrays is not None:
+                seg_arr = preloaded_arrays.get(segment_id)
+            else:
+                seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(
+                    segmentationNode, segment_id, sourceVolumeNode
+                )
             if seg_arr is None:
                 continue
             slicer.util.updateSegmentBinaryLabelmapFromArray(
@@ -3743,10 +3748,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         mode: str = "clone",
         allow_resample: bool = True,
     ) -> Tuple[Optional[Any], Any]:
-        """Losslessly convert a volume (and optionally its segmentation) to RAS.
+        """Convert a volume (and optionally its segmentation) to RAS.
 
-        Returns `(new_or_updated_volume_node, OrientationReport)`. Oblique data is
-        reported (`report.notes`) and not resampled or written.
+        Returns `(new_or_updated_volume_node, OrientationReport)`. Permuted/flipped
+        data is lossless; oblique data is linearly resampled and flagged in the report
+        as interpolation that must not be treated as an exact voxel copy.
         """
         from CBCTPlannerLib.core.orientation import (
             OrientationReport,
@@ -3793,6 +3799,23 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             result = resample_to_ras(arr, affine)
             resampled = True
 
+        # In-place rewriting changes the volume geometry. Snapshot every segment in
+        # the *source* geometry first, otherwise Slicer would read the old labelmap
+        # through the new reference volume and the permutation/resampling would be
+        # applied twice or sample the wrong voxels.
+        preloaded_arrays: Optional[dict[str, np.ndarray]] = None
+        if mode == "in_place" and segmentationNode is not None:
+            preloaded_arrays = {}
+            segmentation = segmentationNode.GetSegmentation()
+            if segmentation is not None and hasattr(slicer.util, "arrayFromSegmentBinaryLabelmap"):
+                for index in range(segmentation.GetNumberOfSegments()):
+                    segment_id = segmentation.GetNthSegmentID(index)
+                    seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(
+                        segmentationNode, segment_id, volumeNode
+                    )
+                    if seg_arr is not None:
+                        preloaded_arrays[segment_id] = np.asarray(seg_arr).copy()
+
         target_volume = volumeNode
         if mode == "clone":
             name = f"{volumeNode.GetName()}_RAS"
@@ -3826,6 +3849,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 volumeNode,
                 target_volume,
                 segment_func,
+                preloaded_arrays=preloaded_arrays,
             )
             if hasattr(segmentationNode, "SetReferenceImageGeometryParameterFromVolumeNode"):
                 segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(target_volume)
@@ -3853,6 +3877,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 report.notes.append("No label mask available; orientation could not be verified.")
         else:
             report.notes.append("No segmentation supplied; orientation could not be verified.")
+        if resampled:
+            report.notes.append(
+                "Oblique input was linearly interpolated onto the RAS grid; "
+                "re-check fine measurements against the source resolution."
+            )
         return target_volume, report
 
     def detect_orientation_issues(self, volumeNode: Any, segmentationNode: Any = None) -> Any:

@@ -597,6 +597,7 @@ def compute_fdi_arc_positions_mm(
     curve_arc_s: Optional[np.ndarray] = None,
     segmented_centroids: Optional[Dict[str, np.ndarray]] = None,
     calibrated_arc_mm: Optional[Dict[str, float]] = None,
+    tooth_bearing_span_mm: Optional[Tuple[float, float]] = None,
 ) -> Dict[str, ToothArcSite]:
     """B2: Map every FDI tooth in `jaw_type` to its arc-length position along the curve."""
     jaw_key = "lower" if jaw_type.lower().startswith("low") else "upper"
@@ -620,8 +621,13 @@ def compute_fdi_arc_positions_mm(
 
     widths = np.array([ANATOMICAL_MESIODISTAL_WIDTHS_MM.get(fdi, 7.5) for fdi in order], dtype=np.float64)
     cum_centers = np.cumsum(widths) - 0.5 * widths
-    span_start = 0.04 * L
-    span_end = 0.96 * L
+    if tooth_bearing_span_mm is not None:
+        span_start, span_end = (float(v) for v in tooth_bearing_span_mm)
+        span_start = float(np.clip(span_start, 0.0, L))
+        span_end = float(np.clip(span_end, span_start + 1.0, L))
+    else:
+        span_start = 0.04 * L
+        span_end = 0.96 * L
     norm_w = (cum_centers - cum_centers[0]) / max(1e-6, float(cum_centers[-1] - cum_centers[0]))
     table_arcs = span_start + norm_w * (span_end - span_start)
 
@@ -711,6 +717,8 @@ class ArchFitResult:
     method: str  # "fdi_centroids" | "principal_curve"
     accepted: bool = True
     reason: str = ""
+    tooth_bearing_arc_mm: float = 0.0
+    end_extension_mm: float = 0.0
 
 
 def _polyline_arc_length(points: np.ndarray) -> float:
@@ -945,18 +953,23 @@ def fit_arch_from_label_mask(
         residual = _rms_to_polyline(crown, dense)
         n_used = len(crown)
 
+    tooth_bearing_arc = _polyline_arc_length(dense)
     ctrl = _extend_arch_endpoints(ctrl, float(end_extension_mm))
     dense = _extend_arch_endpoints(dense, float(end_extension_mm))
-
     arc_length = _polyline_arc_length(dense)
+
     reason = ""
     accepted = True
     if residual > 3.0:
         accepted = False
         reason = f"residual RMS {residual:.2f} mm exceeds 3.0 mm"
-    if not (60.0 <= arc_length <= 200.0):
+    # The clinical gate applies to the segmented tooth row, not the added retromolar
+    # extension, otherwise a short/failed tooth fit could pass by growing its ends.
+    if not (60.0 <= tooth_bearing_arc <= 200.0):
         accepted = False
-        reason = (reason + "; " if reason else "") + f"arc length {arc_length:.1f} mm outside [60, 200] mm"
+        reason = (reason + "; " if reason else "") + (
+            f"tooth-bearing arc {tooth_bearing_arc:.1f} mm outside [60, 200] mm"
+        )
     if len(ctrl) < 4:
         return None
     if ctrl[0, 0] < ctrl[-1, 0]:
@@ -969,5 +982,7 @@ def fit_arch_from_label_mask(
         method=method,
         accepted=accepted,
         reason=reason,
+        tooth_bearing_arc_mm=float(tooth_bearing_arc),
+        end_extension_mm=float(end_extension_mm),
     )
     return result

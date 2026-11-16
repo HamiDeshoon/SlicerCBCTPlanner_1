@@ -844,6 +844,20 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
                 all(spec.image_data_uri.startswith("data:image/png;base64,") for spec in slices_15)
             )
             self.assertIn("data:image/png;base64,", html_txt)
+            # The PNG must contain real rendered anatomy, not a blank placeholder tile.
+            import base64
+            import io
+
+            from PIL import Image
+
+            first_png = base64.b64decode(slices_15[0].image_data_uri.split(",", 1)[1])
+            with Image.open(io.BytesIO(first_png)) as png:
+                self.assertEqual(png.size, (160, 160))
+                pixels = np.asarray(png.convert("L"), dtype=np.float32)
+            self.assertGreater(float(pixels.std()), 10.0)
+            self.assertGreater(float(pixels.max()) - float(pixels.min()), 30.0)
+            self.assertGreaterEqual(float(pixels.min()), 0.0)
+            self.assertLessEqual(float(pixels.max()), 255.0)
             self.assertIn("Quadrant 4", html_txt)
             self.assertIn("Panoramic View", html_txt)
             self.assertNotIn("simulated", html_txt.lower())
@@ -927,6 +941,19 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         cleaned = remove_small_label_islands(labels, min_voxels=20)
         self.assertEqual(int(np.count_nonzero(cleaned == 46)), 8 * 8 * 8)
         self.assertEqual(int(cleaned[15, 15, 15]), 0)
+
+    def test_remove_small_label_islands_never_erases_small_real_label(self) -> None:
+        """A thin root / impacted molar smaller than the speckle threshold must survive."""
+        from CBCTPlannerLib.CheckpointInference import remove_small_label_islands
+
+        labels = np.zeros((24, 24, 24), dtype=np.uint16)
+        labels[2:5, 2:7, 2:3] = 38  # one flat, 15-voxel root fragment (main component)
+        labels[2, 2, 2] = 38
+        labels[20, 20, 20] = 38  # isolated one-voxel seam speckle
+        cleaned = remove_small_label_islands(labels, min_voxels=20)
+        self.assertEqual(int(np.count_nonzero(cleaned == 38)), 15 + 1 - 1)
+        self.assertEqual(int(cleaned[2:5, 2:7, 2:3].sum()), 38 * 15)
+        self.assertEqual(int(cleaned[20, 20, 20]), 0)
 
 
 if __name__ == "__main__":

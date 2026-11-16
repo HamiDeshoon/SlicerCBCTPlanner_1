@@ -137,6 +137,10 @@ class TestFitArchFromLabelMask(unittest.TestCase):
         self.assertIsNotNone(extended)
         assert base is not None and extended is not None
         self.assertGreater(extended.arc_length_mm, base.arc_length_mm + 20.0)
+        # The clinical (tooth-bearing) arc must not be inflated by the cosmetic extension.
+        self.assertAlmostEqual(extended.tooth_bearing_arc_mm, base.arc_length_mm, delta=0.5)
+        self.assertAlmostEqual(extended.end_extension_mm, 12.0)
+        self.assertAlmostEqual(extended.arc_length_mm - extended.tooth_bearing_arc_mm, 24.0, delta=0.5)
         # The new first/last points lie one extension length beyond the tooth cloud.
         self.assertAlmostEqual(
             float(np.linalg.norm(extended.points_ras[0] - base.points_ras[0])), 12.0, delta=0.5
@@ -144,6 +148,50 @@ class TestFitArchFromLabelMask(unittest.TestCase):
         self.assertAlmostEqual(
             float(np.linalg.norm(extended.points_ras[-1] - base.points_ras[-1])), 12.0, delta=0.5
         )
+
+    def test_5class_tooth_span_excludes_retromolar_extension(self) -> None:
+        """Approximate FDI sites must not be spread over the cosmetic 12 mm extension."""
+        from CBCTPlannerLib.core.arch_detector import (
+            DentalArch,
+            compute_fdi_arc_positions_mm,
+        )
+        from CBCTPlannerLib.core.measurements import MeasurementEngine
+        from CBCTPlannerLib.core.volume_loader import CBCTVolume
+
+        mask = _phantom("lower", is_5class=True)
+        affine = _affine(mask.shape)
+        fit = fit_arch_from_label_mask(mask, affine, jaw="lower", is_5class=True, end_extension_mm=12.0)
+        self.assertIsNotNone(fit)
+        assert fit is not None
+        arch = DentalArch(fit.points_ras, jaw_type="lower", ras_convention=True)
+        volume = CBCTVolume(
+            mask.astype(np.float32),
+            spacing=(1.0, 1.0, 1.0),
+            origin=(-48.0, -48.0, -20.0),
+            direction=np.eye(3),
+            affine=affine,
+        )
+        engine = MeasurementEngine(
+            volume,
+            mask,
+            arch=arch,
+            arches={"lower": arch},
+            is_dental_segmentator_5class=True,
+            extract_teeth_eagerly=False,
+        )
+        span = engine._tooth_bearing_span_mm(arch, "lower")
+        self.assertIsNotNone(span)
+        assert span is not None
+        self.assertGreater(span[0], 5.0)
+        self.assertLess(span[1], arch.total_arc_length - 5.0)
+        sites = compute_fdi_arc_positions_mm(
+            fit.arc_length_mm,
+            jaw_type="lower",
+            arch=arch,
+            tooth_bearing_span_mm=span,
+        )
+        self.assertTrue(all(site.is_approximate for site in sites.values()))
+        self.assertTrue(all(span[0] - 0.1 <= site.arc_mm <= span[1] + 0.1 for site in sites.values()))
 
     def test_no_teeth_returns_none_without_raising(self) -> None:
         mask = np.zeros((20, 20, 20), dtype=np.int16)

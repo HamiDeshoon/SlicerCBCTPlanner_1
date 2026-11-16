@@ -22,7 +22,9 @@ class _FakeCurve:
 
 class _FakeFit:
     points_ras = [0.0] * 5
-    arc_length_mm = 110.0
+    arc_length_mm = 134.0
+    tooth_bearing_arc_mm = 110.0
+    end_extension_mm = 12.0
     residual_rms_mm = 0.7
     method = "fdi_centroids"
 
@@ -101,6 +103,75 @@ class TestAutoFitWidgetFlow(unittest.TestCase):
         widget.onGeneratePanoramicClicked = _boom  # type: ignore[method-assign]
         with self.assertRaises(RuntimeError):
             CBCTPlannerWidget.onAutoFitArchClicked(widget)
+
+
+class _PrintLogic:
+    def __init__(self) -> None:
+        self.auto_fit_calls = 0
+        self.last_arch_fit = _FakeFit()
+        self.last_arch_fit_error = None
+
+    def get_curve_node_for_jaw(self, *_args, **_kwargs):
+        return None
+
+    def auto_fit_arch_for_jaw(self, **_kwargs):
+        self.auto_fit_calls += 1
+        return _FakeCurve()
+
+
+class TestPrintLayoutAutoFit(unittest.TestCase):
+    def test_print_button_fits_missing_arch_then_generates_layout(self) -> None:
+        from unittest import mock
+
+        widget = object.__new__(CBCTPlannerWidget)
+        widget.volumeSelector = types.SimpleNamespace(currentNode=lambda: object())
+        widget.segmentationSelector = types.SimpleNamespace(currentNode=lambda: object())
+        widget.selectedTeeth = {46}
+        widget.activeToothFDI = None
+        widget.logic = _PrintLogic()
+        widget.globalStatusLabel = _Label()
+        widget.includePatientMetaCheckBox = types.SimpleNamespace(isChecked=lambda: False)
+        widget.getParameterNode = lambda: None  # type: ignore[method-assign]
+        widget._observeCurveEdits = lambda _node: None  # type: ignore[method-assign]
+        preview: list = []
+        widget._showPrintPreviewDialog = lambda *args: preview.append(args)  # type: ignore[method-assign]
+
+        calls: list = []
+
+        def _generate(_self, **kwargs):
+            calls.append(kwargs)
+            return Path("layout.html"), Path("layout.pdf"), ["slice"]
+
+        with mock.patch(
+            "CBCTPlannerLib.PrintLayoutEngine.PrintLayoutEngine.generate_8x10_layout",
+            new=_generate,
+        ):
+            CBCTPlannerWidget.onGenerate8x10PrintLayout(widget)
+
+        self.assertEqual(widget.logic.auto_fit_calls, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["selected_fdis"], [46])
+        self.assertEqual(len(preview), 1)
+
+    def test_print_button_reports_unfittable_arch(self) -> None:
+        class _NoFit(_PrintLogic):
+            def auto_fit_arch_for_jaw(self, **_kwargs):
+                self.auto_fit_calls += 1
+                self.last_arch_fit_error = "arc too short"
+                return None
+
+        widget = object.__new__(CBCTPlannerWidget)
+        widget.volumeSelector = types.SimpleNamespace(currentNode=lambda: object())
+        widget.segmentationSelector = types.SimpleNamespace(currentNode=lambda: object())
+        widget.selectedTeeth = {46}
+        widget.activeToothFDI = None
+        widget.logic = _NoFit()
+        widget.globalStatusLabel = _Label()
+        widget.includePatientMetaCheckBox = types.SimpleNamespace(isChecked=lambda: False)
+        widget.getParameterNode = lambda: None  # type: ignore[method-assign]
+        widget._showPrintPreviewDialog = lambda *_args: self.fail("preview must not open")  # type: ignore[method-assign]
+        CBCTPlannerWidget.onGenerate8x10PrintLayout(widget)
+        self.assertIn("arc too short", widget.globalStatusLabel.text)
 
 
 class _NodeRefs:

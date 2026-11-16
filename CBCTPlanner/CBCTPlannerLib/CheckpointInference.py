@@ -367,13 +367,14 @@ def _load_custom_user_architecture(
             return factory()
 
 
-def remove_small_label_islands(labelmap_zyx: np.ndarray, min_voxels: int = 20) -> np.ndarray:
-    """Drop speckle predicted for a label while keeping all clinically meaningful islands.
+def remove_small_label_islands(labelmap_zyx: np.ndarray, min_voxels: int = 8) -> np.ndarray:
+    """Drop only extra speckle components, never a label's main component.
 
-    Sliding-window argmax often leaves a few isolated voxels at patch seams. Removing
-    components smaller than ``min_voxels`` improves surface quality and prevents tiny
-    "teeth" from confusing the arch fit; large disconnected structures (e.g. a second
-    canal fragment) are preserved.
+    Sliding-window argmax often leaves a few isolated voxels at patch seams. For each
+    label the largest connected component is always kept, even when the whole label is
+    smaller than ``min_voxels`` (thin roots and impacted third molars are real anatomy).
+    Only additional components below the threshold are removed, and each pass is
+    restricted to that label's bounding box.
     """
     labels = np.asarray(labelmap_zyx)
     if labels.ndim != 3 or min_voxels <= 1:
@@ -395,6 +396,8 @@ def remove_small_label_islands(labelmap_zyx: np.ndarray, min_voxels: int = 20) -
         sizes = np.bincount(components.ravel())
         keep = sizes >= int(min_voxels)
         keep[0] = False
+        if np.any(sizes[1:]):
+            keep[1 + int(np.argmax(sizes[1:]))] = True
         if np.all(keep):
             continue
         crop_clean = cleaned[bbox]
