@@ -245,9 +245,7 @@ class ImplantPlannerLogic:
 
         # F19: AI suggestions default to clinician_confirmed=False until explicitly confirmed
         confirmed = (
-            bool(clinician_confirmed)
-            if clinician_confirmed is not None
-            else (not bool(is_ai_suggestion))
+            bool(clinician_confirmed) if clinician_confirmed is not None else (not bool(is_ai_suggestion))
         )
 
         implant = PlacedImplant(
@@ -269,9 +267,7 @@ class ImplantPlannerLogic:
             clinician_confirmed=confirmed,
         )
         self.placed_implants[int(fdi)] = implant
-        self.recompute_all_verifications(
-            volume=volume, mask=mask, is_5class=is_5class, canals=canals
-        )
+        self.recompute_all_verifications(volume=volume, mask=mask, is_5class=is_5class, canals=canals)
         return self.placed_implants[int(fdi)]
 
     def confirm_ai_suggestion(self, fdi: int) -> Optional[PlacedImplant]:
@@ -286,11 +282,7 @@ class ImplantPlannerLogic:
 
     def get_reportable_implants(self, include_unconfirmed: bool = False) -> List[PlacedImplant]:
         """F19: Return placed implants eligible for clinical reports (excludes unconfirmed AI suggestions by default)."""
-        out = [
-            imp
-            for imp in self.placed_implants.values()
-            if include_unconfirmed or imp.clinician_confirmed
-        ]
+        out = [imp for imp in self.placed_implants.values() if include_unconfirmed or imp.clinician_confirmed]
         return sorted(out, key=lambda x: x.fdi)
 
     def recompute_all_verifications(
@@ -378,12 +370,14 @@ class ImplantPlannerLogic:
                 outer_vals = volume.sample_world_points(outer_pts, order=1, cval=-1000.0)
                 imp.mean_gray_approx = round(float(np.mean(core_vals)), 1)
                 imp.outer_shell_gray_approx = round(float(np.mean(outer_vals)), 1)
-                imp.misch_class_approx = MeasurementEngine._classify_misch_density(
-                    imp.mean_gray_approx
-                )
+                imp.misch_class_approx = MeasurementEngine._classify_misch_density(imp.mean_gray_approx)
 
                 if mask is not None:
-                    jaw_id = (2 if is_mandible else 1) if is_5class else (LOWER_JAW_ID if is_mandible else UPPER_JAW_ID)
+                    jaw_id = (
+                        (2 if is_mandible else 1)
+                        if is_5class
+                        else (LOWER_JAW_ID if is_mandible else UPPER_JAW_ID)
+                    )
                     sampled_labels = volume.sample_mask_world_points(mask, surf_pts)
                     inside_frac = float(np.mean(sampled_labels == jaw_id))
                     imp.inside_bone_fraction = round(inside_frac, 3)
@@ -408,7 +402,11 @@ class ImplantPlannerLogic:
                                         f"Maxillary sinus clearance is {d_sinus:.2f} mm (< {imp.safety_apical_mm:.1f} mm)."
                                     )
                     elif is_mandible and imp.canal_clearance_mm is None:
-                        cid_list = [DENTALSEGMENTATOR_CANAL_ID] if is_5class else [RIGHT_IAN_ID, LEFT_IAN_ID, DENTALSEGMENTATOR_CANAL_ID]
+                        cid_list = (
+                            [DENTALSEGMENTATOR_CANAL_ID]
+                            if is_5class
+                            else [RIGHT_IAN_ID, LEFT_IAN_ID, DENTALSEGMENTATOR_CANAL_ID]
+                        )
                         for cid in cid_list:
                             if (mask == cid).any():
                                 cz, cy, cx = np.where(mask == cid)
@@ -666,9 +664,15 @@ class ImplantPlannerLogic:
                 if yellow and yellow.sliceLogic():
                     sNode = yellow.sliceLogic().GetSliceNode()
                     sNode.SetSliceToRASByNTP(
-                        float(slice_normal[0]), float(slice_normal[1]), float(slice_normal[2]),
-                        float(screen_right[0]), float(screen_right[1]), float(screen_right[2]),
-                        float(p_mid[0]), float(p_mid[1]), float(p_mid[2]),
+                        float(slice_normal[0]),
+                        float(slice_normal[1]),
+                        float(slice_normal[2]),
+                        float(screen_right[0]),
+                        float(screen_right[1]),
+                        float(screen_right[2]),
+                        float(p_mid[0]),
+                        float(p_mid[1]),
+                        float(p_mid[2]),
                         0,
                     )
         return slice_normal, screen_right, screen_up

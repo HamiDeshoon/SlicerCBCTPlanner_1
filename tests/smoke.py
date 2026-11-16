@@ -48,7 +48,9 @@ def run_smoke_test() -> None:
         tester.runTest()
         print("[smoke]    Live 3D Slicer smoke test passed.")
     else:
-        print("[smoke] 2. Running full unittest suite in standalone Python (Slicer binary not present in container)...")
+        print(
+            "[smoke] 2. Running full unittest suite in standalone Python (Slicer binary not present in container)..."
+        )
         suite = unittest.defaultTestLoader.discover(str(REPO_ROOT / "tests"))
         runner = unittest.TextTestRunner(verbosity=2)
         result = runner.run(suite)

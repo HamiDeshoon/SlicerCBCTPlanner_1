@@ -262,9 +262,7 @@ def setConventionalWideScreenView() -> None:
         return
     layoutManager = slicer.app.layoutManager()
     if layoutManager:
-        layoutManager.setLayout(
-            slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalWidescreenView
-        )
+        layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalWidescreenView)
 
 
 def registerAndSetDentalLayout() -> None:
@@ -277,13 +275,9 @@ def registerAndSetDentalLayout() -> None:
     layoutNode = layoutManager.layoutLogic().GetLayoutNode()
     if layoutNode:
         if not layoutNode.GetLayoutDescription(CUSTOM_DENTAL_LAYOUT_ID):
-            layoutNode.AddLayoutDescription(
-                CUSTOM_DENTAL_LAYOUT_ID, CUSTOM_DENTAL_LAYOUT_XML
-            )
+            layoutNode.AddLayoutDescription(CUSTOM_DENTAL_LAYOUT_ID, CUSTOM_DENTAL_LAYOUT_XML)
         else:
-            layoutNode.SetLayoutDescription(
-                CUSTOM_DENTAL_LAYOUT_ID, CUSTOM_DENTAL_LAYOUT_XML
-            )
+            layoutNode.SetLayoutDescription(CUSTOM_DENTAL_LAYOUT_ID, CUSTOM_DENTAL_LAYOUT_XML)
         layoutManager.setLayout(CUSTOM_DENTAL_LAYOUT_ID)
 
 

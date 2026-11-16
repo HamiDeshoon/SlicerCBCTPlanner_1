@@ -287,11 +287,40 @@ def match_segment_to_label_and_precedence(
 
     return 0, "unknown", False, SEGMENT_PRECEDENCE["unknown"]
 
+
 _FDI_TOOTH_ORDER = [
-    11, 12, 13, 14, 15, 16, 17, 18,
-    21, 22, 23, 24, 25, 26, 27, 28,
-    31, 32, 33, 34, 35, 36, 37, 38,
-    41, 42, 43, 44, 45, 46, 47, 48,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
 ]
 
 CONSECUTIVE_TF3_TO_CANONICAL_ID: Dict[int, int] = {
@@ -316,7 +345,9 @@ def remap_toothfairy3_array(mask: np.ndarray, dataset_labels: Optional[Dict] = N
 
     use_consecutive = False
     if isinstance(dataset_labels, dict) and dataset_labels:
-        int_vals = [int(v) for v in dataset_labels.values() if isinstance(v, (int, float, str)) and str(v).isdigit()]
+        int_vals = [
+            int(v) for v in dataset_labels.values() if isinstance(v, (int, float, str)) and str(v).isdigit()
+        ]
         if int_vals and max(int_vals) <= 77 and any(v > 48 for v in int_vals):
             use_consecutive = True
 
@@ -337,3 +368,18 @@ def remap_toothfairy3_array(mask: np.ndarray, dataset_labels: Optional[Dict] = N
         if iv not in CONSECUTIVE_TF3_TO_CANONICAL_ID:
             out[arr == iv] = iv
     return out
+
+
+_Q1_ORDER = [str(q) for q in range(11, 19)]
+_Q2_ORDER = [str(q) for q in range(21, 29)]
+_Q4_ORDER = [str(q) for q in range(48, 40, -1)]
+_Q3_ORDER = [str(q) for q in range(38, 30, -1)]
+
+
+def sort_teeth_anatomically(teeth_list: List[int]) -> List[int]:
+    """Sort FDI teeth Patient Right -> Patient Left: Q1, Q2, Q4, Q3."""
+    teeth_set = {int(t) for t in teeth_list}
+    ordered: List[int] = []
+    for group in (_Q1_ORDER, _Q2_ORDER, _Q4_ORDER, _Q3_ORDER):
+        ordered.extend(int(fdi) for fdi in group if int(fdi) in teeth_set)
+    return ordered

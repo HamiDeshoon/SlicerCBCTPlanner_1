@@ -18,10 +18,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import importlib.util
-import json
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 try:
@@ -76,10 +75,10 @@ def normalize_state_dict_keys(raw_checkpoint: Any) -> Dict[str, Any]:
 
     state_dict = raw_checkpoint
     for wrapper_key in (
-        "network_weights",      # nnU-Net v2
-        "state_dict",           # PyTorch Lightning / standard
-        "model_state_dict",     # Custom PyTorch training loops
-        "model",                # TIMM / Detectron style
+        "network_weights",  # nnU-Net v2
+        "state_dict",  # PyTorch Lightning / standard
+        "model_state_dict",  # Custom PyTorch training loops
+        "model",  # TIMM / Detectron style
         "net",
     ):
         if wrapper_key in raw_checkpoint and isinstance(raw_checkpoint[wrapper_key], dict):
@@ -94,7 +93,7 @@ def normalize_state_dict_keys(raw_checkpoint: Any) -> Dict[str, Any]:
             changed = False
             for prefix in ("_orig_mod.", "module.", "model.", "network."):
                 if key.startswith(prefix):
-                    key = key[len(prefix):]
+                    key = key[len(prefix) :]
                     changed = True
         cleaned[key] = v
     return cleaned
@@ -123,7 +122,8 @@ def infer_architecture_dims_from_state_dict(
     seg_candidates = [
         sh[0]
         for k, sh in conv_5d_shapes
-        if sh[2:] == (1, 1, 1) and ("seg" in k.lower() or "out" in k.lower() or "final" in k.lower() or "head" in k.lower())
+        if sh[2:] == (1, 1, 1)
+        and ("seg" in k.lower() or "out" in k.lower() or "final" in k.lower() or "head" in k.lower())
     ]
     if seg_candidates:
         num_classes = int(seg_candidates[-1])
@@ -135,9 +135,7 @@ def infer_architecture_dims_from_state_dict(
     return in_channels, num_classes, base_filters
 
 
-def load_state_dict_shape_safe(
-    model: Any, state_dict: Dict[str, Any]
-) -> Tuple[int, List[str]]:
+def load_state_dict_shape_safe(model: Any, state_dict: Dict[str, Any]) -> Tuple[int, List[str]]:
     """Load only tensors from `state_dict` whose shapes match `model.state_dict()` to prevent RuntimeError crashes."""
     model_sd = model.state_dict()
     compatible: Dict[str, Any] = {}
@@ -263,9 +261,7 @@ def sliding_window_inference_3d(
                     # Resize accumulator on first patch if model output channels differ from initial estimate
                     accum_logits = np.zeros((c_out, orig_z, orig_y, orig_x), dtype=np.float32)
 
-                accum_logits[:, z0 : z0 + pz, y0 : y0 + py, x0 : x0 + px] += (
-                    pred_4d * gauss_w[None, :, :, :]
-                )
+                accum_logits[:, z0 : z0 + pz, y0 : y0 + py, x0 : x0 + px] += pred_4d * gauss_w[None, :, :, :]
                 accum_weights[z0 : z0 + pz, y0 : y0 + py, x0 : x0 + px] += gauss_w
 
                 done_patches += 1
@@ -296,11 +292,7 @@ def _build_default_pytorch_3d_unet(
                 nn.Conv3d(c_out, c_out, kernel_size=3, padding=1, bias=False),
                 nn.InstanceNorm3d(c_out, affine=True),
             )
-            self.skip = (
-                nn.Conv3d(c_in, c_out, kernel_size=1, bias=False)
-                if c_in != c_out
-                else nn.Identity()
-            )
+            self.skip = nn.Conv3d(c_in, c_out, kernel_size=1, bias=False) if c_in != c_out else nn.Identity()
             self.act = nn.LeakyReLU(0.01, inplace=True)
 
         def forward(self, x: Any) -> Any:
@@ -476,7 +468,11 @@ class CheckpointInferenceEngine:
             sess = ort.InferenceSession(str(ckpt_path))
             input_name = sess.get_inputs()[0].name
             out_shape = sess.get_outputs()[0].shape
-            n_cls = int(out_shape[1]) if (len(out_shape) >= 2 and isinstance(out_shape[1], int)) else (spec.num_classes or 6)
+            n_cls = (
+                int(out_shape[1])
+                if (len(out_shape) >= 2 and isinstance(out_shape[1], int))
+                else (spec.num_classes or 6)
+            )
 
             def _onnx_patch_fn(patch_5d: np.ndarray) -> np.ndarray:
                 return np.asarray(sess.run(None, {input_name: patch_5d})[0], dtype=np.float32)
@@ -619,9 +615,7 @@ class CheckpointInferenceEngine:
             seg_name = f"{vol_name}_AI_Segmentation"
             segmentationNode = slicer.mrmlScene.GetFirstNodeByName(seg_name)
             if not segmentationNode:
-                segmentationNode = slicer.mrmlScene.AddNewNodeByClass(
-                    "vtkMRMLSegmentationNode", seg_name
-                )
+                segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", seg_name)
                 segmentationNode.CreateDefaultDisplayNodes()
         if hasattr(segmentationNode, "SetReferenceImageGeometryParameterFromVolumeNode"):
             segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)

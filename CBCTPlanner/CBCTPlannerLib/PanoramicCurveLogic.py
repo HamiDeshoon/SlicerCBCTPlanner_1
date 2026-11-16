@@ -15,6 +15,7 @@ Fixes & Upgrades:
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 import numpy as np
@@ -34,8 +35,10 @@ except ImportError:
     vtk_to_numpy = None
 
 from .Utils import BoundedLRUCache
-from .core.arch_detector import DentalArch, project_point_to_polyline_arc_mm
+from .core.arch_detector import project_point_to_polyline_arc_mm
 from .core.volume_loader import CBCTVolume
+
+logger = logging.getLogger(__name__)
 
 
 class PanoramicCurveLogic:
@@ -93,9 +96,7 @@ class PanoramicCurveLogic:
         return disp_x, disp_y, disp_z
 
     @classmethod
-    def compute_cpr_num_frames(
-        cls, total_len_mm: float, max_frame_spacing_mm: Optional[float] = None
-    ) -> int:
+    def compute_cpr_num_frames(cls, total_len_mm: float, max_frame_spacing_mm: Optional[float] = None) -> int:
         """B6: Compute number of CPR frames using a fixed `<= 1.5 mm` frame spacing independent of voxel spacing."""
         step = min(
             2.0,
@@ -116,16 +117,10 @@ class PanoramicCurveLogic:
         if axis_y[2] < 0:
             axis_y = -axis_y
 
-        chord = np.asarray(curve_end_ras, dtype=np.float64) - np.asarray(
-            curve_start_ras, dtype=np.float64
-        )
+        chord = np.asarray(curve_end_ras, dtype=np.float64) - np.asarray(curve_start_ras, dtype=np.float64)
         chord_in_plane = chord - np.dot(chord, axis_y) * axis_y
         c_norm = float(np.linalg.norm(chord_in_plane))
-        axis_z = (
-            chord_in_plane / c_norm
-            if c_norm > 1e-8
-            else np.array([-1.0, 0.0, 0.0], dtype=np.float64)
-        )
+        axis_z = chord_in_plane / c_norm if c_norm > 1e-8 else np.array([-1.0, 0.0, 0.0], dtype=np.float64)
 
         axis_x = np.cross(axis_y, axis_z)
         x_norm = float(np.linalg.norm(axis_x))
@@ -280,6 +275,21 @@ class PanoramicCurveLogic:
                 pts[i] = buf
         return pts
 
+    @staticmethod
+    def _smooth_series(points: np.ndarray, kernel: Sequence[float] = (1, 2, 3, 2, 1)) -> np.ndarray:
+        """Light edge-preserving moving average to stop gradient tangents striping the CPR."""
+        pts = np.asarray(points, dtype=np.float64)
+        if len(pts) < len(kernel) + 4:
+            return pts
+        weights = np.asarray(kernel, dtype=np.float64)
+        weights /= weights.sum()
+        half = len(weights) // 2
+        padded = np.pad(pts, ((half, half), (0, 0)), mode="edge")
+        smoothed = np.zeros_like(pts)
+        for offset, weight in enumerate(weights):
+            smoothed += weight * padded[offset : offset + len(pts)]
+        return smoothed
+
     def get_curve_points_and_frames(
         self,
         curveNode: Any,
@@ -345,10 +355,8 @@ class PanoramicCurveLogic:
         up = np.asarray(occ_tuple, dtype=np.float64)
         up_norm = float(np.linalg.norm(up))
         up = up / up_norm if up_norm > 1e-8 else np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        if up[2] < 0:
-            up = -up
 
-        raw_tangents = np.gradient(pts, axis=0)
+        raw_tangents = self._smooth_series(np.gradient(pts, axis=0))
         tangents = raw_tangents - np.outer(raw_tangents @ up, up)
         t_norms = np.linalg.norm(tangents, axis=1, keepdims=True)
         t_norms[t_norms < 1e-8] = 1.0
@@ -413,7 +421,9 @@ class PanoramicCurveLogic:
                 )
                 pt = np.asarray(closest_pt, dtype=np.float64)
             except Exception:
-                pass
+                logger.debug(
+                    "Best-effort operation failed", exc_info=True
+                )  # silent-ok: non-critical cleanup/probe
 
         best_arc, _, _ = project_point_to_polyline_arc_mm(pts, arc_s, pt)
         return float(best_arc)
@@ -445,9 +455,7 @@ class PanoramicCurveLogic:
             curveNode, num_samples=num_slices, occlusal_normal=occlusal_normal
         )
 
-        dir_arr = self.compute_cpr_direction_matrix(
-            pts[0], pts[-1], occlusal_normal=occlusal_normal
-        )
+        dir_arr = self.compute_cpr_direction_matrix(pts[0], pts[-1], occlusal_normal=occlusal_normal)
         grid_axis_x = dir_arr[0:3, 0]
         grid_axis_y = dir_arr[0:3, 1]
         grid_axis_z = dir_arr[0:3, 2]
@@ -483,9 +491,7 @@ class PanoramicCurveLogic:
         for k in range(num_slices):
             p_k = pts[k]
             # B5: Right-handed displacement frame (-N, B, T) matching det(dir_arr) == +1
-            disp_x, disp_y, _ = self.compute_cpr_displacement_frame(
-                tangents[k], normals[k], binormals[k]
-            )
+            disp_x, disp_y, _ = self.compute_cpr_displacement_frame(tangents[k], normals[k], binormals[k])
             for j in range(2):
                 for i in range(2):
                     straight_ras = (
@@ -495,9 +501,7 @@ class PanoramicCurveLogic:
                         + k * grid_spacing[2] * grid_axis_z
                     )
                     input_ras = (
-                        p_k
-                        + (i - 0.5) * slice_size_mm[0] * disp_x
-                        + (j - 0.5) * slice_size_mm[1] * disp_y
+                        p_k + (i - 0.5) * slice_size_mm[0] * disp_x + (j - 0.5) * slice_size_mm[1] * disp_y
                     )
                     displacements[k, j, i] = input_ras - straight_ras
 
@@ -511,7 +515,9 @@ class PanoramicCurveLogic:
             try:
                 self._chunk_timer.stop()
             except Exception:
-                pass
+                logger.debug(
+                    "Best-effort operation failed", exc_info=True
+                )  # silent-ok: non-critical cleanup/probe
             self._chunk_timer = None
 
         if self._active_cli_node is not None:
@@ -523,12 +529,107 @@ class PanoramicCurveLogic:
                 self._active_cli_observer = None
                 cli_node.Cancel()
             except Exception:
-                pass
+                logger.debug(
+                    "Best-effort operation failed", exc_info=True
+                )  # silent-ok: non-critical cleanup/probe
             if slicer is not None and getattr(slicer, "mrmlScene", None) is not None:
                 try:
                     slicer.mrmlScene.RemoveNode(cli_node)
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Best-effort operation failed", exc_info=True
+                    )  # silent-ok: non-critical cleanup/probe
+
+    @staticmethod
+    def _build_slab_geometry(
+        pts_arch: np.ndarray,
+        normals: np.ndarray,
+        binormals: np.ndarray,
+        slab_thickness_mm: float,
+        height_mm: float,
+        spacing_mm: float,
+        buccolingual_offset_mm: float,
+        flip_vertical: bool,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int, int]:
+        """Shared CPR slab geometry for the synchronous and chunked samplers.
+
+        `flip_vertical` is applied here exactly once so both paths produce identical arrays.
+        Returns `(base_surface, disp_x_cols, u_offsets, n_layers, dim_y, dim_z)`.
+        """
+        diffs = np.linalg.norm(np.diff(pts_arch, axis=0), axis=1)
+        cum_s = np.concatenate([[0.0], np.cumsum(diffs)])
+        total_len = float(cum_s[-1])
+        sp = max(0.15, float(spacing_mm))
+
+        dim_z = max(4, int(round(total_len / sp)))
+        dim_y = max(2, int(round(float(height_mm) / sp)))
+        layer_step = max(sp, 0.75)
+        n_layers = max(1, int(round(float(slab_thickness_mm) / layer_step)) + 1)
+
+        s_grid = np.linspace(0.0, total_len, dim_z)
+        p_cols = np.column_stack([np.interp(s_grid, cum_s, pts_arch[:, d]) for d in range(3)])
+        n_cols = np.column_stack([np.interp(s_grid, cum_s, normals[:, d]) for d in range(3)])
+        b_cols = np.column_stack([np.interp(s_grid, cum_s, binormals[:, d]) for d in range(3)])
+        n_cols /= np.maximum(1e-8, np.linalg.norm(n_cols, axis=1, keepdims=True))
+        b_cols /= np.maximum(1e-8, np.linalg.norm(b_cols, axis=1, keepdims=True))
+
+        disp_x_cols = -n_cols
+        v_offsets = np.linspace(-0.5 * float(height_mm), 0.5 * float(height_mm), dim_y)
+        if flip_vertical:
+            v_offsets = v_offsets[::-1]
+        u_offsets = np.linspace(
+            -0.5 * float(slab_thickness_mm), 0.5 * float(slab_thickness_mm), n_layers
+        ) + float(buccolingual_offset_mm)
+        base_surface = p_cols[None, :, :] + v_offsets[:, None, None] * b_cols[None, :, :]
+        return base_surface, disp_x_cols, u_offsets, n_layers, dim_y, dim_z
+
+    @staticmethod
+    def _finalize_projection(accum: np.ndarray, mode: str, n_layers: int) -> np.ndarray:
+        """Apply the projection normalisation shared by sync and async sampling."""
+        if mode == "RAYSUM":
+            # Pseudo-cephalometric / pseudo-panoramic attenuation integral scaled to display range
+            accum = accum / float(max(1, n_layers)) * 1.25
+        elif mode not in ("MIP", "MINIP"):
+            accum = accum / float(max(1, n_layers))
+        return accum.astype(np.float32)
+
+    @staticmethod
+    def _slab_voxel_basis(
+        cbct_volume: CBCTVolume, base_surface: np.ndarray, disp_x_cols: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Convert the world slab surface and displacement axis to voxel space once."""
+        dim_y, dim_z = base_surface.shape[:2]
+        base_vox = cbct_volume.world_to_voxel(base_surface.reshape(-1, 3)).reshape(dim_y, dim_z, 3)
+        disp_vox = cbct_volume.world_direction_to_voxel(disp_x_cols)
+        return base_vox, disp_vox
+
+    @staticmethod
+    def _sample_slab_layer(
+        cbct_volume: CBCTVolume, base_vox: np.ndarray, disp_vox: np.ndarray, u_val: float
+    ) -> np.ndarray:
+        """Sample one slab layer from precomputed voxel coordinates (no per-layer affine)."""
+        try:
+            from scipy import ndimage  # type: ignore
+        except ImportError:
+            layer_pts = cbct_volume.voxel_to_world(base_vox + float(u_val) * disp_vox[None, :, :])
+            return np.asarray(cbct_volume.sample_world_points(layer_pts, order=1, cval=-1000.0))
+        u = float(u_val)
+        coords = np.empty((3,) + base_vox.shape[:2], dtype=np.float64)
+        np.multiply(disp_vox[None, :, 2], u, out=coords[0])
+        coords[0] += base_vox[:, :, 2]
+        np.multiply(disp_vox[None, :, 1], u, out=coords[1])
+        coords[1] += base_vox[:, :, 1]
+        np.multiply(disp_vox[None, :, 0], u, out=coords[2])
+        coords[2] += base_vox[:, :, 0]
+        sampled = ndimage.map_coordinates(
+            cbct_volume.image,
+            coords,
+            order=1,
+            mode="constant",
+            cval=-1000.0,
+            prefilter=False,
+        )
+        return np.asarray(sampled)
 
     @classmethod
     def sample_panoramic_slab_array(
@@ -554,44 +655,25 @@ class PanoramicCurveLogic:
           - row `j` (`0 .. dim_y - 1`) increases Superiorly along `+B`
           - col `k` (`0 .. dim_z - 1`) progresses from Patient Right (`arc_mm = 0`) to Patient Left (`arc_mm = L`).
         """
-        diffs = np.linalg.norm(np.diff(pts_arch, axis=0), axis=1)
-        cum_s = np.concatenate([[0.0], np.cumsum(diffs)])
-        total_len = float(cum_s[-1])
-        sp = max(0.15, float(spacing_mm))
-
-        dim_z = max(4, int(round(total_len / sp)))
-        dim_y = max(2, int(round(float(height_mm) / sp)))
-        layer_step = max(sp, 0.75)
-        n_layers = max(1, int(round(float(slab_thickness_mm) / layer_step)) + 1)
-
-        s_grid = np.linspace(0.0, total_len, dim_z)
-        p_cols = np.column_stack([np.interp(s_grid, cum_s, pts_arch[:, d]) for d in range(3)])
-        n_cols = np.column_stack([np.interp(s_grid, cum_s, normals[:, d]) for d in range(3)])
-        b_cols = np.column_stack([np.interp(s_grid, cum_s, binormals[:, d]) for d in range(3)])
-        n_cols /= np.maximum(1e-8, np.linalg.norm(n_cols, axis=1, keepdims=True))
-        b_cols /= np.maximum(1e-8, np.linalg.norm(b_cols, axis=1, keepdims=True))
-
-        # B5: Right-handed displacement axis disp_x = -N
-        disp_x_cols = -n_cols
-        v_offsets = np.linspace(-0.5 * float(height_mm), 0.5 * float(height_mm), dim_y)
-        if flip_vertical:
-            v_offsets = v_offsets[::-1]
-        u_offsets = (
-            np.linspace(-0.5 * float(slab_thickness_mm), 0.5 * float(slab_thickness_mm), n_layers)
-            + float(buccolingual_offset_mm)
+        # B5: Right-handed displacement axis disp_x = -N; flip applied once in shared geometry
+        base_surface, disp_x_cols, u_offsets, n_layers, _, _ = cls._build_slab_geometry(
+            pts_arch=pts_arch,
+            normals=normals,
+            binormals=binormals,
+            slab_thickness_mm=slab_thickness_mm,
+            height_mm=height_mm,
+            spacing_mm=spacing_mm,
+            buccolingual_offset_mm=buccolingual_offset_mm,
+            flip_vertical=flip_vertical,
         )
-
-        # Base 2D curved surface at u=0: shape (dim_y, dim_z, 3)
-        base_surface = p_cols[None, :, :] + v_offsets[:, None, None] * b_cols[None, :, :]
-
         mode = projection_mode.strip().upper()
+        base_vox, disp_vox = cls._slab_voxel_basis(cbct_volume, base_surface, disp_x_cols)
         accum: Optional[np.ndarray] = None
 
         for u_val in u_offsets:
-            layer_pts = base_surface + float(u_val) * disp_x_cols[None, :, :]
-            sampled = cbct_volume.sample_world_points(layer_pts, order=1, cval=-1000.0)
+            sampled = cls._sample_slab_layer(cbct_volume, base_vox, disp_vox, float(u_val))
             if accum is None:
-                accum = sampled.copy()
+                accum = sampled
             elif mode == "MIP":
                 np.maximum(accum, sampled, out=accum)
             elif mode == "MINIP":
@@ -600,13 +682,7 @@ class PanoramicCurveLogic:
                 accum += sampled
 
         assert accum is not None
-        if mode == "RAYSUM":
-            # Pseudo-cephalometric / pseudo-panoramic attenuation integral scaled to display range
-            accum = accum / float(max(1, n_layers)) * 1.25
-        elif mode not in ("MIP", "MINIP"):
-            accum /= float(max(1, n_layers))
-
-        return accum.astype(np.float32)
+        return cls._finalize_projection(accum, mode, n_layers)
 
     def _populate_panoramic_node_from_array(
         self,
@@ -661,9 +737,7 @@ class PanoramicCurveLogic:
             panoNode.GetDisplayNode().CopyContent(volumeNode.GetDisplayNode())
 
         if show_in_green_view:
-            self.display_panoramic_in_slice_view(
-                panoNode, slice_view_name="Green", force_fit=force_fit
-            )
+            self.display_panoramic_in_slice_view(panoNode, slice_view_name="Green", force_fit=force_fit)
         return panoNode
 
     def generate_panoramic_volume(
@@ -743,30 +817,19 @@ class PanoramicCurveLogic:
                 on_complete(panoNode, None)
             return panoNode, None
 
-        # O1: Non-blocking chunked QTimer slab sampling
-        sp = max(0.15, float(spacing_mm))
-        dim_z = max(4, int(round(total_len / sp)))
-        dim_y = max(2, int(round(float(height_mm) / sp)))
-        layer_step = max(sp, 0.75)
-        n_layers = max(1, int(round(float(slab_thickness_mm) / layer_step)) + 1)
-
-        diffs = np.linalg.norm(np.diff(pts_arch, axis=0), axis=1)
-        cum_s = np.concatenate([[0.0], np.cumsum(diffs)])
-        s_grid = np.linspace(0.0, total_len, dim_z)
-        p_cols = np.column_stack([np.interp(s_grid, cum_s, pts_arch[:, d]) for d in range(3)])
-        n_cols = np.column_stack([np.interp(s_grid, cum_s, normals[:, d]) for d in range(3)])
-        b_cols = np.column_stack([np.interp(s_grid, cum_s, binormals[:, d]) for d in range(3)])
-        n_cols /= np.maximum(1e-8, np.linalg.norm(n_cols, axis=1, keepdims=True))
-        b_cols /= np.maximum(1e-8, np.linalg.norm(b_cols, axis=1, keepdims=True))
-        disp_x_cols = -n_cols
-
-        v_offsets = np.linspace(-0.5 * float(height_mm), 0.5 * float(height_mm), dim_y)
-        u_offsets = (
-            np.linspace(-0.5 * float(slab_thickness_mm), 0.5 * float(slab_thickness_mm), n_layers)
-            + float(buccolingual_offset_mm)
+        # O1: Non-blocking chunked QTimer slab sampling (shared geometry with the sync path)
+        base_surface, disp_x_cols, u_offsets, n_layers, _, _ = self._build_slab_geometry(
+            pts_arch=pts_arch,
+            normals=normals,
+            binormals=binormals,
+            slab_thickness_mm=slab_thickness_mm,
+            height_mm=height_mm,
+            spacing_mm=spacing_mm,
+            buccolingual_offset_mm=buccolingual_offset_mm,
+            flip_vertical=flip_vertical,
         )
-        base_surface = p_cols[None, :, :] + v_offsets[:, None, None] * b_cols[None, :, :]
         mode = projection_mode.strip().upper()
+        base_vox, disp_vox = self._slab_voxel_basis(cbct_vol, base_surface, disp_x_cols)
         state: Dict[str, Any] = {"idx": 0, "accum": None}
 
         timer = qt.QTimer()
@@ -782,10 +845,9 @@ class PanoramicCurveLogic:
             chunk_end = min(n_layers, idx + 3)
             for l_i in range(idx, chunk_end):
                 u_val = float(u_offsets[l_i])
-                layer_pts = base_surface + u_val * disp_x_cols[None, :, :]
-                sampled = cbct_vol.sample_world_points(layer_pts, order=1, cval=-1000.0)
+                sampled = self._sample_slab_layer(cbct_vol, base_vox, disp_vox, u_val)
                 if state["accum"] is None:
-                    state["accum"] = sampled.copy()
+                    state["accum"] = sampled
                 elif mode == "MIP":
                     np.maximum(state["accum"], sampled, out=state["accum"])
                 elif mode == "MINIP":
@@ -800,15 +862,11 @@ class PanoramicCurveLogic:
             if chunk_end >= n_layers:
                 timer.stop()
                 self._chunk_timer = None
-                accum = state["accum"]
-                if mode == "RAYSUM":
-                    accum = accum / float(max(1, n_layers)) * 1.25
-                elif mode not in ("MIP", "MINIP"):
-                    accum /= float(max(1, n_layers))
+                accum = self._finalize_projection(state["accum"], mode, n_layers)
                 self.last_generation_elapsed_sec = time.perf_counter() - t0
                 panoNode = self._populate_panoramic_node_from_array(
                     volumeNode=volumeNode,
-                    proj_yk=accum.astype(np.float32),
+                    proj_yk=accum,
                     spacing_mm=spacing_mm,
                     total_len_mm=total_len,
                     height_mm=height_mm,

@@ -20,7 +20,7 @@ Provides:
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 import json
 import math
 from pathlib import Path
@@ -33,7 +33,6 @@ except ImportError:
     slicer = None
 
 from .AdvancedTools import (
-    AUTOMATED_DENTAL_TOOLS_MODULES,
     compute_angle_between_three_points_deg,
     detect_automated_dental_tools_modules,
 )
@@ -304,7 +303,7 @@ def export_dicom_seg_and_sr(
     report_text = json.dumps(report_payload, indent=2)
 
     try:
-        pydicom = ensure_optional_package("pydicom", "pydicom", "DICOM SEG/SR export")
+        ensure_optional_package("pydicom", "pydicom", "DICOM SEG/SR export")
         from pydicom.dataset import FileDataset, FileMetaDataset  # type: ignore
         from pydicom.uid import ExplicitVRLittleEndian, generate_uid  # type: ignore
 
@@ -329,7 +328,9 @@ def export_dicom_seg_and_sr(
         sr_ds.save_as(str(sr_dcm_path), write_like_original=False)
 
         # 2. Write DICOM Segmentation (SOPClassUID 1.2.840.10008.5.1.4.1.1.66.4)
-        arr = np.asarray(mask_zyx if mask_zyx is not None else np.zeros((4, 8, 8), dtype=np.uint8), dtype=np.uint8)
+        arr = np.asarray(
+            mask_zyx if mask_zyx is not None else np.zeros((4, 8, 8), dtype=np.uint8), dtype=np.uint8
+        )
         seg_meta = FileMetaDataset()
         seg_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.66.4"
         seg_meta.MediaStorageSOPInstanceUID = generate_uid()
@@ -459,7 +460,7 @@ class ProstheticPlanner:
         abut_h = float(abut_spec["height_mm"])
         crown_h = float(crown_spec["height_mm"])
         p_abut_top = p_crest + coronal_vec * abut_h
-        p_crown_top = p_crest + ideal_coronal * ( crown_h + float(abut_spec.get("gingival_height_mm", 1.0)) )
+        p_crown_top = p_crest + ideal_coronal * (crown_h + float(abut_spec.get("gingival_height_mm", 1.0)))
 
         v_abut, f_abut = ImplantPlannerLogic.build_cylinder_mesh_triangles(
             p_crest,
@@ -514,10 +515,25 @@ class CephalometricMeasurement:
 CEPHALOMETRIC_NORMS: Dict[str, Tuple[float, float, str, Tuple[str, str, str]]] = {
     "SNA": (82.0, 2.0, "deg", ("Retrognathic Maxilla", "Normal Maxilla", "Prognathic Maxilla")),
     "SNB": (80.0, 2.0, "deg", ("Retrognathic Mandible", "Normal Mandible", "Prognathic Mandible")),
-    "ANB": (2.0, 2.0, "deg", ("Skeletal Class III Tendency", "Skeletal Class I", "Skeletal Class II Tendency")),
+    "ANB": (
+        2.0,
+        2.0,
+        "deg",
+        ("Skeletal Class III Tendency", "Skeletal Class I", "Skeletal Class II Tendency"),
+    ),
     "FMA": (25.0, 4.0, "deg", ("Hypodivergent (Low Angle)", "Normodivergent", "Hyperdivergent (High Angle)")),
-    "GoGn-SN": (32.0, 4.0, "deg", ("Horizontal Growth Pattern", "Balanced Growth Pattern", "Vertical Growth Pattern")),
-    "U1-L1 (Interincisal)": (131.0, 6.0, "deg", ("Proclined Incisors", "Normal Incisor Inclination", "Retroclined Incisors")),
+    "GoGn-SN": (
+        32.0,
+        4.0,
+        "deg",
+        ("Horizontal Growth Pattern", "Balanced Growth Pattern", "Vertical Growth Pattern"),
+    ),
+    "U1-L1 (Interincisal)": (
+        131.0,
+        6.0,
+        "deg",
+        ("Proclined Incisors", "Normal Incisor Inclination", "Retroclined Incisors"),
+    ),
 }
 
 
@@ -555,8 +571,16 @@ def compute_3d_cephalometry(
     if go_pt is not None and gn_pt is not None and "S" in pts and "N" in pts:
         raw_metrics["GoGn-SN"] = _angle_between_segments_deg(pts["S"], pts["N"], go_pt, gn_pt)
 
-    or_pt = pts["Or"] if "Or" in pts else (0.5 * (pts["Or_R"] + pts["Or_L"]) if ("Or_R" in pts and "Or_L" in pts) else None)
-    po_pt = pts["Po"] if "Po" in pts else (0.5 * (pts["Po_R"] + pts["Po_L"]) if ("Po_R" in pts and "Po_L" in pts) else None)
+    or_pt = (
+        pts["Or"]
+        if "Or" in pts
+        else (0.5 * (pts["Or_R"] + pts["Or_L"]) if ("Or_R" in pts and "Or_L" in pts) else None)
+    )
+    po_pt = (
+        pts["Po"]
+        if "Po" in pts
+        else (0.5 * (pts["Po_R"] + pts["Po_L"]) if ("Po_R" in pts and "Po_L" in pts) else None)
+    )
     if or_pt is not None and po_pt is not None and go_pt is not None and gn_pt is not None:
         raw_metrics["FMA"] = _angle_between_segments_deg(po_pt, or_pt, go_pt, gn_pt)
 
@@ -565,9 +589,7 @@ def compute_3d_cephalometry(
     l1_tip = pts["LI_tip"] if "LI_tip" in pts else pts.get("L1_tip")
     l1_apex = pts["LI_apex"] if "LI_apex" in pts else pts.get("L1_apex")
     if u1_tip is not None and u1_apex is not None and l1_tip is not None and l1_apex is not None:
-        raw_metrics["U1-L1 (Interincisal)"] = _angle_between_segments_deg(
-            u1_tip, u1_apex, l1_tip, l1_apex
-        )
+        raw_metrics["U1-L1 (Interincisal)"] = _angle_between_segments_deg(u1_tip, u1_apex, l1_tip, l1_apex)
 
     table: List[CephalometricMeasurement] = []
     for name, val in raw_metrics.items():
@@ -695,7 +717,9 @@ def run_headless_batch_pipeline(
         def GetCurveWorld(self) -> None:
             return None
 
-    pts_c, _, tangents, normals, binormals = pano_logic.get_curve_points_and_frames(_HeadlessCurve(), num_samples=80)
+    pts_c, _, tangents, normals, binormals = pano_logic.get_curve_points_and_frames(
+        _HeadlessCurve(), num_samples=80
+    )
     pano_arr = pano_logic.sample_panoramic_slab_array(
         volume,
         pts_c,

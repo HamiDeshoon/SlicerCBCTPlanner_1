@@ -209,11 +209,7 @@ def compute_pharyngeal_airway_metrics(
     if seed_ras is not None:
         sv = volume.world_to_voxel(seed_ras)
         sx_i, sy_i, sz_i = int(round(sv[0])), int(round(sv[1])), int(round(sv[2]))
-        if (
-            0 <= sz_i < labeled.shape[0]
-            and 0 <= sy_i < labeled.shape[1]
-            and 0 <= sx_i < labeled.shape[2]
-        ):
+        if 0 <= sz_i < labeled.shape[0] and 0 <= sy_i < labeled.shape[1] and 0 <= sx_i < labeled.shape[2]:
             target_label = int(labeled[sz_i, sy_i, sx_i])
 
     if target_label == 0:
@@ -317,12 +313,8 @@ def compute_tmj_condyle_frames(
     theta = math.radians(float(condylar_angle_deg))
     for side, pt, sign in (("Right", r_pt, 1.0), ("Left", l_pt, -1.0)):
         # Condylar long axis points medially and slightly posteriorly by condylar_angle_deg
-        sag_normal = np.array(
-            [sign * math.cos(theta), math.sin(theta), 0.0], dtype=np.float64
-        )
-        sag_right = np.array(
-            [-math.sin(theta), sign * math.cos(theta), 0.0], dtype=np.float64
-        )
+        sag_normal = np.array([sign * math.cos(theta), math.sin(theta), 0.0], dtype=np.float64)
+        sag_right = np.array([-math.sin(theta), sign * math.cos(theta), 0.0], dtype=np.float64)
         cor_normal = sag_right.copy()
         cor_right = -sag_normal.copy()
         frames[side] = TMJCondyleFrame(
@@ -482,9 +474,7 @@ def capture_slice_view_png_base64(slice_name: str, slice_widget: Any = None) -> 
 
                         raw_bytes = bytes(vtk_to_numpy(result))
                     except Exception:
-                        raw_bytes = bytes(
-                            result.GetValue(i) for i in range(result.GetNumberOfValues())
-                        )
+                        raw_bytes = bytes(result.GetValue(i) for i in range(result.GetNumberOfValues()))
                     if len(raw_bytes) > 16:
                         b64 = base64.b64encode(raw_bytes).decode("ascii")
                         return f"data:image/png;base64,{b64}"
@@ -516,7 +506,14 @@ def _strip_html_to_lines(html_text: str) -> List[str]:
     text = re.sub(r"</(tr|p|h1|h2|h3|div|li)>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<(td|th)[^>]*>", " | ", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
-    for ent, ch in (("&mdash;", "-"), ("&ndash;", "-"), ("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&"), ("&quot;", '"')):
+    for ent, ch in (
+        ("&mdash;", "-"),
+        ("&ndash;", "-"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&amp;", "&"),
+        ("&quot;", '"'),
+    ):
         text = text.replace(ent, ch)
     lines: List[str] = []
     for raw_line in text.splitlines():
@@ -609,7 +606,7 @@ def export_reformatted_dicom_series(
         arr = arr[None, :, :]
 
     try:
-        pydicom = ensure_optional_package("pydicom", "pydicom", "DICOM export")
+        ensure_optional_package("pydicom", "pydicom", "DICOM export")
         from pydicom.dataset import FileDataset, FileMetaDataset  # type: ignore
         from pydicom.uid import ExplicitVRLittleEndian, SecondaryCaptureImageStorage, generate_uid  # type: ignore
 
@@ -651,7 +648,6 @@ def export_reformatted_dicom_series(
         fallback_path = out_path / f"{series_description}.npy"
         np.save(str(fallback_path), arr)
         return [fallback_path]
-
 
 
 def ensure_nnunet_kaggle_trainer() -> None:
@@ -696,6 +692,7 @@ def ensure_nnunet_kaggle_trainer() -> None:
             mod.nnUNetTrainerKaggle = nnUNetTrainerKaggle
             sys.modules["nnunetv2.training.nnUNetTrainer.nnUNetTrainerKaggle"] = mod
             import nnunetv2.training.nnUNetTrainer as tr_pkg
+
             setattr(tr_pkg, "nnUNetTrainerKaggle", nnUNetTrainerKaggle)
         except Exception:
             pass
@@ -766,11 +763,7 @@ def run_nnunet_toothfairy3_inference(
 
     fold_str = str(fold).strip()
     if fold_str.lower() == "all":
-        fold_dirs = sorted(
-            p.name.replace("fold_", "")
-            for p in model_folder.glob("fold_*")
-            if p.is_dir()
-        )
+        fold_dirs = sorted(p.name.replace("fold_", "") for p in model_folder.glob("fold_*") if p.is_dir())
         use_folds = tuple(int(f) if f.isdigit() else f for f in fold_dirs) if fold_dirs else "all"
     else:
         use_folds = (int(fold_str) if fold_str.isdigit() else fold_str,)
@@ -896,10 +889,7 @@ def run_nnunet_toothfairy3_inference(
             info = LABELS_BY_ID.get(label_id)
             if info is not None:
                 segment.SetName(info.name)
-                r, g, b = (
-                    float(c) / 255.0 if max(info.color) > 1.0 else float(c)
-                    for c in info.color
-                )
+                r, g, b = (float(c) / 255.0 if max(info.color) > 1.0 else float(c) for c in info.color)
                 segment.SetColor(r, g, b)
                 segment.SetTag("CBCTPlanner.LabelID", str(info.id))
                 segment.SetTag("CBCTPlanner.Category", info.category)
@@ -915,4 +905,3 @@ def run_nnunet_toothfairy3_inference(
             except Exception:
                 pass
         shutil.rmtree(tmp_dir, ignore_errors=True)
-
