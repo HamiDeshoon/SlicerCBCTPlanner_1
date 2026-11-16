@@ -42,7 +42,7 @@ import html
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -339,6 +339,51 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         maskActionRow.addWidget(self.btnLoadExternalMask)
         step1Layout.addRow("AI Mask:", maskActionRow)
+
+        self.orientationCodesLabel = qt.QLabel("Detected orientation: --")
+        self.orientationCodesLabel.setToolTip(
+            "Anatomical codes of the IJK axes. RAS data reads ('R','A','S')."
+        )
+        step1Layout.addRow("Orientation:", self.orientationCodesLabel)
+
+        orientRow = qt.QHBoxLayout()
+        self.btnStandardizeRas = qt.QPushButton("Standardize to RAS")
+        self.btnStandardizeRas.setToolTip(
+            "Losslessly permute/flip the volume (and segmentation) to RAS. Refuses oblique data instead of resampling."
+        )
+        self.btnAutoDetectOrientation = qt.QPushButton("Auto-detect Issues")
+        self.btnAutoDetectOrientation.setToolTip(
+            "Verify S-I, A-P and L-R orientation from jaw and FDI tooth labels."
+        )
+        orientRow.addWidget(self.btnStandardizeRas)
+        orientRow.addWidget(self.btnAutoDetectOrientation)
+        step1Layout.addRow("RAS:", orientRow)
+
+        flipRow = qt.QHBoxLayout()
+        self.btnFlipLr = qt.QPushButton("Flip L-R")
+        self.btnFlipAp = qt.QPushButton("Flip A-P")
+        self.btnFlipSi = qt.QPushButton("Flip S-I")
+        self.btnFlipLr.setToolTip("Mirror the stored volume left-right (manual header correction).")
+        self.btnFlipAp.setToolTip("Mirror the stored volume anterior-posterior (manual header correction).")
+        self.btnFlipSi.setToolTip("Mirror the stored volume superior-inferior (manual header correction).")
+        flipRow.addWidget(self.btnFlipLr)
+        flipRow.addWidget(self.btnFlipAp)
+        flipRow.addWidget(self.btnFlipSi)
+        step1Layout.addRow("Manual Correction:", flipRow)
+
+        self.autoStandardizeOnLoadCheck = qt.QCheckBox("Auto-standardize on load (off by default)")
+        self.autoStandardizeOnLoadCheck.setChecked(False)
+        self.autoStandardizeOnLoadCheck.setToolTip(
+            "When enabled, loading a volume attempts a lossless RAS standardization. Data is never changed silently."
+        )
+        try:
+            settings = qt.QSettings()
+            self.autoStandardizeOnLoadCheck.setChecked(
+                str(settings.value(self.SETTINGS_PREFIX + "autoStandardizeOnLoad", "false")).lower() == "true"
+            )
+        except Exception:
+            logger.debug("Could not read autoStandardizeOnLoad setting", exc_info=True)
+        step1Layout.addRow(self.autoStandardizeOnLoadCheck)
 
         self.nnunetBox = ctk.ctkCollapsibleButton()
         self.nnunetBox.text = "AI Segmentation (nnU-Net ToothFairy3)"
@@ -1108,6 +1153,12 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnRunCheckpointSeg.clicked.connect(self.onRunCheckpointSegmentationClicked)
         self.btnDentalLightbox.clicked.connect(self.onSetDentalLightboxLayout)
         self.btnLoadExternalMask.clicked.connect(self.onLoadExternalMask)
+        self.btnStandardizeRas.clicked.connect(self.onStandardizeRasClicked)
+        self.btnAutoDetectOrientation.clicked.connect(self.onAutoDetectOrientationClicked)
+        self.btnFlipLr.clicked.connect(lambda: self.onFlipOrientationClicked("LR"))
+        self.btnFlipAp.clicked.connect(lambda: self.onFlipOrientationClicked("AP"))
+        self.btnFlipSi.clicked.connect(lambda: self.onFlipOrientationClicked("SI"))
+        self.autoStandardizeOnLoadCheck.toggled.connect(self.onAutoStandardizeOnLoadToggled)
         self.btnDentalLayout.clicked.connect(self.onSetDentalLayout)
         self.btnStandardMpr.clicked.connect(self.onSetStandardMpr)
         self.btnPlaceOcclusalPts.clicked.connect(self.onPlaceOcclusalPoints)
@@ -1303,6 +1354,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             segNode = self._parameterNode.GetNodeReference("Segmentation")
             self.volumeSelector.setCurrentNode(volNode)
             self.segmentationSelector.setCurrentNode(segNode)
+            if volNode is not None and hasattr(self, "orientationCodesLabel") and self.logic is not None:
+                try:
+                    from CBCTPlannerLib.core.orientation import axcodes_from_affine
+
+                    _, affine = self.logic._volume_array_and_affine(volNode)
+                    codes = axcodes_from_affine(affine) if affine is not None else ("?", "?", "?")
+                    self.orientationCodesLabel.setText("Detected orientation: " + ", ".join(codes))
+                except Exception:
+                    logger.debug("Could not read volume orientation codes", exc_info=True)
 
             self._ensureParameterNodeCurveObservers(volNode)
 
@@ -1498,11 +1558,32 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # Step 1 Callbacks: Volume, Checkpoint Inference, Layout, Occlusal Plane & VR
     # ------------------------------------------------------------------
     def onVolumeNodeChanged(self, node: Any) -> None:
+        if (
+            node is not None
+            and self.logic is not None
+            and hasattr(self, "autoStandardizeOnLoadCheck")
+            and self.autoStandardizeOnLoadCheck.isChecked()
+        ):
+            try:
+                from CBCTPlannerLib.core.orientation import axcodes_from_affine
+
+                _, affine = self.logic._volume_array_and_affine(node)
+                if affine is not None and axcodes_from_affine(affine) != ("R", "A", "S"):
+                    segNode = (
+                        self.segmentationSelector.currentNode()
+                        if hasattr(self, "segmentationSelector")
+                        else None
+                    )
+                    standardized, report = self.logic.standardize_orientation(node, segNode, mode="in_place")
+                    if standardized is not None:
+                        self.step1HintLabel.setText("Orientation: " + self._formatOrientationReport(report))
+                    else:
+                        logger.warning("Auto-standardize skipped: %s", "; ".join(report.notes))
+            except Exception:
+                logger.exception("Auto-standardize on load failed")
         if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
             self._parameterNode.SetNodeReferenceID("InputVolume", node.GetID() if node else "")
             self.updateGUIFromParameterNode()
-        if node is not None:
-            self.autoSynchronizeSIOrientation()
 
     def onSegmentationNodeChanged(self, node: Any) -> None:
         if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
@@ -1510,8 +1591,89 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.updateGUIFromParameterNode()
             if self.selectedTeeth:
                 self.onRefreshAllSelectedTeeth()
-        if node is not None:
-            self.autoSynchronizeSIOrientation()
+
+    def _formatOrientationReport(self, report: Any) -> str:
+        def state(value: Any) -> str:
+            if value is None:
+                return "cannot determine"
+            return "OK" if value else "MISMATCH"
+
+        parts = [
+            f"S-I: {state(report.si_ok)}",
+            f"A-P: {state(report.ap_ok)}",
+            f"L-R: {state(report.lr_ok)}",
+        ]
+        return " | ".join(parts) + " — " + "; ".join(report.notes)
+
+    def onAutoStandardizeOnLoadToggled(self, checked: bool) -> None:
+        if qt is None:
+            return
+        try:
+            settings = qt.QSettings()
+            settings.setValue(self.SETTINGS_PREFIX + "autoStandardizeOnLoad", "true" if checked else "false")
+        except Exception:
+            logger.debug("Could not persist autoStandardizeOnLoad setting", exc_info=True)
+
+    def onStandardizeRasClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if not volNode or not self.logic:
+            if slicer:
+                slicer.util.warningDisplay("Select an input CBCT volume first.")
+            return
+        newVol, report = self.logic.standardize_orientation(volNode, segNode, mode="clone")
+        summary = self._formatOrientationReport(report)
+        if newVol is None:
+            logger.warning("RAS standardization refused: %s", summary)
+            if slicer:
+                slicer.util.warningDisplay("RAS standardization not applied:\n" + summary)
+            self.step1HintLabel.setText("Orientation: " + summary)
+            return
+        self.volumeSelector.setCurrentNode(newVol)
+        self.step1HintLabel.setText("Orientation: " + summary)
+        self.globalStatusLabel.setText("Standardized to RAS")
+        if slicer:
+            slicer.util.showStatusMessage("Standardized volume to RAS", 4000)
+
+    def onAutoDetectOrientationClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if not volNode or not self.logic:
+            if slicer:
+                slicer.util.warningDisplay("Select an input CBCT volume first.")
+            return
+        report = self.logic.detect_orientation_issues(volNode, segNode)
+        summary = self._formatOrientationReport(report)
+        self.step1HintLabel.setText("Orientation: " + summary)
+        self.globalStatusLabel.setText("Orientation check: " + summary)
+        if slicer:
+            if report.all_ok:
+                slicer.util.showStatusMessage("Orientation check: " + summary, 5000)
+            else:
+                slicer.util.warningDisplay("Orientation issues detected:\n" + summary)
+
+    def onFlipOrientationClicked(self, axis: str) -> None:
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if not volNode or not self.logic:
+            if slicer:
+                slicer.util.warningDisplay("Select an input CBCT volume first.")
+            return
+        if slicer and not slicer.util.confirmOkCancelDisplay(
+            f"Mirror the volume and segmentation along {axis}?\n"
+            "This changes stored voxel order and the IJK-to-RAS matrix.",
+            windowTitle=f"Flip {axis}",
+        ):
+            return
+        if self.logic.flip_orientation_axis(volNode, segNode, axis):
+            self.globalStatusLabel.setText(f"Manual {axis} flip applied")
+            self.step1HintLabel.setText(
+                f"Manual {axis} flip applied. Re-run Auto-detect or Standardize to RAS."
+            )
+        else:
+            logger.error("Manual %s flip failed", axis)
+            if slicer:
+                slicer.util.errorDisplay(f"Manual {axis} flip failed.")
 
     def onBrowseNNUNetModelClicked(self) -> None:
         path = qt.QFileDialog.getExistingDirectory(self.parent, "Select nnU-Net ToothFairy3 Model Folder")
@@ -1632,73 +1794,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Create closed surface representation
         if segNode is not None:
             segNode.CreateClosedSurfaceRepresentation()
-        # Automatically check and synchronize S-I orientation with volume
-        self.autoSynchronizeSIOrientation()
         # Auto-execute full planning pipeline!
         self.onApplyMaskPipelineClicked()
-
-    def autoSynchronizeSIOrientation(self) -> None:
-        """Automatically verify and synchronize Superior-Inferior (S-I) orientation between volume and segmentation."""
-        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
-        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
-        if volNode is None:
-            return
-
-        vol_flipped = volNode.GetAttribute("CBCTPlanner.SIFlipped") == "1"
-        mat = vtk.vtkMatrix4x4()
-        volNode.GetIJKToRASMatrix(mat)
-        z_dir_s = mat.GetElement(2, 2)
-
-        # 1. Inspect volume IJKToRAS direction: if negative Z direction and not yet flipped, flip volume
-        if not vol_flipped and z_dir_s < -0.1:
-            volNode.SetAttribute("CBCTPlanner.SIFlipped", "1")
-            self.flipSIOrientationNodes([volNode])
-            vol_flipped = True
-
-        # 2. Inspect segmentation vs volume: ensure segmentation matches volume orientation
-        if segNode is not None:
-            seg_flipped = segNode.GetAttribute("CBCTPlanner.SIFlipped") == "1"
-            if vol_flipped != seg_flipped:
-                self.flipSIOrientationNodes([segNode])
-                segNode.SetAttribute("CBCTPlanner.SIFlipped", "1" if vol_flipped else "0")
-
-    def flipSIOrientationNodes(self, nodes: Sequence[Any]) -> None:
-        """Harden S-I inversion transform centered on active volume on target nodes."""
-        if vtk is None or slicer is None:
-            return
-        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
-        z_center = 0.0
-        if volNode is not None:
-            b = [0.0] * 6
-            volNode.GetRASBounds(b)
-            z_center = 0.5 * (b[4] + b[5])
-
-        m = vtk.vtkMatrix4x4()
-        m.Identity()
-        m.SetElement(2, 2, -1.0)
-        m.SetElement(2, 3, 2.0 * z_center)
-
-        t = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "_TempAutoFlipSI")
-        t.SetMatrixTransformToParent(m)
-        for n in nodes:
-            if n is not None:
-                n.SetAndObserveTransformNodeID(t.GetID())
-                slicer.vtkMRMLTransformLogic().hardenTransform(n)
-        slicer.mrmlScene.RemoveNode(t)
-        if hasattr(slicer.util, "resetSliceViews"):
-            slicer.util.resetSliceViews()
-
-    def onFlipSIOrientation(self) -> None:
-        """Manual fallback: invert S-I orientation on active volume and segmentation nodes."""
-        volNode = self.volumeSelector.currentNode()
-        segNode = self.segmentationSelector.currentNode()
-        if volNode:
-            current_flip = volNode.GetAttribute("CBCTPlanner.SIFlipped") == "1"
-            new_flip = "0" if current_flip else "1"
-            volNode.SetAttribute("CBCTPlanner.SIFlipped", new_flip)
-            if segNode:
-                segNode.SetAttribute("CBCTPlanner.SIFlipped", new_flip)
-            self.flipSIOrientationNodes([volNode, segNode])
 
     def onRunCheckpointSegmentationClicked(self) -> None:
         """Run user-supplied AI checkpoint (`.pth`, `.pt`, `.ckpt`, `.onnx`, `.npy`, `.nii.gz`) on the active CBCT volume."""
@@ -1736,21 +1833,21 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         registerAndSetDentalLightboxLayout(volumeNode=volNode)
         self.enableLightboxCheckBox.setChecked(True)
         if volNode and self.logic:
-            self.logic.standardize_to_lpi(volNode)
+            self.logic.reset_slice_views(volNode)
             self._syncCursorToViews()
 
     def onSetDentalLayout(self) -> None:
         registerAndSetDentalLayout()
         volNode = self.volumeSelector.currentNode()
         if volNode and self.logic:
-            self.logic.standardize_to_lpi(volNode)
+            self.logic.reset_slice_views(volNode)
             self._syncCursorToViews()
 
     def onSetStandardMpr(self) -> None:
         volNode = self.volumeSelector.currentNode()
         if not volNode or not self.logic:
             return
-        self.logic.standardize_to_lpi(volNode)
+        self.logic.reset_slice_views(volNode)
 
     def onPlaceOcclusalPoints(self) -> None:
         volNode = self.volumeSelector.currentNode()
@@ -3251,7 +3348,218 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         )
         return normal
 
-    def standardize_to_lpi(self, volumeNode: Any) -> None:
+    # ------------------------------------------------------------------
+    # Phase 1: Lossless RAS orientation
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _volume_array_and_affine(volumeNode: Any) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Return the Slicer scalar array `(Z, Y, X)` and its IJK->RAS affine."""
+        if slicer is None or volumeNode is None or vtk is None:
+            return None, None
+        arr = slicer.util.arrayFromVolume(volumeNode)
+        if arr is None:
+            return None, None
+        matrix = vtk.vtkMatrix4x4()
+        volumeNode.GetIJKToRASMatrix(matrix)
+        affine = np.array(
+            [[matrix.GetElement(row, col) for col in range(4)] for row in range(4)],
+            dtype=np.float64,
+        )
+        return arr, affine
+
+    @staticmethod
+    def _write_volume_array_and_affine(volumeNode: Any, arr: np.ndarray, affine: np.ndarray) -> None:
+        if slicer is None or volumeNode is None:
+            return
+        slicer.util.updateVolumeFromArray(volumeNode, arr)
+        volumeNode.SetIJKToRASMatrix(slicer.util.vtkMatrixFromArray(np.asarray(affine, dtype=np.float64)))
+
+    def _apply_segment_ops(
+        self,
+        segmentationNode: Any,
+        sourceVolumeNode: Any,
+        targetVolumeNode: Any,
+        func: Callable[[np.ndarray], np.ndarray],
+    ) -> int:
+        """Apply `func` to every segment binary labelmap and write it against `targetVolumeNode`.
+
+        Slicer 5.6 exposes `arrayFromSegmentBinaryLabelmap` and
+        `updateSegmentBinaryLabelmapFromArray`; re-encoding each segment keeps voxel
+        data aligned when axes are permuted. If that API is unavailable we log an
+        error instead of silently resetting geometry to a possibly wrong reference.
+        """
+        if slicer is None or segmentationNode is None or targetVolumeNode is None:
+            return 0
+        segmentation = segmentationNode.GetSegmentation()
+        if segmentation is None:
+            return 0
+        if not (
+            hasattr(slicer.util, "arrayFromSegmentBinaryLabelmap")
+            and hasattr(slicer.util, "updateSegmentBinaryLabelmapFromArray")
+        ):
+            logger.error(
+                "Slicer build lacks segment labelmap array helpers; cannot re-encode segmentation orientation"
+            )
+            return 0
+        updated = 0
+        for index in range(segmentation.GetNumberOfSegments()):
+            segment_id = segmentation.GetNthSegmentID(index)
+            seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(
+                segmentationNode, segment_id, sourceVolumeNode
+            )
+            if seg_arr is None:
+                continue
+            slicer.util.updateSegmentBinaryLabelmapFromArray(
+                func(np.asarray(seg_arr)), segmentationNode, segment_id, targetVolumeNode
+            )
+            updated += 1
+        return updated
+
+    def standardize_orientation(
+        self,
+        volumeNode: Any,
+        segmentationNode: Any = None,
+        *,
+        mode: str = "clone",
+    ) -> Tuple[Optional[Any], Any]:
+        """Losslessly convert a volume (and optionally its segmentation) to RAS.
+
+        Returns `(new_or_updated_volume_node, OrientationReport)`. Oblique data is
+        reported (`report.notes`) and not resampled or written.
+        """
+        from CBCTPlannerLib.core.orientation import (
+            OrientationReport,
+            _obliquity_deg,
+            axcodes_from_affine,
+            canonicalize_to_ras,
+            verify_orientation,
+        )
+
+        if slicer is None or volumeNode is None:
+            return None, OrientationReport(notes=["No volume selected."])
+        transform_id = ""
+        if hasattr(volumeNode, "GetTransformNodeID"):
+            transform_id = volumeNode.GetTransformNodeID() or ""
+        if transform_id:
+            return None, OrientationReport(
+                notes=[
+                    "The volume has a parent transform (occlusal alignment). "
+                    "Standardize orientation before applying occlusal alignment."
+                ]
+            )
+
+        arr, affine = self._volume_array_and_affine(volumeNode)
+        if arr is None or affine is None:
+            return None, OrientationReport(notes=["Could not read the volume array or IJK-to-RAS matrix."])
+
+        try:
+            result = canonicalize_to_ras(arr, affine)
+        except ValueError as exc:
+            logger.exception("RAS canonicalization failed")
+            return None, OrientationReport(notes=[f"Canonicalization failed: {exc}"])
+
+        if result.is_oblique:
+            return None, OrientationReport(
+                notes=[
+                    f"Volume axes are oblique ({_obliquity_deg(affine):.1f}° > 5°). "
+                    "No lossless permutation is possible; resample with OrientScalarVolume first."
+                ]
+            )
+
+        target_volume = volumeNode
+        if mode == "clone":
+            name = f"{volumeNode.GetName()}_RAS"
+            target_volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", name)
+            slicer.util.updateVolumeFromArray(target_volume, result.image_zyx)
+            target_volume.SetIJKToRASMatrix(slicer.util.vtkMatrixFromArray(result.affine))
+            if volumeNode.GetDisplayNode() is not None:
+                target_volume.CreateDefaultDisplayNodes()
+                target_volume.GetDisplayNode().CopyContent(volumeNode.GetDisplayNode())
+        elif mode == "in_place":
+            self._write_volume_array_and_affine(volumeNode, result.image_zyx, result.affine)
+        else:
+            return None, OrientationReport(notes=[f"Unknown mode {mode!r}; use 'clone' or 'in_place'."])
+
+        if hasattr(target_volume, "SetAttribute"):
+            target_volume.SetAttribute("CBCTPlanner.Orientation", "RAS")
+
+        updated_segments = 0
+        if segmentationNode is not None:
+            from CBCTPlannerLib.core.orientation import apply_ops
+
+            updated_segments = self._apply_segment_ops(
+                segmentationNode,
+                volumeNode,
+                target_volume,
+                lambda seg_arr: apply_ops(seg_arr, result.ops),
+            )
+            if hasattr(segmentationNode, "SetReferenceImageGeometryParameterFromVolumeNode"):
+                segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(target_volume)
+            if hasattr(segmentationNode, "SetAttribute"):
+                segmentationNode.SetAttribute("CBCTPlanner.Orientation", "RAS")
+
+        report = OrientationReport(
+            notes=[
+                f"Canonicalized {axcodes_from_affine(affine)} -> {axcodes_from_affine(result.affine)} "
+                f"({updated_segments} segment(s) re-encoded)."
+            ]
+        )
+        if segmentationNode is not None:
+            mask, is_5class = self._extract_combined_label_mask(target_volume, segmentationNode)
+            if mask is not None:
+                report = verify_orientation(mask, result.affine, is_5class=is_5class)
+                report.notes.insert(
+                    0,
+                    f"Canonicalized {axcodes_from_affine(affine)} -> "
+                    f"{axcodes_from_affine(result.affine)} ({updated_segments} segment(s) re-encoded).",
+                )
+            else:
+                report.notes.append("No label mask available; orientation could not be verified.")
+        else:
+            report.notes.append("No segmentation supplied; orientation could not be verified.")
+        return target_volume, report
+
+    def detect_orientation_issues(self, volumeNode: Any, segmentationNode: Any = None) -> Any:
+        """Run segmentation-based S-I / A-P / L-R verification without changing data."""
+        from CBCTPlannerLib.core.orientation import OrientationReport, verify_orientation
+
+        if slicer is None or volumeNode is None:
+            return OrientationReport(notes=["No volume selected."])
+        arr, affine = self._volume_array_and_affine(volumeNode)
+        if arr is None or affine is None:
+            return OrientationReport(notes=["Could not read the volume array or IJK-to-RAS matrix."])
+        if segmentationNode is None:
+            return OrientationReport(notes=["Auto-detect needs a segmentation with jaw or tooth labels."])
+        mask, is_5class = self._extract_combined_label_mask(volumeNode, segmentationNode)
+        if mask is None:
+            return OrientationReport(notes=["Could not build a label mask from the segmentation."])
+        return verify_orientation(mask, affine, is_5class=is_5class)
+
+    def flip_orientation_axis(self, volumeNode: Any, segmentationNode: Any, axis: str) -> bool:
+        """Manually mirror a volume and segmentation along LR/AP/SI and update the affine."""
+        from CBCTPlannerLib.core.orientation import flip_axis
+
+        if slicer is None or volumeNode is None:
+            return False
+        arr, affine = self._volume_array_and_affine(volumeNode)
+        if arr is None or affine is None:
+            return False
+        flipped, flipped_affine = flip_axis(arr, affine, axis)
+        self._write_volume_array_and_affine(volumeNode, flipped, flipped_affine)
+        if segmentationNode is not None:
+            self._apply_segment_ops(
+                segmentationNode,
+                volumeNode,
+                volumeNode,
+                lambda seg_arr: flip_axis(np.asarray(seg_arr), affine, axis)[0],
+            )
+            if hasattr(segmentationNode, "SetReferenceImageGeometryParameterFromVolumeNode"):
+                segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+        if hasattr(volumeNode, "SetAttribute"):
+            volumeNode.SetAttribute("CBCTPlanner.Orientation", f"manual_flip_{axis}")
+        return True
+
+    def reset_slice_views(self, volumeNode: Any) -> None:
         """Reset Axial (Red) and Cross-Section (Yellow/YellowMinus/YellowPlus) views without clobbering Panoramic."""
         if slicer is None or not volumeNode:
             return
@@ -3277,6 +3585,10 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 sNode = sw.sliceLogic().GetSliceNode()
                 getattr(sNode, f"SetOrientationTo{orient}")()
                 sw.sliceLogic().FitSliceToAll()
+
+    def standardize_to_lpi(self, volumeNode: Any) -> None:
+        """Deprecated alias for `reset_slice_views` (the old name was misleading)."""
+        self.reset_slice_views(volumeNode)
 
     # ------------------------------------------------------------------
     # Arch Curve Management (B15 Node Refs, B20 Spline without Skull Fallback, F3 Single Arch)

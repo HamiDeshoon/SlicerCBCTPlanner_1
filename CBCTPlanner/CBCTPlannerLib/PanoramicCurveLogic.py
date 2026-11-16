@@ -340,8 +340,6 @@ class PanoramicCurveLogic:
         up = np.asarray(occ_tuple, dtype=np.float64)
         up_norm = float(np.linalg.norm(up))
         up = up / up_norm if up_norm > 1e-8 else np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        if up[2] < 0:
-            up = -up
 
         raw_tangents = np.gradient(pts, axis=0)
         tangents = raw_tangents - np.outer(raw_tangents @ up, up)
