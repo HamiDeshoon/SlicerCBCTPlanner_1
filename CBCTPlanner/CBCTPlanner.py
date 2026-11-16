@@ -1558,6 +1558,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 f"Checkpoint ({summary.format_type}, {summary.device_used}): loaded {summary.loaded_tensors}/{summary.total_ckpt_tensors} tensors -> {segNode.GetName()}"
             )
             self.updateGUIFromParameterNode()
+            self.onApplyMaskPipelineClicked()
 
     def onSetDentalLightboxLayout(self) -> None:
         volNode = self.volumeSelector.currentNode()
@@ -1706,6 +1707,11 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.step5Box.collapsed = False
             self.updateGUIFromParameterNode()
             self._syncCursorToViews()
+            if hasattr(self, "onGeneratePanoramicClicked"):
+                try:
+                    self.onGeneratePanoramicClicked()
+                except Exception:
+                    pass
 
     def onDrawArchManualClicked(self) -> None:
         volNode = self.volumeSelector.currentNode()
