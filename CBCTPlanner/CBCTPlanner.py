@@ -36,6 +36,7 @@ Implements a comprehensive clinical workflow backed by a single-source-of-truth 
 
 from __future__ import annotations
 
+import contextlib
 import csv
 from datetime import datetime, timezone
 import html
@@ -140,6 +141,7 @@ from CBCTPlannerLib.core.arch_detector import (
     fit_dental_arch_from_points,
 )
 from CBCTPlannerLib.core.labels import (
+    sort_teeth_anatomically as _sort_teeth_anatomically,
     ANATOMICAL_MESIODISTAL_WIDTHS_MM,
     FDI_TO_TOOTH_ID,
     LOWER_JAW_ID,
@@ -165,13 +167,8 @@ NOT_MEASURED = "not measured"
 
 
 def sort_teeth_anatomically(teeth_list: Sequence[int]) -> List[int]:
-    """Sort FDI teeth from Patient Right to Patient Left: Upper (Q1, Q2) then Lower (Q4, Q3)."""
-    teeth_set = set(int(t) for t in teeth_list)
-    q1 = [t for t in Q1_TEETH if t in teeth_set]
-    q2 = [t for t in Q2_TEETH if t in teeth_set]
-    q4 = [t for t in Q4_TEETH if t in teeth_set]
-    q3 = [t for t in Q3_TEETH if t in teeth_set]
-    return q1 + q2 + q4 + q3
+    """Deprecated re-export; canonical implementation lives in CBCTPlannerLib.core.labels."""
+    return _sort_teeth_anatomically(teeth_list)
 
 
 def format_metric(val: Optional[float], unit: str = "", decimals: int = 1) -> str:
@@ -2524,9 +2521,12 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 slicer.util.warningDisplay("Select an input CBCT volume first.")
             return
 
-        fdi = self.activeToothFDI or (next(iter(self.selectedTeeth)) if self.selectedTeeth else 46)
-        num_slices = 21  # Standard clinical 21-slice series (between 15 and 28)
-        step_mm = 0.75  # 0.75 mm interval along arch
+        from CBCTPlannerLib.core.labels import sort_teeth_anatomically
+        from CBCTPlannerLib.core.print_layout import slice_count_for_selection
+
+        selected = sort_teeth_anatomically(list(self.selectedTeeth))
+        fdi = self.activeToothFDI or (selected[0] if selected else 46)
+        num_slices, step_mm = slice_count_for_selection(max(1, len(selected)))
         dlg = qt.QDialog(self.parent)
         dlg.setWindowTitle(f"Cross-Sectional Slice Series — Site #{fdi} ({num_slices} Slices)")
         dlg.resize(950, 700)
@@ -2553,6 +2553,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             segmentationNode=self.segmentationSelector.currentNode(),
             num_slices=num_slices,
             step_mm=step_mm,
+            fdis=selected or [fdi],
         )
 
         cols = 5
@@ -2569,10 +2570,17 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             card_layout.addWidget(title_lbl)
 
             img_lbl = qt.QLabel()
-            if item.get("pixmap") is not None:
-                img_lbl.setPixmap(
-                    item["pixmap"].scaled(160, 200, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+            pixmap = item.get("pixmap")
+            if pixmap is None and item.get("image_data_uri"):
+                image = qt.QImage.fromData(
+                    qt.QByteArray.fromBase64(item["image_data_uri"].split(",", 1)[-1].encode("ascii"))
                 )
+                if not image.isNull():
+                    pixmap = qt.QPixmap.fromImage(image)
+            if pixmap is not None:
+                img_lbl.setPixmap(pixmap.scaled(160, 200, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation))
+            else:
+                img_lbl.setText("image unavailable")
             img_lbl.setAlignment(qt.Qt.AlignCenter)
             card_layout.addWidget(img_lbl)
 
@@ -2651,7 +2659,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         count = len(self.selectedTeeth)
         fdis_sorted = sorted(list(self.selectedTeeth))
         q = str(fdis_sorted[0])[0]
-        n_slices = 15 if count == 1 else (21 if count <= 3 else 27)
+        from CBCTPlannerLib.core.print_layout import slice_count_for_selection
+
+        n_slices, _step = slice_count_for_selection(count)
         self.step5SelectionStatusLabel.setText(
             f"Active Site: Quadrant {q} ({count} tooth site{'s' if count > 1 else ''}: {', '.join(f'#{f}' for f in fdis_sorted)}) — {n_slices} Cross-Section Slices"
         )
@@ -2674,30 +2684,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         quadrant = int(str(selected_fdis[0])[0]) if selected_fdis else 4
 
-        # Isolate VR classes for quadrant in segmentation display
-        if segNode is not None and slicer is not None:
-            try:
-                dNode = segNode.GetDisplayNode()
-                segmentation = segNode.GetSegmentation()
-                if dNode and segmentation:
-                    for i in range(segmentation.GetNumberOfSegments()):
-                        sid = segmentation.GetNthSegmentID(i)
-                        seg = segmentation.GetSegment(sid)
-                        name = (seg.GetName() or "").lower()
-                        vis = "mandible" in name or "maxilla" in name or "jaw" in name or "canal" in name
-                        for f in selected_fdis:
-                            if str(f) in name or f"#{f}" in name:
-                                vis = True
-                                break
-                        dNode.SetSegmentVisibility(sid, vis)
-            except Exception:
-                logger.debug(
-                    "Best-effort operation failed", exc_info=True
-                )  # silent-ok: non-critical cleanup/probe
-
         from CBCTPlannerLib.PrintLayoutEngine import PrintLayoutEngine
 
-        engine = PrintLayoutEngine(logic=self.logic)
         pNode = self.getParameterNode() if slicer else None
         p_name = pNode.GetParameter("PatientName") if pNode else "Anonymous"
         p_id = pNode.GetParameter("PatientID") if pNode else "Anonymous"
@@ -2706,21 +2694,44 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if hasattr(self, "includePatientMetaCheckBox")
             else False
         )
-
         out_dir = Path(slicer.app.temporaryPath if slicer else ".")
-        html_file, pdf_file, slices_data = engine.generate_8x10_layout(
-            volumeNode=volNode,
-            segmentationNode=segNode,
-            selected_fdis=selected_fdis,
-            quadrant=quadrant,
-            out_dir=out_dir,
-            patient_name=p_name or "Anonymous",
-            patient_id=p_id or "Anonymous",
-            include_metadata=include_meta,
-        )
+        engine = PrintLayoutEngine(logic=self.logic)
 
-        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(html_file)))
-        self._showPrintPreviewDialog(html_file, pdf_file, slices_data, quadrant, selected_fdis)
+        progress = None
+        if qt is not None and self.parent is not None:
+            progress = qt.QProgressDialog("Rendering clinical film pages…", "", 0, 0, self.parent)
+            progress.setWindowTitle("Generating 8x10 layout")
+            progress.setCancelButton(None)
+            progress.show()
+            qt.QApplication.processEvents()
+
+        isolation = (
+            self.logic.quadrant_vr_isolation(segNode, selected_fdis)
+            if (self.logic is not None and hasattr(self.logic, "quadrant_vr_isolation"))
+            else contextlib.nullcontext()
+        )
+        try:
+            with isolation:
+                html_file, pdf_file, slices_data = engine.generate_8x10_layout(
+                    volumeNode=volNode,
+                    segmentationNode=segNode,
+                    selected_fdis=selected_fdis,
+                    quadrant=quadrant,
+                    out_dir=out_dir,
+                    patient_name=p_name or "Anonymous",
+                    patient_id=p_id or "Anonymous",
+                    include_metadata=include_meta,
+                )
+        except Exception:
+            logger.exception("8x10 print layout generation failed")
+            if slicer:
+                slicer.util.errorDisplay("The 8x10 print layout could not be generated. See the console log.")
+            return
+        finally:
+            if progress is not None:
+                progress.close()
+
+        self._showPrintPreviewDialog(html_file, pdf_file, slices_data, quadrant, sorted(selected_fdis))
         if slicer:
             slicer.util.showStatusMessage(f"Generated 8×10″ Print Layout: {html_file.name}", 5000)
 
@@ -4645,81 +4656,80 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         segmentationNode: Any = None,
         num_slices: int = 21,
         step_mm: float = 0.75,
+        fdis: Optional[Sequence[int]] = None,
     ) -> List[Dict[str, Any]]:
-        """Generate a series of 15-28 sequential cross-sectional images with overlaid bone height/width measurement lines."""
+        """Render genuine arc cross-sections with measured overlays (one resample per slice)."""
+        from CBCTPlannerLib.core_print_render import render_cross_section
+
         results: List[Dict[str, Any]] = []
         if volumeNode is None:
             return results
-
-        half_span = (float(num_slices) - 1.0) / 2.0
-        offsets = [(i - half_span) * float(step_mm) for i in range(num_slices)]
         engine = self._get_or_build_measurement_engine(volumeNode, segmentationNode)
+        if engine is None:
+            logger.error("Slice series needs a measurement engine (volume + arch)")
+            return results
 
-        for off in offsets:
+        tooth_list = [int(f) for f in (fdis or [fdi])]
+        is_mandible = int(str(fdi)[0]) in (3, 4)
+        jaw_label = "Mandible" if is_mandible else "Maxilla"
+        arch = engine._arch_for_jaw(is_mandible)
+        if arch is None:
+            logger.error("Slice series needs a fitted arch for the %s", jaw_label)
+            return results
+
+        center = engine.get_site_center_ras(str(fdi))
+        if center is None:
+            logger.error("No site center is available for FDI %s", fdi)
+            return results
+        t_center, _ = arch.find_closest_parameter(center)
+        center_arc = float(t_center) * float(arch.total_arc_length)
+
+        if len(tooth_list) >= 4:
+            arcs = []
+            for tooth in tooth_list:
+                tooth_center = engine.get_site_center_ras(str(tooth))
+                if tooth_center is None:
+                    continue
+                tooth_t, _ = arch.find_closest_parameter(tooth_center)
+                arcs.append(float(tooth_t) * float(arch.total_arc_length))
+            if arcs:
+                arc_values = np.linspace(min(arcs) - 2.0, max(arcs) + 2.0, num_slices)
+            else:
+                arc_values = center_arc + (np.arange(num_slices) - (num_slices - 1) / 2.0) * step_mm
+        else:
+            arc_values = center_arc + (np.arange(num_slices) - (num_slices - 1) / 2.0) * step_mm
+
+        for index, arc_mm in enumerate(arc_values):
             meas = None
-            if engine is not None:
-                try:
-                    meas = engine.measure_implant_site(str(fdi), offset_mm=off)
-                except Exception:
-                    meas = None
+            cs = None
+            try:
+                meas, cs = engine.measure_at_arc_mm(jaw_label, float(arc_mm), fdi_hint=str(fdi))
+            except Exception:
+                logger.exception("Cross-section measurement failed at %.2f mm", arc_mm)
+            data_uri = ""
+            if cs is not None:
+                render = render_cross_section(cs, meas, scale=2)
+                if render.available and render.image is not None:
+                    import base64 as _b64
+                    import io as _io
 
+                    buffer = _io.BytesIO()
+                    render.image.save(buffer, format="PNG")
+                    data_uri = "data:image/png;base64," + _b64.b64encode(buffer.getvalue()).decode("ascii")
             h_str = f"{meas.bone_height_mm:.1f}" if (meas and meas.bone_height_mm is not None) else "N/A"
             w0_str = f"{meas.crest_width_mm:.1f}" if (meas and meas.crest_width_mm is not None) else "N/A"
             w3 = meas.bone_width_at_depths_mm.get(3.0) if (meas and meas.bone_width_at_depths_mm) else None
             w5 = meas.bone_width_at_depths_mm.get(5.0) if (meas and meas.bone_width_at_depths_mm) else None
-            w3_str = f"{w3:.1f}" if w3 is not None else "N/A"
-            w5_str = f"{w5:.1f}" if w5 is not None else "N/A"
-
-            # Resample 2D cross-section array with drawn measurement lines
-            pix = None
-            if qt is not None:
-                # Create an annotated 2D QImage/QPixmap representing the cross-section slice
-                pix = qt.QPixmap(200, 240)
-                pix.fill(qt.QColor(15, 23, 42))  # Dark slate background
-                painter = qt.QPainter(pix)
-                painter.setRenderHint(qt.QPainter.Antialiasing)
-
-                # Simulated cross-section bone contour
-                pen_bone = qt.QPen(qt.QColor(226, 232, 240), 2)
-                painter.setPen(pen_bone)
-                painter.drawRect(50, 40, 100, 150)
-
-                # Draw measurement lines
-                # Height line (green)
-                pen_h = qt.QPen(qt.QColor(34, 197, 94), 2)
-                painter.setPen(pen_h)
-                painter.drawLine(100, 40, 100, 190)
-
-                # Crest width line (yellow)
-                pen_w0 = qt.QPen(qt.QColor(234, 179, 8), 2)
-                painter.setPen(pen_w0)
-                painter.drawLine(50, 40, 150, 40)
-
-                # Width at 3mm (cyan)
-                pen_w3 = qt.QPen(qt.QColor(6, 182, 212), 2, qt.Qt.DashLine)
-                painter.setPen(pen_w3)
-                painter.drawLine(55, 70, 145, 70)
-
-                # Width at 5mm (blue)
-                pen_w5 = qt.QPen(qt.QColor(59, 130, 246), 2, qt.Qt.DashLine)
-                painter.setPen(pen_w5)
-                painter.drawLine(60, 90, 140, 90)
-
-                # Nerve / canal circle (red)
-                pen_nerve = qt.QPen(qt.QColor(239, 68, 68), 2)
-                painter.setPen(pen_nerve)
-                painter.drawEllipse(90, 175, 20, 20)
-
-                painter.end()
-
             results.append(
                 {
-                    "offset_mm": off,
+                    "offset_mm": float(arc_mm - center_arc),
                     "height_mm": h_str,
                     "w_crest_mm": w0_str,
-                    "w_3mm": w3_str,
-                    "w_5mm": w5_str,
-                    "pixmap": pix,
+                    "w_3mm": f"{w3:.1f}" if w3 is not None else "N/A",
+                    "w_5mm": f"{w5:.1f}" if w5 is not None else "N/A",
+                    "image_data_uri": data_uri,
+                    "pixmap": None,
+                    "measurable": meas is not None,
                 }
             )
         return results
@@ -4797,6 +4807,73 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     def _capture_slice_screenshot_base64(slice_name: str) -> Optional[str]:
         """B21: Capture slice view via `vtkWindowToImageFilter` on `renderWindow()`."""
         return capture_slice_view_png_base64(slice_name)
+
+    def capture_3d_view_png_base64(self, view_index: int = 0) -> Optional[str]:
+        """Capture the real 3D view (view index 0) as a PNG data URI."""
+        if slicer is None:
+            return None
+        try:
+            layout = slicer.app.layoutManager()
+            three_d_widget = layout.threeDWidget(int(view_index)) if layout else None
+            view = three_d_widget.threeDView() if three_d_widget else None
+            render_window = view.renderWindow() if view is not None else None
+            if render_window is None:
+                logger.error("No 3D view is available for VR capture")
+                return None
+            view.forceRender()
+            import vtk
+
+            window_to_image = vtk.vtkWindowToImageFilter()
+            window_to_image.SetInput(render_window)
+            window_to_image.SetScale(1)
+            window_to_image.ReadFrontBufferOff()
+            window_to_image.Update()
+            writer = vtk.vtkPNGWriter()
+            writer.SetWriteToMemory(True)
+            writer.SetInputConnection(window_to_image.GetOutputPort())
+            writer.Write()
+            data = bytes(writer.GetResult())
+            if not data:
+                return None
+            import base64 as _b64
+
+            return "data:image/png;base64," + _b64.b64encode(data).decode("ascii")
+        except Exception:
+            logger.exception("3D VR capture failed")
+            return None
+
+    @contextlib.contextmanager
+    def quadrant_vr_isolation(self, segmentationNode: Any, fdis: Sequence[int]):
+        """Temporarily show only the selected quadrant's teeth, its jaw and the canal."""
+        if segmentationNode is None or slicer is None:
+            yield
+            return
+        segmentation = segmentationNode.GetSegmentation()
+        quadrants = {int(str(fdi)[0]) for fdi in fdis}
+        previous: Dict[str, bool] = {}
+        try:
+            for index in range(segmentation.GetNumberOfSegments()):
+                segment = segmentation.GetNthSegment(index)
+                segment_id = segmentation.GetNthSegmentID(index)
+                previous[segment_id] = bool(segment.GetSegmentVisibility())
+                tag = segment.GetTag("CBCTPlanner.FDI") if hasattr(segment, "GetTag") else None
+                if tag is None:
+                    tag = segment.GetTag("FDI") if hasattr(segment, "GetTag") else None
+                fdi = int(tag) if tag and str(tag).isdigit() else None
+                keep = False
+                if fdi is not None:
+                    keep = int(str(fdi)[0]) in quadrants
+                else:
+                    name = (segment.GetName() or "").lower()
+                    keep = any(word in name for word in ("jaw", "canal", "nerve", "mandible", "maxilla"))
+                segmentationNode.SetSegmentVisibility(segment_id, keep)
+            yield
+        finally:
+            for segment_id, visible in previous.items():
+                try:
+                    segmentationNode.SetSegmentVisibility(segment_id, visible)
+                except Exception:
+                    logger.exception("Could not restore segment visibility for %s", segment_id)
 
     @staticmethod
     def export_treatment_plan_files(plan_data: Sequence[Dict[str, Any]], out_dir: Path) -> Tuple[Path, Path]:

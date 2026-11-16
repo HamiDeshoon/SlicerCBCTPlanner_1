@@ -747,53 +747,127 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertEqual(CrossSectionNavigator.clamp_tilt_deg(-60.0), -30.0)
 
     def test_8x10_print_layout_engine_generation(self) -> None:
-        """Verify 8x10-inch clinical print layout engine produces valid HTML, PDF, and slice series."""
-        from CBCTPlannerLib.PrintLayoutEngine import (
-            PrintLayoutEngine,
-            render_annotated_cross_section_slice,
-        )
+        """Verify genuine 8x10 pages: real slice count, PDF media box, explicit unavailable tiles."""
+        import types
 
-        # 1. Test slice rendering with measurements
-        uri, pix = render_annotated_cross_section_slice(
-            img_2d_hu=None,
-            meas=None,
-            slice_idx=1,
-            total_slices=15,
-            offset_mm=-5.25,
-            fdi=46,
-            is_mandible=True,
-        )
-        self.assertTrue(uri.startswith("data:image/png;base64,"))
+        from CBCTPlannerLib.PrintLayoutEngine import PrintLayoutEngine
+        from CBCTPlannerLib.core.measurements import CrossSectionData, ImplantSiteMeasurement
+        from CBCTPlannerLib.core_print_render import render_cross_section
 
-        # 2. Test full 8x10 layout generation for single tooth (15 slices)
-        engine = PrintLayoutEngine()
+        u = np.arange(-10.0, 10.01, 0.25)
+        v = np.arange(-10.0, 10.01, 0.25)
+        mask_cs = np.zeros((len(v), len(u)), dtype=np.int32)
+        mask_cs[v <= 2.0, :] = 2
+        img_cs = np.full_like(mask_cs, 900.0, dtype=np.float32)
+
+        def _cs() -> CrossSectionData:
+            return CrossSectionData(
+                u_coords=u,
+                v_coords=v,
+                mask_cs=mask_cs,
+                img_cs=img_cs,
+                frame=(
+                    np.zeros(3),
+                    np.array([0.0, 1.0, 0.0]),
+                    np.array([1.0, 0.0, 0.0]),
+                    np.array([0.0, 0.0, 1.0]),
+                ),
+                crest_v=2.0,
+                width_segments={0.0: (-3.0, 3.0), 3.0: (-2.8, 2.8), 5.0: (-2.5, 2.5)},
+                canal_centroid_uv=(0.0, -4.0),
+            )
+
+        def _meas(fdi="46") -> ImplantSiteMeasurement:
+            return ImplantSiteMeasurement(
+                tooth_fdi=fdi,
+                bone_height_mm=12.0,
+                bone_width_at_depths_mm={0.0: 6.0, 3.0: 5.6, 5.0: 5.0},
+                crest_width_mm=6.0,
+                mid_root_width_mm=5.8,
+                apical_width_mm=4.5,
+                mesiodistal_space_mm=11.0,
+                mean_density_hu=550.0,
+                misch_density_class="D2",
+                distance_to_vital_structure_mm=8.0,
+                vital_structure_name="Inferior Alveolar Canal",
+                safety_margin_mm=2.0,
+                suggested_diameter_mm=4.1,
+                suggested_length_mm=10.0,
+                suggested_angulation_deg=0.0,
+            )
+
+        meas = _meas()
+
+        render = render_cross_section(_cs(), meas, scale=2)
+        self.assertTrue(render.available)
+        width = (len(u) - 1) * 2
+        expected_x = (-3.0 - u[0]) / (u[-1] - u[0]) * width
+        crest_line = next(
+            line for line in render.overlay_px if line[0][1] == line[1][1] and line[0][0] < line[1][0]
+        )
+        self.assertLessEqual(abs(crest_line[0][0] - 0.0), 1.5)
+        self.assertAlmostEqual(crest_line[1][0], width, delta=1.5)
+        w0_line = render.overlay_px[-3]
+        self.assertLessEqual(abs(w0_line[0][0] - expected_x), 1.0)
+
+        class _Arch:
+            total_arc_length = 120.0
+
+            def find_closest_parameter(self, _point):
+                return 0.5, 0.0
+
+        class _Engine:
+            def _arch_for_fdi(self, _fdi):
+                return _Arch()
+
+            def get_site_center_ras(self, _fdi):
+                return np.array([20.0, 0.0, 0.0])
+
+            def measure_at_arc_mm(self, _jaw, _arc, fdi_hint=None):
+                return _meas(str(fdi_hint or "46")), _cs()
+
+        fake_logic = types.SimpleNamespace(
+            _get_or_build_measurement_engine=lambda *_args, **_kwargs: _Engine(),
+        )
+        engine = PrintLayoutEngine(logic=fake_logic)
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             html_p, pdf_p, slices_15 = engine.generate_8x10_layout(
-                volumeNode=None,
-                selected_fdis=[46],
-                quadrant=4,
-                out_dir=td_path,
+                volumeNode=None, selected_fdis=[46], quadrant=4, out_dir=td_path
             )
             self.assertEqual(len(slices_15), 15)
             self.assertTrue(html_p.exists())
             self.assertTrue(pdf_p.exists())
             html_txt = html_p.read_text(encoding="utf-8")
-            self.assertIn("8×10″ CBCT Dental Reformat Layout", html_txt)
             self.assertIn("size: 8in 10in", html_txt)
             self.assertIn("Quadrant 4", html_txt)
             self.assertIn("Panoramic View", html_txt)
-            self.assertIn("3D Anatomical Volume Rendering", html_txt)
+            self.assertNotIn("simulated", html_txt.lower())
+            pdf_bytes = pdf_p.read_bytes()
+            self.assertTrue(pdf_bytes.startswith(b"%PDF"))
+            import re
 
-            # 3. Test full quadrant layout (27 slices)
-            q4_teeth = [48, 47, 46, 45, 44, 43, 42, 41]
+            media_box = re.search(rb"/MediaBox \[\s*0\s+0\s+([0-9.]+)\s+([0-9.]+)\s*\]", pdf_bytes)
+            self.assertIsNotNone(media_box)
+            self.assertAlmostEqual(float(media_box.group(1)), 576.0, delta=1.0)
+            self.assertAlmostEqual(float(media_box.group(2)), 720.0, delta=1.0)
+
             _, _, slices_27 = engine.generate_8x10_layout(
                 volumeNode=None,
-                selected_fdis=q4_teeth,
+                selected_fdis=[48, 47, 46, 45, 44, 43, 42, 41],
                 quadrant=4,
                 out_dir=td_path,
             )
             self.assertEqual(len(slices_27), 27)
+
+            _, pdf_multi, slices_multi = engine.generate_8x10_layout(
+                volumeNode=None,
+                selected_fdis=[11, 46],
+                quadrant=None,
+                out_dir=td_path,
+            )
+            self.assertEqual(len(slices_multi), 30)
+            self.assertGreaterEqual(pdf_multi.read_bytes().count(b"/Type /Page"), 2)
 
 
 if __name__ == "__main__":

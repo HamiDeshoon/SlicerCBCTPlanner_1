@@ -43,6 +43,7 @@ except ImportError:
     ImageFont = None
 
 from .core.measurements import ImplantSiteMeasurement
+from .core_print_render import render_cross_section, render_panoramic_strip
 
 logger = logging.getLogger(__name__)
 
@@ -81,211 +82,63 @@ def render_annotated_cross_section_slice(
     width_px: int = 240,
     height_px: int = 300,
 ) -> Tuple[str, Any]:
-    """Render a cross-sectional CT slice image with overlaid bone height and width measurement lines.
+    """Legacy entry point: render from an image-only slice.
 
-    Returns:
-        (image_data_uri, qt_pixmap)
+    Geometry overlays require `CrossSectionData`; this shim delegates to the
+    real renderer with an unknown-millimetre grid so no fake lines are drawn.
+    New code should call `render_cross_section` with measured data.
     """
-    # 1. Prepare base image from CT HU intensities or dark medical canvas
-    if img_2d_hu is not None and img_2d_hu.size > 0:
-        # Standard dental bone window: Level = 350 HU, Width = 2000 HU (range [-650, 1350])
-        hu_norm = np.clip((img_2d_hu - (-650.0)) / 2000.0 * 255.0, 0, 255).astype(np.uint8)
-        # Flip vertically so superior is up
-        hu_norm = np.ascontiguousarray(np.flipud(hu_norm))
-        if Image is not None:
-            base_pil = Image.fromarray(hu_norm, mode="L").convert("RGB")
-            base_pil = base_pil.resize((width_px, height_px), Image.Resampling.BILINEAR)
-        else:
-            base_pil = None
-    else:
-        base_pil = None
+    if Image is None or img_2d_hu is None or np.asarray(img_2d_hu).size == 0:
+        return _unavailable_data_uri("Cross-section"), None
+    from .core.measurements import CrossSectionData
+    from .core_print_render import render_cross_section
 
-    h_val = meas.bone_height_mm if (meas and meas.bone_height_mm is not None) else None
-    w0_val = meas.crest_width_mm if (meas and meas.crest_width_mm is not None) else None
-    w3_val = meas.bone_width_at_depths_mm.get(3.0) if (meas and meas.bone_width_at_depths_mm) else None
-    w5_val = meas.bone_width_at_depths_mm.get(5.0) if (meas and meas.bone_width_at_depths_mm) else None
-
-    # Use Qt rendering if available
-    pix = None
-    if qt is not None:
-        pix = qt.QPixmap(width_px, height_px)
-        if base_pil is not None:
-            # Load raw RGB into QImage
-            raw_bytes = base_pil.tobytes("raw", "RGB")
-            qimg = qt.QImage(raw_bytes, width_px, height_px, width_px * 3, qt.QImage.Format_RGB888)
-            pix = qt.QPixmap.fromImage(qimg)
-        else:
-            pix.fill(qt.QColor(15, 23, 42))  # Slate dark
-
-        painter = qt.QPainter(pix)
-        painter.setRenderHint(qt.QPainter.Antialiasing)
-
-        # Draw coordinate scale / boundary frame
-        pen_border = qt.QPen(qt.QColor(51, 65, 85), 1)
-        painter.setPen(pen_border)
-        painter.drawRect(0, 0, width_px - 1, height_px - 1)
-
-        # Coordinate references
-        cx = width_px // 2
-        cy_top = int(height_px * 0.22)
-        cy_bot = int(height_px * 0.82)
-        h_draw = cy_bot - cy_top
-
-        # If synthetic preview (no CT array), draw bone contour
-        if img_2d_hu is None:
-            pen_bone = qt.QPen(qt.QColor(148, 163, 184), 2)
-            painter.setPen(pen_bone)
-            painter.drawRoundedRect(int(cx - 50), cy_top, 100, h_draw, 10, 10)
-
-        # 1. Height line (Green)
-        pen_h = qt.QPen(qt.QColor(34, 197, 94), 2)
-        painter.setPen(pen_h)
-        painter.drawLine(cx, cy_top, cx, cy_bot)
-        # End ticks
-        painter.drawLine(cx - 5, cy_top, cx + 5, cy_top)
-        painter.drawLine(cx - 5, cy_bot, cx + 5, cy_bot)
-
-        # 2. Crestal width line (Yellow)
-        w0_half = 40
-        pen_w0 = qt.QPen(qt.QColor(234, 179, 8), 2)
-        painter.setPen(pen_w0)
-        painter.drawLine(cx - w0_half, cy_top, cx + w0_half, cy_top)
-
-        # 3. Width @ 3mm (Cyan dashed)
-        y_3mm = cy_top + int(h_draw * 0.20)
-        pen_w3 = qt.QPen(qt.QColor(6, 182, 212), 2, qt.Qt.DashLine)
-        painter.setPen(pen_w3)
-        painter.drawLine(cx - 45, y_3mm, cx + 45, y_3mm)
-
-        # 4. Width @ 5mm (Blue dashed)
-        y_5mm = cy_top + int(h_draw * 0.35)
-        pen_w5 = qt.QPen(qt.QColor(59, 130, 246), 2, qt.Qt.DashLine)
-        painter.setPen(pen_w5)
-        painter.drawLine(cx - 48, y_5mm, cx + 48, y_5mm)
-
-        # 5. Nerve canal safety zone (Red circle for mandibular teeth)
-        if is_mandible:
-            pen_nerve = qt.QPen(qt.QColor(239, 68, 68), 2)
-            painter.setPen(pen_nerve)
-            painter.setBrush(qt.QColor(239, 68, 68, 60))
-            painter.drawEllipse(cx - 12, cy_bot - 12, 24, 24)
-            painter.setBrush(qt.Qt.NoBrush)
-
-        # Overlaid text badges
-        # Top banner: Slice info
-        painter.fillRect(0, 0, width_px, 26, qt.QColor(15, 23, 42, 220))
-        painter.setPen(qt.QColor(248, 250, 252))
-        f_top = qt.QFont("Arial", 9, qt.QFont.Bold)
-        painter.setFont(f_top)
-        painter.drawText(6, 18, f"#{fdi} | S{slice_idx}/{total_slices} ({offset_mm:+.1f}mm)")
-
-        # Bottom measurement summary overlay
-        painter.fillRect(0, height_px - 44, width_px, 44, qt.QColor(15, 23, 42, 230))
-        f_txt = qt.QFont("Arial", 8)
-        painter.setFont(f_txt)
-
-        # Row 1: Height & Crest Width
-        h_str = f"{h_val:.1f}" if h_val is not None else "--"
-        w0_str = f"{w0_val:.1f}" if w0_val is not None else "--"
-        painter.setPen(qt.QColor(34, 197, 94))
-        painter.drawText(6, height_px - 26, f"H: {h_str}mm")
-        painter.setPen(qt.QColor(234, 179, 8))
-        painter.drawText(int(width_px * 0.52), height_px - 26, f"W0: {w0_str}mm")
-
-        # Row 2: W3 & W5 (and canal)
-        w3_str = f"{w3_val:.1f}" if w3_val is not None else "--"
-        w5_str = f"{w5_val:.1f}" if w5_val is not None else "--"
-        painter.setPen(qt.QColor(6, 182, 212))
-        painter.drawText(6, height_px - 8, f"W3: {w3_str}")
-        painter.setPen(qt.QColor(59, 130, 246))
-        painter.drawText(int(width_px * 0.52), height_px - 8, f"W5: {w5_str}")
-        painter.end()
-
-        # Save to PNG base64
-        buf = qt.QBuffer()
-        buf.open(qt.QIODevice.ReadWrite)
-        pix.save(buf, "PNG")
-        b64 = base64.b64encode(buf.data()).decode("ascii")
-        data_uri = f"data:image/png;base64,{b64}"
-        return data_uri, pix
-
-    # PIL headless fallback
-    if base_pil is None:
-        base_pil = Image.new("RGB", (width_px, height_px), color=(15, 23, 42))
-
-    draw = ImageDraw.Draw(base_pil)
-    cx = width_px // 2
-    cy_top = int(height_px * 0.22)
-    cy_bot = int(height_px * 0.82)
-    draw.line([(cx, cy_top), (cx, cy_bot)], fill=(34, 197, 94), width=2)
-    draw.line([(cx - 40, cy_top), (cx + 40, cy_top)], fill=(234, 179, 8), width=2)
-    if is_mandible:
-        draw.ellipse([(cx - 12, cy_bot - 12), (cx + 12, cy_bot + 12)], outline=(239, 68, 68), width=2)
-
-    bio = io.BytesIO()
-    base_pil.save(bio, format="PNG")
-    b64 = base64.b64encode(bio.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{b64}", None
+    arr = np.asarray(img_2d_hu, dtype=np.float32)
+    u = np.linspace(-15.0, 15.0, arr.shape[1])
+    v = np.linspace(-25.0, 25.0, arr.shape[0])
+    cs = CrossSectionData(
+        u_coords=u,
+        v_coords=v,
+        mask_cs=np.zeros_like(arr, dtype=np.int32),
+        img_cs=arr,
+        frame=(np.zeros(3), np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), np.array([0, 0, 1.0])),
+        crest_v=None,
+        width_segments={},
+        canal_centroid_uv=None,
+    )
+    render = render_cross_section(cs, meas, scale=1)
+    if not render.available or render.image is None:
+        return _unavailable_data_uri("Cross-section"), None
+    render.image = render.image.resize((width_px, height_px))
+    return _image_to_data_uri(render.image), None
 
 
-def build_panoramic_placeholder_base64(jaw_name: str = "Mandible") -> str:
-    """Generate a high-contrast simulated panoramic reformat strip with arc scale ticks."""
-    w, h = 900, 240
+def _image_to_data_uri(image: Any) -> str:
+    if image is None:
+        return ""
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _unavailable_data_uri(text: str) -> str:
     if Image is None:
         return ""
-    img = Image.new("RGB", (w, h), color=(10, 15, 30))
-    draw = ImageDraw.Draw(img)
-
-    # Simulated dental arch curve in panoramic projection
-    pts = []
-    for x in range(0, w, 5):
-        t = (x - w / 2) / (w / 2)
-        y = int(h * 0.55 + 35 * (t**2) - 10 * math.sin(t * 3.14))
-        pts.append((x, y))
-    draw.line(pts, fill=(226, 232, 240), width=4)
-
-    # Arch ticks
-    for i in range(15):
-        tx = int(w * (0.10 + 0.80 * i / 14))
-        ty = int(h * 0.55 + 35 * (((tx - w / 2) / (w / 2)) ** 2))
-        draw.line([(tx, ty - 25), (tx, ty + 25)], fill=(234, 179, 8), width=2)
-        draw.text((tx - 6, ty + 28), f"{i + 1}", fill=(248, 250, 252))
-
-    draw.text((20, 15), f"Panoramic Reformat — {jaw_name.capitalize()} Arch", fill=(248, 250, 252))
-    bio = io.BytesIO()
-    img.save(bio, format="PNG")
-    b64 = base64.b64encode(bio.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{b64}"
+    image = Image.new("RGB", (640, 400), (15, 23, 42))
+    draw = ImageDraw.Draw(image)
+    draw.text((20, 190), f"{text} unavailable", fill=(255, 255, 255), font=ImageFont.load_default())
+    return _image_to_data_uri(image)
 
 
-def build_quadrant_vr_placeholder_base64(quadrant: int = 4) -> str:
-    """Generate a clean 3D volume rendering preview isolating the quadrant classes."""
-    w, h = 480, 360
-    if Image is None:
-        return ""
-    img = Image.new("RGB", (w, h), color=(15, 23, 42))
-    draw = ImageDraw.Draw(img)
-
-    # Simulated 3D quadrant view
-    q_name = f"Quadrant {quadrant}"
-    draw.rectangle([10, 10, w - 10, h - 10], outline=(71, 85, 105), width=2)
-    draw.text((25, 25), f"3D Volume Rendering (VR) — {q_name}", fill=(248, 250, 252))
-    draw.text((25, 45), "Classes: Jawbone, Quadrant Teeth & Inferior Alveolar Canal", fill=(148, 163, 184))
-
-    # Draw simulated jaw angle and teeth
-    draw.arc([50, 100, w - 50, h + 80], 190, 350, fill=(203, 213, 225), width=18)
-    draw.arc([60, 115, w - 60, h + 65], 195, 345, fill=(239, 68, 68), width=6)  # Canal
-
-    # Quadrant tooth markers
-    for i in range(7):
-        tx = int(w * 0.25 + i * 32)
-        ty = int(h * 0.48 - (i - 3) ** 2 * 3)
-        draw.ellipse([tx - 10, ty - 14, tx + 10, ty + 14], fill=(241, 245, 249), outline=(148, 163, 184))
-
-    bio = io.BytesIO()
-    img.save(bio, format="PNG")
-    b64 = base64.b64encode(bio.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{b64}"
+def _data_uri_to_image(uri: str) -> Optional[Any]:
+    if not uri or Image is None or "," not in uri:
+        return None
+    try:
+        raw = base64.b64decode(uri.split(",", 1)[1])
+        return Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception:
+        logger.exception("Could not decode layout image")
+        return None
 
 
 class PrintLayoutEngine:
@@ -307,143 +160,293 @@ class PrintLayoutEngine:
         pano_b64: Optional[str] = None,
         vr_b64: Optional[str] = None,
     ) -> Tuple[Path, Path, List[CrossSectionSliceSpec]]:
-        """Generate high-resolution 8x10 inch HTML and PDF clinical reports."""
+        """Generate genuine 8x10 inch film pages (HTML view + vector-free PDF)."""
+        from .core.labels import sort_teeth_anatomically
+        from .core.print_layout import slice_count_for_selection
+
         out_path = Path(out_dir or (slicer.app.temporaryPath if slicer else "."))
         out_path.mkdir(parents=True, exist_ok=True)
 
-        # 1. Resolve selected teeth and quadrant
-        fdis = list(selected_fdis or [])
+        fdis = sort_teeth_anatomically(list(selected_fdis or []))
         if not fdis:
-            fdis = [46]  # Clinical default: First mandibular molar
-
+            raise ValueError("Select at least one tooth before generating the 8x10 layout")
         if quadrant is None:
-            quadrant = int(str(fdis[0])[0]) if fdis else 4
+            quadrant = int(str(fdis[0])[0])
 
-        # Determine slice count: 15 for single tooth, 21 for 2-3 teeth, 27 for full quadrant (4+ teeth)
-        if len(fdis) == 1:
-            num_slices = 15
-            step_mm = 0.75
-        elif len(fdis) <= 3:
-            num_slices = 21
-            step_mm = 0.85
-        else:
-            num_slices = 27
-            step_mm = 1.00
-
-        is_mandible = quadrant in (3, 4)
-        jaw_label = "Mandible" if is_mandible else "Maxilla"
-
-        # 2. Resample cross-sectional series using MeasurementEngine
         engine = None
-        if self.logic is not None and hasattr(self.logic, "_get_or_build_measurement_engine") and volumeNode:
+        if self.logic is not None and hasattr(self.logic, "_get_or_build_measurement_engine"):
             engine = self.logic._get_or_build_measurement_engine(volumeNode, segmentationNode)
+        if engine is None:
+            raise RuntimeError("A measurement engine is required to generate the 8x10 layout")
 
-        slices_data: List[CrossSectionSliceSpec] = []
-        half_span = (float(num_slices) - 1.0) / 2.0
-        primary_fdi = fdis[len(fdis) // 2]
+        groups: List[Tuple[int, List[int]]] = []
+        for q in (1, 2, 3, 4):
+            q_fdis = [fdi for fdi in fdis if int(str(fdi)[0]) == q]
+            if q_fdis:
+                groups.append((q, q_fdis))
 
-        for s_idx in range(num_slices):
-            off = (s_idx - half_span) * float(step_mm)
-            # Pick closest FDI in span
-            target_fdi = primary_fdi
-            if len(fdis) > 1:
-                f_idx = min(len(fdis) - 1, max(0, int(round((s_idx / (num_slices - 1)) * (len(fdis) - 1)))))
-                target_fdi = fdis[f_idx]
+        all_specs: List[CrossSectionSliceSpec] = []
+        page_records: List[dict] = []
+        for q, q_fdis in groups:
+            is_mandible = q in (3, 4)
+            jaw_label = "Mandible" if is_mandible else "Maxilla"
+            n_slices, step_mm = slice_count_for_selection(len(q_fdis))
+            arcs = self._tooth_arcs(engine, q_fdis)
+            if not arcs:
+                raise RuntimeError(f"No arch positions for quadrant {q}; fit the arch first")
+            center_arc = float(np.mean(list(arcs.values())))
+            if len(q_fdis) <= 3:
+                arc_values = center_arc + (np.arange(n_slices) - (n_slices - 1) / 2.0) * step_mm
+            else:
+                first_arc = min(arcs.values())
+                last_arc = max(arcs.values())
+                arc_values = np.linspace(first_arc - 2.0, last_arc + 2.0, n_slices)
 
-            meas = None
-            img_2d = None
-            if engine is not None:
+            specs: List[CrossSectionSliceSpec] = []
+            for s_idx, arc_mm in enumerate(arc_values):
+                target_fdi = min(q_fdis, key=lambda fdi: abs(arcs.get(fdi, 0.0) - arc_mm))
+                meas = None
+                cs = None
                 try:
-                    meas = engine.measure_implant_site(str(target_fdi), offset_mm=off)
+                    meas, cs = engine.measure_at_arc_mm(jaw_label, float(arc_mm), fdi_hint=str(target_fdi))
                 except Exception:
                     logger.exception(
-                        "Cross-section measurement failed for FDI %s at %+.2f mm", target_fdi, off
+                        "Cross-section measurement failed at %.2f mm (FDI %s)", arc_mm, target_fdi
                     )
-                    meas = None
-                try:
-                    center_ras = engine.get_site_center_ras(str(target_fdi), offset_mm=off)
-                    if center_ras is not None:
-                        _, _, _, img_2d, _, _, _ = engine._resample_arch_cross_section(
-                            center_ras,
-                            is_mandible=is_mandible,
-                        )
-                except Exception:
-                    logger.exception(
-                        "Cross-section resampling failed for FDI %s at %+.2f mm", target_fdi, off
+                if cs is not None:
+                    render = render_cross_section(cs, meas, scale=2)
+                    data_uri = (
+                        _image_to_data_uri(render.image)
+                        if render.available and render.image is not None
+                        else _unavailable_data_uri("Cross-section")
                     )
+                else:
+                    data_uri = _unavailable_data_uri("Cross-section")
 
-            data_uri, pix = render_annotated_cross_section_slice(
-                img_2d_hu=img_2d,
-                meas=meas,
-                slice_idx=s_idx + 1,
-                total_slices=num_slices,
-                offset_mm=off,
-                fdi=target_fdi,
-                is_mandible=is_mandible,
+                spec = CrossSectionSliceSpec(
+                    slice_index=s_idx + 1,
+                    total_slices=n_slices,
+                    offset_mm=float(arc_mm - center_arc),
+                    fdi=target_fdi,
+                    height_mm=meas.bone_height_mm if meas else None,
+                    crest_width_mm=meas.crest_width_mm if meas else None,
+                    width_3mm=meas.bone_width_at_depths_mm.get(3.0)
+                    if (meas and meas.bone_width_at_depths_mm)
+                    else None,
+                    width_5mm=meas.bone_width_at_depths_mm.get(5.0)
+                    if (meas and meas.bone_width_at_depths_mm)
+                    else None,
+                    nerve_dist_mm=meas.distance_to_vital_structure_mm if meas else None,
+                    is_mandible=is_mandible,
+                    image_data_uri=data_uri,
+                    pixmap=None,
+                )
+                specs.append(spec)
+                all_specs.append(spec)
+
+            pano_uri = pano_b64 or self._pano_strip_uri(arc_values, [s.fdi for s in specs])
+            if not pano_uri:
+                pano_uri = _unavailable_data_uri("Panoramic")
+            page_records.append(
+                {
+                    "quadrant": q,
+                    "fdis": q_fdis,
+                    "jaw_label": jaw_label,
+                    "slices": specs,
+                    "pano_b64": pano_uri,
+                    "vr_b64": vr_b64 or self._vr_capture() or _unavailable_data_uri("VR"),
+                }
             )
 
-            spec = CrossSectionSliceSpec(
-                slice_index=s_idx + 1,
-                total_slices=num_slices,
-                offset_mm=off,
-                fdi=target_fdi,
-                height_mm=meas.bone_height_mm if (meas and meas.bone_height_mm is not None) else None,
-                crest_width_mm=meas.crest_width_mm if (meas and meas.crest_width_mm is not None) else None,
-                width_3mm=meas.bone_width_at_depths_mm.get(3.0)
-                if (meas and meas.bone_width_at_depths_mm)
-                else None,
-                width_5mm=meas.bone_width_at_depths_mm.get(5.0)
-                if (meas and meas.bone_width_at_depths_mm)
-                else None,
-                nerve_dist_mm=(
-                    meas.distance_to_vital_structure_mm
-                    if (meas and meas.distance_to_vital_structure_mm is not None)
-                    else None
-                ),
-                is_mandible=is_mandible,
-                image_data_uri=data_uri,
-                pixmap=pix,
+        # HTML browser view: one section per quadrant with a page break.
+        html_pages = [
+            self._build_8x10_html(
+                slices=rec["slices"],
+                pano_b64=rec["pano_b64"],
+                vr_b64=rec["vr_b64"],
+                quadrant=rec["quadrant"],
+                jaw_label=rec["jaw_label"],
+                fdis=rec["fdis"],
+                patient_name=patient_name if include_metadata else "Anonymous",
+                patient_id=patient_id if include_metadata else "Anonymous",
             )
-            slices_data.append(spec)
+            for rec in page_records
+        ]
+        html_content = self._combine_html_pages(html_pages)
 
-        # 3. Capture panoramic and VR images if not provided
-        if not pano_b64:
-            if self.logic and hasattr(self.logic, "_capture_slice_screenshot_base64"):
-                pano_b64 = self.logic._capture_slice_screenshot_base64("Green")
-            if not pano_b64:
-                pano_b64 = build_panoramic_placeholder_base64(jaw_label)
-
-        if not vr_b64:
-            if self.logic and hasattr(self.logic, "_capture_slice_screenshot_base64"):
-                vr_b64 = self.logic._capture_slice_screenshot_base64("3D")
-            if not vr_b64:
-                vr_b64 = build_quadrant_vr_placeholder_base64(quadrant)
-
-        # 4. Generate 8x10 HTML document
-        html_content = self._build_8x10_html(
-            slices=slices_data,
-            pano_b64=pano_b64,
-            vr_b64=vr_b64,
-            quadrant=quadrant,
-            jaw_label=jaw_label,
-            fdis=fdis,
-            patient_name=patient_name if include_metadata else "Anonymous",
-            patient_id=patient_id if include_metadata else "Anonymous",
-        )
+        pages: List[Any] = []
+        for index, rec in enumerate(page_records):
+            page = self._compose_page_image(
+                rec,
+                patient_name=patient_name if include_metadata else "Anonymous",
+                page_number=index + 1,
+                total_pages=len(page_records),
+            )
+            if page is not None:
+                pages.append(page)
 
         vol_name = volumeNode.GetName() if (volumeNode and hasattr(volumeNode, "GetName")) else "CBCT"
-        clean_name = "".join(c if c.isalnum() else "_" for c in vol_name)
+        clean_name = "".join(c if c.isalnum() else "_" for c in vol_name) or "CBCT"
         html_file = out_path / f"{clean_name}_8x10_Print_Layout.html"
         pdf_file = out_path / f"{clean_name}_8x10_Print_Layout.pdf"
-
         html_file.write_text(html_content, encoding="utf-8")
 
-        # 5. Export to PDF
-        from .AdvancedTools import export_html_to_pdf
+        if not pages:
+            raise RuntimeError("PDF layout requires Qt or Pillow")
+        pages[0].save(
+            pdf_file,
+            "PDF",
+            resolution=300.0,
+            save_all=True,
+            append_images=pages[1:],
+        )
+        return html_file, pdf_file, all_specs
 
-        export_html_to_pdf(html_content, pdf_file)
+    @staticmethod
+    def _tooth_arcs(engine: Any, fdis: Sequence[int]) -> dict:
+        arcs = {}
+        for fdi in fdis:
+            try:
+                center = engine.get_site_center_ras(str(fdi))
+                arch = engine._arch_for_fdi(str(fdi))
+                if center is None or arch is None:
+                    continue
+                t_param, _ = arch.find_closest_parameter(center)
+                arcs[int(fdi)] = float(t_param) * float(arch.total_arc_length)
+            except Exception:
+                logger.exception("Could not resolve the arch position of FDI %s", fdi)
+        return arcs
 
-        return html_file, pdf_file, slices_data
+    def _pano_strip_uri(self, arcs: Sequence[float], labels: Sequence[int]) -> Optional[str]:
+        if self.logic is None or slicer is None:
+            return None
+        try:
+            pNode = self.logic.getParameterNode()
+            panoNode = pNode.GetNodeReference("PanoramicVolume") if pNode else None
+            if not panoNode:
+                return None
+            arr = slicer.util.arrayFromVolume(panoNode)
+            spacing = float(pNode.GetParameter("PanoSpacingMm") or 0.5) if pNode else 0.5
+            render = render_panoramic_strip(
+                arr,
+                column_spacing_mm=max(1e-3, spacing),
+                tick_arcs_mm=arcs,
+                labels=[str(label) for label in labels],
+                strip_height=340,
+                scale=2,
+            )
+            return _image_to_data_uri(render.image) if render.available else None
+        except Exception:
+            logger.exception("Panoramic strip rendering failed")
+            return None
+
+    def _vr_capture(self) -> Optional[str]:
+        if self.logic is None:
+            return None
+        capture = getattr(self.logic, "capture_3d_view_png_base64", None)
+        if capture is None:
+            return None
+        try:
+            return capture(view_index=0)
+        except Exception:
+            logger.exception("3D VR capture failed")
+            return None
+
+    @staticmethod
+    def _combine_html_pages(pages: List[str]) -> str:
+        if not pages:
+            return ""
+        first = pages[0]
+        bodies = []
+        for page in pages:
+            if "<body>" in page and "</body>" in page:
+                bodies.append(page.split("<body>", 1)[1].rsplit("</body>", 1)[0])
+            else:
+                bodies.append(page)
+        joined = '<div style="page-break-after: always;">' + bodies[0] + "</div>"
+        for body in bodies[1:]:
+            joined += '<div style="page-break-before: always;">' + body + "</div>"
+        return first.replace(
+            first.split("<body>", 1)[1].rsplit("</body>", 1)[0] if "<body>" in first else first,
+            joined,
+            1,
+        )
+
+    def _compose_page_image(
+        self, record: dict, *, patient_name: str, page_number: int, total_pages: int
+    ) -> Optional[Any]:
+        if Image is None:
+            return None
+        page_w, page_h = 2400, 3000
+        page = Image.new("RGB", (page_w, page_h), (255, 255, 255))
+        draw = ImageDraw.Draw(page)
+        font = ImageFont.load_default()
+        margin = 75
+
+        draw.text((margin, 40), "CBCT Dental Planner — 8x10 clinical film", fill=(20, 20, 20), font=font)
+        draw.text(
+            (margin, 70),
+            f"Quadrant {record['quadrant']} ({record['jaw_label']})  Teeth: "
+            + ", ".join(f"#{fdi}" for fdi in record["fdis"])
+            + f"  Patient: {patient_name}",
+            fill=(60, 60, 60),
+            font=font,
+        )
+
+        pano = _data_uri_to_image(record["pano_b64"])
+        if pano is not None:
+            pano_h = 360
+            pano_w = page_w - 2 * margin
+            page.paste(pano.resize((pano_w, pano_h), Image.BILINEAR), (margin, 105))
+
+        specs: List[CrossSectionSliceSpec] = record["slices"]
+        cols = 5 if len(specs) <= 15 else (7 if len(specs) <= 21 else 9)
+        rows = int(math.ceil(len(specs) / cols))
+        grid_top = 500
+        footer_top = 2700
+        key_h = 260
+        grid_bottom = footer_top - key_h - 20
+        gap = 10
+        cell_w = (page_w - 2 * margin - (cols - 1) * gap) // cols
+        cell_h = (grid_bottom - grid_top - (rows - 1) * gap) // max(1, rows)
+        frame_h = min(cell_h, int(cell_w * 1.25))
+
+        for idx, spec in enumerate(specs):
+            row, col = divmod(idx, cols)
+            x = margin + col * (cell_w + gap)
+            y = grid_top + row * (cell_h + gap)
+            image = _data_uri_to_image(spec.image_data_uri)
+            if image is not None:
+                thumb_h = frame_h - 18
+                page.paste(image.resize((cell_w, thumb_h), Image.BILINEAR), (x, y))
+            label = (
+                f"#{spec.fdi} S{spec.slice_index}/{spec.total_slices} "
+                f"{spec.offset_mm:+.1f}mm H {spec.height_mm if spec.height_mm is not None else '--'}"
+            )
+            draw.text((x + 2, y + frame_h - 16), label, fill=(0, 0, 0), font=font)
+
+        vr = _data_uri_to_image(record["vr_b64"])
+        key_top = footer_top - key_h
+        if vr is not None:
+            vr_w = 800
+            page.paste(vr.resize((vr_w, key_h), Image.BILINEAR), (page_w - margin - vr_w, key_top))
+        draw.text((margin, key_top + 10), "Measurement key", fill=(0, 0, 0), font=font)
+        draw.text((margin, key_top + 32), "H  bone height (mm)", fill=(0, 0, 0), font=font)
+        draw.text((margin, key_top + 54), "W0 crest width / W3 / W5 depth widths", fill=(0, 0, 0), font=font)
+        draw.text(
+            (margin, key_top + 76),
+            "Nerve clearance is shown only when a canal/sinus is segmented",
+            fill=(0, 0, 0),
+            font=font,
+        )
+        draw.text((margin, footer_top + 20), CLINICAL_DISCLAIMER_TEXT, fill=(90, 90, 90), font=font)
+        draw.text(
+            (page_w - margin - 120, footer_top + 60),
+            f"Page {page_number}/{total_pages}",
+            fill=(90, 90, 90),
+            font=font,
+        )
+        return page
 
     def _build_8x10_html(
         self,
