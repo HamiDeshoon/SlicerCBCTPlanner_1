@@ -718,6 +718,55 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertEqual(CrossSectionNavigator.clamp_tilt_deg(45.0), 30.0)
         self.assertEqual(CrossSectionNavigator.clamp_tilt_deg(-60.0), -30.0)
 
+    def test_8x10_print_layout_engine_generation(self) -> None:
+        """Verify 8x10-inch clinical print layout engine produces valid HTML, PDF, and slice series."""
+        from CBCTPlannerLib.PrintLayoutEngine import (
+            PrintLayoutEngine,
+            render_annotated_cross_section_slice,
+        )
+
+        # 1. Test slice rendering with measurements
+        uri, pix = render_annotated_cross_section_slice(
+            img_2d_hu=None,
+            meas=None,
+            slice_idx=1,
+            total_slices=15,
+            offset_mm=-5.25,
+            fdi=46,
+            is_mandible=True,
+        )
+        self.assertTrue(uri.startswith("data:image/png;base64,"))
+
+        # 2. Test full 8x10 layout generation for single tooth (15 slices)
+        engine = PrintLayoutEngine()
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            html_p, pdf_p, slices_15 = engine.generate_8x10_layout(
+                volumeNode=None,
+                selected_fdis=[46],
+                quadrant=4,
+                out_dir=td_path,
+            )
+            self.assertEqual(len(slices_15), 15)
+            self.assertTrue(html_p.exists())
+            self.assertTrue(pdf_p.exists())
+            html_txt = html_p.read_text(encoding="utf-8")
+            self.assertIn("8×10″ CBCT Dental Reformat Layout", html_txt)
+            self.assertIn("size: 8in 10in", html_txt)
+            self.assertIn("Quadrant 4", html_txt)
+            self.assertIn("Panoramic View", html_txt)
+            self.assertIn("3D Anatomical Volume Rendering", html_txt)
+
+            # 3. Test full quadrant layout (27 slices)
+            q4_teeth = [48, 47, 46, 45, 44, 43, 42, 41]
+            _, _, slices_27 = engine.generate_8x10_layout(
+                volumeNode=None,
+                selected_fdis=q4_teeth,
+                quadrant=4,
+                out_dir=td_path,
+            )
+            self.assertEqual(len(slices_27), 27)
+
 
 if __name__ == "__main__":
     unittest.main()

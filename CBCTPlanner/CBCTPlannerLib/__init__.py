@@ -43,6 +43,11 @@ from .ImplantPlanner import (
     PlacedImplant,
 )
 from .PanoramicCurveLogic import PanoramicCurveLogic
+from .PrintLayoutEngine import (
+    CrossSectionSliceSpec,
+    PrintLayoutEngine,
+    render_annotated_cross_section_slice,
+)
 from .Phase7Tools import (
     CEPHALOMETRIC_NORMS,
     CephalometricMeasurement,
@@ -106,6 +111,9 @@ __all__ = [
     "ImplantLibraryEntry",
     "ImplantPlannerLogic",
     "PanoramicCurveLogic",
+    "PrintLayoutEngine",
+    "CrossSectionSliceSpec",
+    "render_annotated_cross_section_slice",
     "PlacedImplant",
     "PrinterPreset",
     "ProstheticPlanner",

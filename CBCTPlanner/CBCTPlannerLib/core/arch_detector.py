@@ -483,10 +483,14 @@ def fit_dental_arch_from_points(
             pts = pts[valid]
 
     # 3. Order points around the open horseshoe arch in the XY plane
-    y_min = float(np.percentile(pts[:, 1], 10))
+    # Ensure reference point is strictly posterior to all points by at least 25mm
+    # In RAS coordinates, +Y is Anterior (front/incisors) and -Y is Posterior (back/molars).
+    y_min = float(np.min(pts[:, 1]))
     x_mid = float(0.5 * (np.percentile(pts[:, 0], 5) + np.percentile(pts[:, 0], 95)))
-    ref_xy = np.array([x_mid, y_min - 5.0], dtype=np.float64)
+    ref_xy = np.array([x_mid, y_min - 25.0], dtype=np.float64)
 
+    # Since pts[:, 1] - ref_xy[1] >= 25.0 > 0, angles are strictly in (0, pi)
+    # Right (+X) -> Midline (X=0) -> Left (-X) corresponds to angles increasing from ~0 to ~pi
     angles = np.arctan2(pts[:, 1] - ref_xy[1], pts[:, 0] - ref_xy[0])
 
     if len(pts) <= 60:

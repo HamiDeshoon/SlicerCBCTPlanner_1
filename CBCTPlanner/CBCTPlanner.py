@@ -751,6 +751,20 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         step5Layout = qt.QVBoxLayout(self.step5ContentWidget)
         step5Outer.addWidget(self.step5ContentWidget)
 
+        # Quick Quadrant Selection Row
+        quadrantRow = qt.QHBoxLayout()
+        self.btnSelectQ1 = qt.QPushButton("Select Q1 (Upper R)")
+        self.btnSelectQ2 = qt.QPushButton("Select Q2 (Upper L)")
+        self.btnSelectQ3 = qt.QPushButton("Select Q3 (Lower L)")
+        self.btnSelectQ4 = qt.QPushButton("Select Q4 (Lower R)")
+        self.btnClearSelection = qt.QPushButton("Clear Selection")
+        quadrantRow.addWidget(self.btnSelectQ1)
+        quadrantRow.addWidget(self.btnSelectQ2)
+        quadrantRow.addWidget(self.btnSelectQ3)
+        quadrantRow.addWidget(self.btnSelectQ4)
+        quadrantRow.addWidget(self.btnClearSelection)
+        step5Layout.addLayout(quadrantRow)
+
         odontogramWidget = qt.QWidget()
         odontogramGrid = qt.QGridLayout(odontogramWidget)
         odontogramGrid.setContentsMargins(2, 2, 2, 2)
@@ -789,6 +803,28 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         odontogramGrid.addWidget(q3Label, 3, 9, 1, 8)
         step5Layout.addWidget(odontogramWidget)
 
+        # Status Label showing current selection
+        self.step5SelectionStatusLabel = qt.QLabel("Active Site: Quadrant 4 (Mandibular Right) — 15 to 27 Cross-Sectional Slices")
+        self.step5SelectionStatusLabel.setStyleSheet("font-weight: bold; color: #38bdf8; padding: 4px;")
+        step5Layout.addWidget(self.step5SelectionStatusLabel)
+
+        # Primary Action: 8x10 Print Layout Button
+        self.btnGenerate8x10PrintLayout = qt.QPushButton("🖨️ Generate 8×10″ Print Layout (Pano + 15–27 Cross-Sections + VR)")
+        self.btnGenerate8x10PrintLayout.setToolTip(
+            "Generate standard 8x10 inch clinical film layout with panoramic reformat, "
+            "15 to 27 sequential cross-sectional slices with overlaid measurement lines, and 3D quadrant VR."
+        )
+        self.btnGenerate8x10PrintLayout.setStyleSheet(
+            "font-size: 13px; font-weight: bold; padding: 8px; background-color: #0284c7; color: white; border-radius: 4px;"
+        )
+        step5Layout.addWidget(self.btnGenerate8x10PrintLayout)
+
+        # Collapsible Section for Advanced Details (prevents UI clutter)
+        self.advancedStep5Box = ctk.ctkCollapsibleButton()
+        self.advancedStep5Box.text = "Advanced Implant Planning & Detailed Measurements (Optional)"
+        self.advancedStep5Box.collapsed = True
+        advancedStep5Layout = qt.QVBoxLayout(self.advancedStep5Box)
+
         rulerRow = qt.QHBoxLayout()
         self.btnToggleActiveToothInPlan = qt.QPushButton("Toggle Active Tooth in Plan")
         self.btnToggleActiveToothInPlan.setToolTip(
@@ -806,7 +842,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         rulerRow.addWidget(self.btnCreateManualRulers)
         rulerRow.addWidget(self.btnRecomputeSelected)
         rulerRow.addWidget(self.btnClearPlan)
-        step5Layout.addLayout(rulerRow)
+        advancedStep5Layout.addLayout(rulerRow)
 
         implantRow = qt.QHBoxLayout()
         self.implantLibraryCombo = qt.QComboBox()
@@ -826,7 +862,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         implantRow.addWidget(self.btnPlaceImplant)
         implantRow.addWidget(self.btnImplantCentricView)
         implantRow.addWidget(self.btnConfirmAiSuggestion)
-        step5Layout.addLayout(implantRow)
+        advancedStep5Layout.addLayout(implantRow)
 
         self.planTable = qt.QTableWidget()
         self.planTable.setColumnCount(10)
@@ -848,7 +884,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.planTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.planTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
         self.planTable.setMinimumHeight(150)
-        step5Layout.addWidget(self.planTable)
+        advancedStep5Layout.addWidget(self.planTable)
 
         exportOptRow = qt.QHBoxLayout()
         self.includePatientMetaCheckBox = qt.QCheckBox("Include Patient Metadata in Report (Opt-In; Anonymized by Default)")
@@ -857,10 +893,10 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "When unchecked, exported HTML/PDF/DICOM reports anonymize Patient Name and ID to 'Anonymous' (B22)."
         )
         exportOptRow.addWidget(self.includePatientMetaCheckBox)
-        step5Layout.addLayout(exportOptRow)
+        advancedStep5Layout.addLayout(exportOptRow)
 
         exportRow = qt.QHBoxLayout()
-        self.btnGenerateSliceSeries = qt.QPushButton("Generate Cross-Section Series (15-28 Slices)")
+        self.btnGenerateSliceSeries = qt.QPushButton("Cross-Section Series Preview (15-28 Slices)")
         self.btnGenerateSliceSeries.setToolTip(
             "Generate 15 to 28 sequential cross-sectional slice images across tooth or quadrant with overlaid measurement levels."
         )
@@ -875,7 +911,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         exportRow.addWidget(self.btnGenerateSliceSeries)
         exportRow.addWidget(self.btnGenerateReport)
         exportRow.addWidget(self.btnExportPlan)
-        step5Layout.addLayout(exportRow)
+        advancedStep5Layout.addLayout(exportRow)
+
+        step5Layout.addWidget(self.advancedStep5Box)
 
         # ==================== STEP 6: SURGICAL EXPORT & CLINICAL TOOLS ====================
         self.step6Box = ctk.ctkCollapsibleButton()
@@ -993,6 +1031,12 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.tickSpacingSpin.valueChanged.connect(self.onCsDisplayParamChanged)
         self.showAxialTicksCheckBox.toggled.connect(self.onCsDisplayParamChanged)
 
+        self.btnSelectQ1.clicked.connect(lambda: self.onSelectQuadrant(1))
+        self.btnSelectQ2.clicked.connect(lambda: self.onSelectQuadrant(2))
+        self.btnSelectQ3.clicked.connect(lambda: self.onSelectQuadrant(3))
+        self.btnSelectQ4.clicked.connect(lambda: self.onSelectQuadrant(4))
+        self.btnClearSelection.clicked.connect(self.onClearToothSelection)
+        self.btnGenerate8x10PrintLayout.clicked.connect(self.onGenerate8x10PrintLayout)
         self.btnToggleActiveToothInPlan.clicked.connect(self.onToggleActiveToothInPlanClicked)
         self.btnCreateManualRulers.clicked.connect(self.onCreateManualRulersClicked)
         self.btnRecomputeSelected.clicked.connect(self.onRefreshAllSelectedTeeth)
@@ -1299,6 +1343,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
             self._parameterNode.SetNodeReferenceID("InputVolume", node.GetID() if node else "")
             self.updateGUIFromParameterNode()
+        if node is not None:
+            self.autoSynchronizeSIOrientation()
 
     def onSegmentationNodeChanged(self, node: Any) -> None:
         if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
@@ -1306,6 +1352,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.updateGUIFromParameterNode()
             if self.selectedTeeth:
                 self.onRefreshAllSelectedTeeth()
+        if node is not None:
+            self.autoSynchronizeSIOrientation()
     def onBrowseNNUNetModelClicked(self) -> None:
         path = qt.QFileDialog.getExistingDirectory(self.parent, "Select nnU-Net ToothFairy3 Model Folder")
         if not path:
@@ -1358,11 +1406,14 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         from CBCTPlannerLib.core.labels import LABELS_BY_ID, match_segment_to_label_and_precedence
         segmentation = segNode.GetSegmentation()
+        if not segmentation.ContainsRepresentation(slicer.vtkSegmentationConverter.GetClosedSurfaceRepresentationName()):
+            segmentation.CreateClosedSurfaceRepresentation()
         detected_teeth = []
         for idx in range(segmentation.GetNumberOfSegments()):
             seg = segmentation.GetNthSegment(idx)
             sid = segmentation.GetNthSegmentID(idx)
-            label_id, category, _, _ = match_segment_to_label_and_precedence(seg.GetName(), sid)
+            fdi_tag = seg.GetTag("CBCTPlanner.FDI") if hasattr(seg, "GetTag") else None
+            label_id, category, _, _ = match_segment_to_label_and_precedence(sid, seg.GetName(), fdi_attribute=fdi_tag)
             info = LABELS_BY_ID.get(label_id)
             if info is not None:
                 seg.SetName(info.name)
@@ -1372,11 +1423,10 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 seg.SetTag("CBCTPlanner.Category", info.category)
                 if info.category == "tooth" or (11 <= info.id <= 48):
                     seg.SetTag("CBCTPlanner.FDI", str(info.id))
-                    detected_teeth.append(str(info.id))
+                    detected_teeth.append(int(info.id))
         if detected_teeth and hasattr(self, "selectedTeeth"):
             for fdi in detected_teeth:
-                if fdi not in self.selectedTeeth:
-                    self.selectedTeeth.append(fdi)
+                self.selectedTeeth.add(int(fdi))
         if hasattr(self, "onAutoFitArchClicked"):
             self.onAutoFitArchClicked()
         if hasattr(self, "onGeneratePanoramicClicked"):
@@ -1386,8 +1436,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if hasattr(self, "onRefreshAllSelectedTeeth"):
             self.onRefreshAllSelectedTeeth()
         if hasattr(self, "globalStatusLabel"):
-            self.globalStatusLabel.setText("ToothFairy3 mask-driven planning pipeline complete.")
-
+            self.globalStatusLabel.setText("Automated dental planning pipeline complete.")
 
     def onLoadExternalMask(self) -> None:
         path = qt.QFileDialog.getOpenFileName(
@@ -1401,12 +1450,23 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         segNode = slicer.util.loadSegmentation(path) if path.endswith(".seg.nrrd") else None
         if segNode is None:
             lbl = slicer.util.loadLabelVolume(path)
+            # Check if ToothFairy3 remapping is needed on label volume
+            from CBCTPlannerLib.core.labels import remap_toothfairy3_array
+            lbl_arr = slicer.util.arrayFromVolume(lbl)
+            if lbl_arr is not None and np.any((lbl_arr > 0) & (lbl_arr <= 77)):
+                remapped = remap_toothfairy3_array(lbl_arr)
+                slicer.util.updateVolumeFromArray(lbl, remapped)
             segNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
             slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(lbl, segNode)
             slicer.mrmlScene.RemoveNode(lbl)
         self.segmentationSelector.setCurrentNode(segNode)
+        # Create closed surface representation
+        if segNode is not None:
+            segNode.CreateClosedSurfaceRepresentation()
         # Automatically check and synchronize S-I orientation with volume
         self.autoSynchronizeSIOrientation()
+        # Auto-execute full planning pipeline!
+        self.onApplyMaskPipelineClicked()
 
     def autoSynchronizeSIOrientation(self) -> None:
         """Automatically verify and synchronize Superior-Inferior (S-I) orientation between volume and segmentation."""
@@ -1415,46 +1475,40 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if volNode is None:
             return
 
-        # Check volume I-J-K to R-A-S matrix for inverted Z direction (ToothFairy3 / challenge orientation)
+        vol_flipped = (volNode.GetAttribute("CBCTPlanner.SIFlipped") == "1")
         mat = vtk.vtkMatrix4x4()
         volNode.GetIJKToRASMatrix(mat)
         z_dir_s = mat.GetElement(2, 2)
 
-        # Also inspect segmentation centroid vs volume centroid if segmentation exists
-        needs_flip = False
-        if z_dir_s < -0.1:
-            # Volume matrix already indicates inverted Z axis
-            needs_flip = True
-        elif segNode is not None:
-            try:
-                # If segmented maxillary teeth are located inferiorly relative to mandibular teeth
-                from CBCTPlannerLib.core.labels import MANDIBULAR_TEETH_IDS, MAXILLARY_TEETH_IDS
-                mask_arr, is_5class = self.logic._extract_combined_label_mask(volNode, segNode)
-                if mask_arr is not None:
-                    if is_5class:
-                        up_z = np.where(mask_arr == 3)[0]
-                        low_z = np.where(mask_arr == 4)[0]
-                    else:
-                        up_z = np.where(np.isin(mask_arr, MAXILLARY_TEETH_IDS))[0]
-                        low_z = np.where(np.isin(mask_arr, MANDIBULAR_TEETH_IDS))[0]
-                    if len(up_z) > 10 and len(low_z) > 10:
-                        # In standard anatomy, Maxilla Z > Mandible Z in patient space
-                        # In slice index space, if up_z.mean() < low_z.mean() but spacing is positive:
-                        sp = volNode.GetSpacing()
-                        if sp[2] > 0 and up_z.mean() < low_z.mean():
-                            needs_flip = True
-            except Exception:
-                pass
+        # 1. Inspect volume IJKToRAS direction: if negative Z direction and not yet flipped, flip volume
+        if not vol_flipped and z_dir_s < -0.1:
+            volNode.SetAttribute("CBCTPlanner.SIFlipped", "1")
+            self.flipSIOrientationNodes([volNode])
+            vol_flipped = True
 
-        if needs_flip:
-            self.flipSIOrientationNodes([volNode, segNode])
+        # 2. Inspect segmentation vs volume: ensure segmentation matches volume orientation
+        if segNode is not None:
+            seg_flipped = (segNode.GetAttribute("CBCTPlanner.SIFlipped") == "1")
+            if vol_flipped != seg_flipped:
+                self.flipSIOrientationNodes([segNode])
+                segNode.SetAttribute("CBCTPlanner.SIFlipped", "1" if vol_flipped else "0")
 
     def flipSIOrientationNodes(self, nodes: Sequence[Any]) -> None:
-        """Harden S-I inversion transform on target volume and segmentation nodes."""
+        """Harden S-I inversion transform centered on active volume on target nodes."""
         if vtk is None or slicer is None:
             return
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        z_center = 0.0
+        if volNode is not None:
+            b = [0.0] * 6
+            volNode.GetRASBounds(b)
+            z_center = 0.5 * (b[4] + b[5])
+
         m = vtk.vtkMatrix4x4()
+        m.Identity()
         m.SetElement(2, 2, -1.0)
+        m.SetElement(2, 3, 2.0 * z_center)
+
         t = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "_TempAutoFlipSI")
         t.SetMatrixTransformToParent(m)
         for n in nodes:
@@ -1467,7 +1521,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def onFlipSIOrientation(self) -> None:
         """Manual fallback: invert S-I orientation on active volume and segmentation nodes."""
-        self.flipSIOrientationNodes([self.volumeSelector.currentNode(), self.segmentationSelector.currentNode()])
+        volNode = self.volumeSelector.currentNode()
+        segNode = self.segmentationSelector.currentNode()
+        if volNode:
+            current_flip = (volNode.GetAttribute("CBCTPlanner.SIFlipped") == "1")
+            new_flip = "0" if current_flip else "1"
+            volNode.SetAttribute("CBCTPlanner.SIFlipped", new_flip)
+            if segNode:
+                segNode.SetAttribute("CBCTPlanner.SIFlipped", new_flip)
+            self.flipSIOrientationNodes([volNode, segNode])
 
     def onRunCheckpointSegmentationClicked(self) -> None:
         """Run user-supplied AI checkpoint (`.pth`, `.pt`, `.ckpt`, `.onnx`, `.npy`, `.nii.gz`) on the active CBCT volume."""
@@ -1942,6 +2004,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             btn.setChecked(fdi in self.selectedTeeth)
             btn.blockSignals(False)
         self._syncSelectedTeethToParameterNode()
+        self._updateSelectionStatusLabel()
         self._refreshPlanTableFromCache()
 
     def onOdontogramToothClicked(self, fdi: int, _is_checked: bool) -> None:
@@ -1969,11 +2032,14 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if ctrl_held:
             self.toggleToothPlanMembership(fdi)
         else:
+            self.selectedTeeth.add(int(fdi))
             btn = self.toothButtons.get(int(fdi))
             if btn is not None:
                 btn.blockSignals(True)
-                btn.setChecked(int(fdi) in self.selectedTeeth)
+                btn.setChecked(True)
+                btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white;")
                 btn.blockSignals(False)
+            self._updateSelectionStatusLabel()
 
     def onToggleActiveToothInPlanClicked(self) -> None:
         fdi = self.activeToothFDI or 46
@@ -1995,6 +2061,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             btn.setChecked(True)
             btn.blockSignals(False)
         self._syncSelectedTeethToParameterNode()
+        self._updateSelectionStatusLabel()
         self._refreshPlanTableFromCache()
 
     def onRefreshAllSelectedTeeth(self) -> None:
@@ -2015,6 +2082,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             btn.setChecked(False)
             btn.blockSignals(False)
         self._syncSelectedTeethToParameterNode()
+        self._updateSelectionStatusLabel()
         self._refreshPlanTableFromCache()
 
     def onPlaceImplantClicked(self) -> None:
@@ -2036,6 +2104,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             fdi, volNode, segmentationNode=segNode
         )
         self._syncSelectedTeethToParameterNode()
+        self._updateSelectionStatusLabel()
         self._refreshPlanTableFromCache()
 
     def onImplantCentricViewClicked(self) -> None:
@@ -2194,25 +2263,184 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         dlg.exec_()
 
-    def onGeneratePrintableReport(self) -> None:
-        rows = self._getOrderedPlanRows()
-        if not rows or not self.logic:
-            if slicer:
-                slicer.util.warningDisplay("Select at least one tooth site in the Odontogram first.")
+    def onSelectQuadrant(self, q: int) -> None:
+        """Select all teeth belonging to quadrant `q` (1, 2, 3, or 4)."""
+        quad_teeth = {
+            1: [18, 17, 16, 15, 14, 13, 12, 11],
+            2: [21, 22, 23, 24, 25, 26, 27, 28],
+            3: [31, 32, 33, 34, 35, 36, 37, 38],
+            4: [48, 47, 46, 45, 44, 43, 42, 41],
+        }.get(q, [])
+        self.selectedTeeth.clear()
+        for fdi in quad_teeth:
+            self.selectedTeeth.add(fdi)
+            btn = self.toothButtons.get(fdi)
+            if btn:
+                btn.blockSignals(True)
+                btn.setChecked(True)
+                btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white;")
+                btn.blockSignals(False)
+        for fdi, btn in self.toothButtons.items():
+            if fdi not in quad_teeth:
+                btn.blockSignals(True)
+                btn.setChecked(False)
+                btn.setStyleSheet("")
+                btn.blockSignals(False)
+        self.activeToothFDI = quad_teeth[len(quad_teeth) // 2]
+        self._updateSelectionStatusLabel()
+        self._refreshPlanTableFromCache()
+
+    def onClearToothSelection(self) -> None:
+        """Clear all active tooth selections."""
+        self.selectedTeeth.clear()
+        self.activeToothFDI = None
+        for btn in self.toothButtons.values():
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.setStyleSheet("")
+            btn.blockSignals(False)
+        self._updateSelectionStatusLabel()
+        self._refreshPlanTableFromCache()
+
+    def _updateSelectionStatusLabel(self) -> None:
+        """Update Step 5 header text with active quadrant and slice count."""
+        if not hasattr(self, "step5SelectionStatusLabel"):
             return
-        out_dir_str = qt.QFileDialog.getExistingDirectory(self.parent, "Select Report Output Directory")
-        out_dir = Path(out_dir_str) if out_dir_str else Path(slicer.app.temporaryPath)
-        html_path, pdf_path = self.logic.generate_clinical_reports(
-            rows,
-            self.volumeSelector.currentNode(),
-            out_dir,
-            capture_screenshots=True,
-            lightbox_step_mm=float(self.lightboxStepSpin.value),
-            include_patient_metadata=bool(self.includePatientMetaCheckBox.isChecked()),
+        if not self.selectedTeeth:
+            self.step5SelectionStatusLabel.setText("Active Site: None selected (Click a quadrant or teeth above)")
+            return
+        count = len(self.selectedTeeth)
+        fdis_sorted = sorted(list(self.selectedTeeth))
+        q = str(fdis_sorted[0])[0]
+        n_slices = 15 if count == 1 else (21 if count <= 3 else 27)
+        self.step5SelectionStatusLabel.setText(
+            f"Active Site: Quadrant {q} ({count} tooth site{'s' if count>1 else ''}: {', '.join(f'#{f}' for f in fdis_sorted)}) — {n_slices} Cross-Section Slices"
         )
-        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(html_path)))
+
+    def onGenerate8x10PrintLayout(self) -> None:
+        """Generate standard 8x10 inch clinical film layout with panoramic view, 15-27 cross-sections, and VR."""
+        volNode = self.volumeSelector.currentNode()
+        if not volNode:
+            if slicer:
+                slicer.util.warningDisplay("Please select an input CBCT volume first.")
+            return
+
+        segNode = self.segmentationSelector.currentNode()
+        selected_fdis = list(self.selectedTeeth)
+        if not selected_fdis:
+            if self.activeToothFDI:
+                selected_fdis = [self.activeToothFDI]
+            else:
+                selected_fdis = [41, 42, 43, 44, 45, 46, 47]  # Standard quadrant default
+
+        quadrant = int(str(selected_fdis[0])[0]) if selected_fdis else 4
+
+        # Isolate VR classes for quadrant in segmentation display
+        if segNode is not None and slicer is not None:
+            try:
+                dNode = segNode.GetDisplayNode()
+                segmentation = segNode.GetSegmentation()
+                if dNode and segmentation:
+                    for i in range(segmentation.GetNumberOfSegments()):
+                        sid = segmentation.GetNthSegmentID(i)
+                        seg = segmentation.GetSegment(sid)
+                        name = (seg.GetName() or "").lower()
+                        vis = ("mandible" in name or "maxilla" in name or "jaw" in name or "canal" in name)
+                        for f in selected_fdis:
+                            if str(f) in name or f"#{f}" in name:
+                                vis = True
+                                break
+                        dNode.SetSegmentVisibility(sid, vis)
+            except Exception:
+                pass
+
+        from CBCTPlannerLib.PrintLayoutEngine import PrintLayoutEngine
+        engine = PrintLayoutEngine(logic=self.logic)
+        pNode = self.getParameterNode() if slicer else None
+        p_name = pNode.GetParameter("PatientName") if pNode else "Anonymous"
+        p_id = pNode.GetParameter("PatientID") if pNode else "Anonymous"
+        include_meta = self.includePatientMetaCheckBox.isChecked() if hasattr(self, "includePatientMetaCheckBox") else False
+
+        out_dir = Path(slicer.app.temporaryPath if slicer else ".")
+        html_file, pdf_file, slices_data = engine.generate_8x10_layout(
+            volumeNode=volNode,
+            segmentationNode=segNode,
+            selected_fdis=selected_fdis,
+            quadrant=quadrant,
+            out_dir=out_dir,
+            patient_name=p_name or "Anonymous",
+            patient_id=p_id or "Anonymous",
+            include_metadata=include_meta,
+        )
+
+        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(html_file)))
+        self._showPrintPreviewDialog(html_file, pdf_file, slices_data, quadrant, selected_fdis)
         if slicer:
-            slicer.util.infoDisplay(f"Generated HTML and PDF reports:\n{html_path}\n{pdf_path}")
+            slicer.util.showStatusMessage(f"Generated 8×10″ Print Layout: {html_file.name}", 5000)
+
+    def _showPrintPreviewDialog(
+        self, html_path: Path, pdf_path: Path, slices_data: List[Any], quadrant: int, fdis: List[int]
+    ) -> None:
+        """Display an interactive modal preview dialog in 3D Slicer for the 8x10 layout."""
+        if qt is None:
+            return
+        dlg = qt.QDialog(self.parent)
+        dlg.setWindowTitle(f"8×10″ Clinical Dental Print Layout — Quadrant {quadrant}")
+        dlg.resize(1050, 750)
+        d_layout = qt.QVBoxLayout(dlg)
+
+        top_bar = qt.QHBoxLayout()
+        info_lbl = qt.QLabel(
+            f"<b>8×10″ Printable Dental Film Layout:</b> Quadrant {quadrant} ({len(fdis)} sites: {', '.join(f'#{f}' for f in fdis)}) | "
+            f"<b>{len(slices_data)} Cross-Sections</b> with clinical bone measurements & VR."
+        )
+        top_bar.addWidget(info_lbl)
+        top_bar.addStretch()
+
+        btn_open_pdf = qt.QPushButton("📄 Open PDF (Print)")
+        btn_open_pdf.clicked.connect(lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(pdf_path))))
+        btn_open_html = qt.QPushButton("🌐 Open in Browser (HTML)")
+        btn_open_html.clicked.connect(lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(html_path))))
+        top_bar.addWidget(btn_open_pdf)
+        top_bar.addWidget(btn_open_html)
+        d_layout.addLayout(top_bar)
+
+        scroll = qt.QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = qt.QWidget()
+        grid = qt.QGridLayout(container)
+        grid.setSpacing(6)
+
+        cols = 5 if len(slices_data) <= 15 else (7 if len(slices_data) <= 21 else 9)
+        for idx, item in enumerate(slices_data):
+            r = idx // cols
+            c = idx % cols
+            card = qt.QFrame()
+            card.setFrameShape(qt.QFrame.StyledPanel)
+            card_l = qt.QVBoxLayout(card)
+            card_l.setContentsMargins(2, 2, 2, 2)
+            lbl = qt.QLabel()
+            if getattr(item, "pixmap", None) is not None:
+                lbl.setPixmap(item.pixmap.scaled(130, 160, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation))
+            lbl.setAlignment(qt.Qt.AlignCenter)
+            card_l.addWidget(lbl)
+            grid.addWidget(card, r, c)
+
+        scroll.setWidget(container)
+        d_layout.addWidget(scroll)
+
+        btn_box = qt.QHBoxLayout()
+        btn_close = qt.QPushButton("Close")
+        btn_close.clicked.connect(dlg.accept)
+        btn_box.addStretch()
+        btn_box.addWidget(btn_close)
+        d_layout.addLayout(btn_box)
+
+        dlg.exec_()
+
+    def onGeneratePrintableReport(self) -> None:
+        """Route standard report generation directly to 8x10 print layout engine."""
+        self.onGenerate8x10PrintLayout()
 
     def onExportTreatmentPlan(self) -> None:
         rows = self._getOrderedPlanRows()
@@ -2898,6 +3126,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
 
         if tooth_segments and slicer is not None:
             rep_name = slicer.vtkSegmentationConverter.GetClosedSurfaceRepresentationName()
+            if not segmentation.ContainsRepresentation(rep_name):
+                try:
+                    segmentation.CreateClosedSurfaceRepresentation()
+                except Exception:
+                    pass
             collected: List[np.ndarray] = []
             for seg in tooth_segments:
                 poly = seg.GetRepresentation(rep_name)
@@ -2909,7 +3142,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                             [poly.GetPoint(i) for i in range(poly.GetNumberOfPoints())],
                             dtype=np.float64,
                         )
-                    collected.append(pts)
+                    # Subsample each tooth to 20 points to prevent massive point clouds
+                    step = max(1, len(pts) // 20)
+                    collected.append(pts[::step])
             if collected:
                 merged = np.vstack(collected)
                 if len(merged) >= 4:
