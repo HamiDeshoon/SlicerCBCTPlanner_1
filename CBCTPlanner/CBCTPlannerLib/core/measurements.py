@@ -147,6 +147,18 @@ class MeasurementEngine:
     def _arch_for_jaw(self, is_mandible: bool) -> Optional[DentalArch]:
         return self.arches.get("lower" if is_mandible else "upper") or self.arch
 
+    def set_arches(self, arches: Dict[str, DentalArch], arch: Optional[DentalArch] = None) -> None:
+        """Update arch geometry without rebuilding the mask or tooth localizer."""
+        self.arches = dict(arches)
+        if arch is not None:
+            self.arch = arch
+        else:
+            self.arch = self.arches.get("lower") or self.arches.get("upper") or self.arch
+        localizer = getattr(self, "localizer", None)
+        if localizer is not None:
+            localizer.arches = self.arches
+            localizer.arch = self.arch
+
     def _arch_for_fdi(self, fdi: str) -> Optional[DentalArch]:
         info = get_tooth_label(fdi)
         if info is None:

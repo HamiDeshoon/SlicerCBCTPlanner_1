@@ -16,6 +16,7 @@ if str(MODULE_DIR) not in sys.path:
 from CBCTPlannerLib.core.print_layout import slice_count_for_selection  # noqa: E402
 from CBCTPlannerLib.core.labels import sort_teeth_anatomically  # noqa: E402
 from CBCTPlannerLib.core_print_render import render_panoramic_strip  # noqa: E402
+from CBCTPlannerLib.core.measurements import MeasurementEngine  # noqa: E402
 
 
 class TestPrintLayoutRules(unittest.TestCase):
@@ -47,6 +48,18 @@ class TestPrintLayoutRules(unittest.TestCase):
         self.assertEqual(len(x_positions), 3)
         self.assertAlmostEqual(x_positions[1] - x_positions[0], 25.0 / 0.5 * 2, delta=1.0)
         self.assertAlmostEqual(x_positions[2] - x_positions[1], 25.0 / 0.5 * 2, delta=1.0)
+
+    def test_engine_arches_update_without_rebuilding_mask(self) -> None:
+        engine = object.__new__(MeasurementEngine)
+        engine.arch = object()
+        engine.arches = {}
+        engine.localizer = None
+        lower = object()
+        upper = object()
+        engine.set_arches({"lower": lower, "upper": upper})
+        self.assertIs(engine.arch, lower)
+        self.assertIs(engine._arch_for_jaw(True), lower)
+        self.assertIs(engine._arch_for_jaw(False), upper)
 
     def test_invalid_panoramic_is_explicitly_unavailable(self) -> None:
         render = render_panoramic_strip(np.empty((0, 0)), column_spacing_mm=0.5, tick_arcs_mm=[0.0])

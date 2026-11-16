@@ -165,6 +165,12 @@ Q4_TEETH = [48, 47, 46, 45, 44, 43, 42, 41]
 
 NOT_MEASURED = "not measured"
 
+# Single source of truth for GUI/parameter-node defaults (avoids clobbering values).
+DEFAULTS = {
+    "PanoThicknessMm": 25.0,
+    "PanoHeightMm": 120.0,
+}
+
 
 def sort_teeth_anatomically(teeth_list: Sequence[int]) -> List[int]:
     """Deprecated re-export; canonical implementation lives in CBCTPlannerLib.core.labels."""
@@ -1388,10 +1394,14 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.lightboxCountSpin.setValue(
                 int(float(self._parameterNode.GetParameter("LightboxCount") or 3))
             )
-            self.panoThicknessSpin.setValue(
-                float(self._parameterNode.GetParameter("PanoThicknessMm") or 18.0)
+            self._set_spin_if_changed(
+                self.panoThicknessSpin,
+                float(self._parameterNode.GetParameter("PanoThicknessMm") or DEFAULTS["PanoThicknessMm"]),
             )
-            self.panoHeightSpin.setValue(float(self._parameterNode.GetParameter("PanoHeightMm") or 50.0))
+            self._set_spin_if_changed(
+                self.panoHeightSpin,
+                float(self._parameterNode.GetParameter("PanoHeightMm") or DEFAULTS["PanoHeightMm"]),
+            )
             self.panoOffsetSpin.setValue(float(self._parameterNode.GetParameter("PanoOffsetMm") or 0.0))
             self.panoProjCombo.setCurrentText(
                 self._parameterNode.GetParameter("PanoProjectionMode") or "Mean"
@@ -2070,6 +2080,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # ------------------------------------------------------------------
     # Step 3 Callbacks: In-Process Panoramic CPR (O1, B10, F3)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _set_spin_if_changed(spin: Any, value: float) -> None:
+        """Set a spin box without emitting change signals or clobbering equal values."""
+        if abs(float(spin.value) - float(value)) < 1e-9:
+            return
+        spin.blockSignals(True)
+        spin.setValue(float(value))
+        spin.blockSignals(False)
+
     def onPanoParamChanged(self, *_args: Any) -> None:
         if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
             was_mod = (
@@ -2086,6 +2105,12 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             finally:
                 if was_mod is not None and hasattr(self._parameterNode, "EndModify"):
                     self._parameterNode.EndModify(was_mod)
+        if (
+            self.autoUpdatePanoCheckBox.isChecked()
+            and self._panoPreviewTimer is not None
+            and not self._updatingGUIFromParameterNode
+        ):
+            self._panoPreviewTimer.start()
 
     def _onDebouncedCurvePreviewPano(self) -> None:
         if self.autoUpdatePanoCheckBox.isChecked():
@@ -2937,6 +2962,10 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         self._confirmed_ai_suggestions: Set[int] = set()
         self._cached_engine_key: Optional[Tuple[Any, ...]] = None
         self._cached_engine: Optional[MeasurementEngine] = None
+        self._cached_engine_mask_key: Optional[Tuple[Any, ...]] = None
+        self._mask_cache_key: Optional[Tuple[Any, ...]] = None
+        self._mask_cache: Optional[np.ndarray] = None
+        self._mask_cache_is_5class: bool = False
         self.last_arch_fit: Any = None
         self.last_arch_fit_error: Optional[str] = None
         self._ruler_observers: List[Tuple[Any, int]] = []
@@ -2957,6 +2986,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         self._ruler_observers.clear()
         self._cached_engine = None
         self._cached_engine_key = None
+        self._cached_engine_mask_key = None
+        self._mask_cache_key = None
+        self._mask_cache = None
 
     def getParameterNode(self) -> Any:
         """O6: Return singleton ParameterNode and initialize defaults only once per node."""
@@ -2994,8 +3026,8 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "LightboxEnabled": "true",
             "LightboxStepMm": "2.0",
             "LightboxCount": "3",
-            "PanoThicknessMm": "18.0",
-            "PanoHeightMm": "50.0",
+            "PanoThicknessMm": f"{DEFAULTS['PanoThicknessMm']:.1f}",
+            "PanoHeightMm": f"{DEFAULTS['PanoHeightMm']:.1f}",
             "PanoOffsetMm": "0.0",
             "PanoProjectionMode": "Mean",
             "PanoFlipVertical": "false",
@@ -4318,42 +4350,43 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     def _get_or_build_measurement_engine(
         self, volumeNode: Any, segmentationNode: Any
     ) -> Optional[MeasurementEngine]:
-        """O3: Cache MeasurementEngine by `(vol_id, vol_mtime, seg_id, seg_mtime, lower_mtime, upper_mtime, occ_tuple)`."""
+        """Cache the label mask separately from the arch, so curve drags skip segment export."""
         if slicer is None or volumeNode is None or segmentationNode is None:
             return None
         vol_id = volumeNode.GetID() if hasattr(volumeNode, "GetID") else str(id(volumeNode))
         vol_mtime = int(volumeNode.GetMTime()) if hasattr(volumeNode, "GetMTime") else 0
         seg_id = segmentationNode.GetID() if hasattr(segmentationNode, "GetID") else str(id(segmentationNode))
         seg_mtime = int(segmentationNode.GetMTime()) if hasattr(segmentationNode, "GetMTime") else 0
+        mask_key = (vol_id, vol_mtime, seg_id, seg_mtime)
 
         pNode = self.getParameterNode()
         c_low = self.get_curve_node_for_jaw(volumeNode, "Lower", parameterNode=pNode)
         c_up = self.get_curve_node_for_jaw(volumeNode, "Upper", parameterNode=pNode)
         c_sh = self.get_curve_node_for_jaw(volumeNode, "Shared", parameterNode=pNode)
-        m_low = int(c_low.GetMTime()) if (c_low and hasattr(c_low, "GetMTime")) else 0
-        m_up = int(c_up.GetMTime()) if (c_up and hasattr(c_up, "GetMTime")) else 0
-        m_sh = int(c_sh.GetMTime()) if (c_sh and hasattr(c_sh, "GetMTime")) else 0
-        occ = self.get_occlusal_normal()
-        occ_tuple = (round(float(occ[0]), 5), round(float(occ[1]), 5), round(float(occ[2]), 5))
+        curve_key = (
+            int(c_low.GetMTime()) if (c_low and hasattr(c_low, "GetMTime")) else 0,
+            int(c_up.GetMTime()) if (c_up and hasattr(c_up, "GetMTime")) else 0,
+            int(c_sh.GetMTime()) if (c_sh and hasattr(c_sh, "GetMTime")) else 0,
+            tuple(round(float(v), 5) for v in self.get_occlusal_normal()),
+        )
 
-        key = (vol_id, vol_mtime, seg_id, seg_mtime, m_low, m_up, m_sh, occ_tuple)
-        if self._cached_engine_key == key and self._cached_engine is not None:
+        if self._cached_engine is not None and self._cached_engine_key == (mask_key, curve_key):
             return self._cached_engine
 
-        engine = self._build_measurement_engine(volumeNode, segmentationNode)
-        self._cached_engine_key = key
+        if self._cached_engine is not None and self._cached_engine_mask_key == mask_key:
+            # Only the curve/occlusal normal changed: update arches, keep mask and teeth.
+            arches = self._collect_arches(volumeNode)
+            self._cached_engine.set_arches(arches)
+            self._cached_engine_key = (mask_key, curve_key)
+            return self._cached_engine
+
+        engine = self._build_measurement_engine(volumeNode, segmentationNode, mask_key=mask_key)
+        self._cached_engine_key = (mask_key, curve_key)
+        self._cached_engine_mask_key = mask_key
         self._cached_engine = engine
         return engine
 
-    def _build_measurement_engine(
-        self, volumeNode: Any, segmentationNode: Any
-    ) -> Optional[MeasurementEngine]:
-        if slicer is None or volumeNode is None or segmentationNode is None:
-            return None
-        mask, is_5class = self._extract_combined_label_mask(volumeNode, segmentationNode)
-        if mask is None:
-            return None
-        vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+    def _collect_arches(self, volumeNode: Any) -> Dict[str, DentalArch]:
         arches: Dict[str, DentalArch] = {}
         pNode = self.getParameterNode()
         for jaw in ("lower", "upper"):
@@ -4369,6 +4402,46 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                         occlusal_normal=self.get_occlusal_normal(),
                         ras_convention=True,
                     )
+        return arches
+
+    def _get_or_extract_mask(
+        self, volumeNode: Any, segmentationNode: Any, key: Optional[Tuple[Any, ...]] = None
+    ) -> Optional[Tuple[np.ndarray, bool]]:
+        """Cache the combined label mask by volume/segmentation identity and mtime."""
+        if slicer is None or volumeNode is None or segmentationNode is None:
+            return None
+        if key is None:
+            vol_id = volumeNode.GetID() if hasattr(volumeNode, "GetID") else str(id(volumeNode))
+            vol_mtime = int(volumeNode.GetMTime()) if hasattr(volumeNode, "GetMTime") else 0
+            seg_id = (
+                segmentationNode.GetID() if hasattr(segmentationNode, "GetID") else str(id(segmentationNode))
+            )
+            seg_mtime = int(segmentationNode.GetMTime()) if hasattr(segmentationNode, "GetMTime") else 0
+            key = (vol_id, vol_mtime, seg_id, seg_mtime)
+        if self._mask_cache_key == key and self._mask_cache is not None:
+            return self._mask_cache, self._mask_cache_is_5class
+        mask, is_5class = self._extract_combined_label_mask(volumeNode, segmentationNode)
+        if mask is None:
+            return None
+        self._mask_cache_key = key
+        self._mask_cache = mask
+        self._mask_cache_is_5class = bool(is_5class)
+        return mask, bool(is_5class)
+
+    def _build_measurement_engine(
+        self,
+        volumeNode: Any,
+        segmentationNode: Any,
+        mask_key: Optional[Tuple[Any, ...]] = None,
+    ) -> Optional[MeasurementEngine]:
+        if slicer is None or volumeNode is None or segmentationNode is None:
+            return None
+        cached = self._get_or_extract_mask(volumeNode, segmentationNode, key=mask_key)
+        if cached is None:
+            return None
+        mask, is_5class = cached
+        vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+        arches = self._collect_arches(volumeNode)
         primary_arch = arches.get("lower") or arches.get("upper")
         return MeasurementEngine(
             vol,

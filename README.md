@@ -40,6 +40,25 @@
 ### 6. Clinical Tools, 3D Cephalometry, AutomatedDentalTools & DICOM SEG/SR (`F4–F18, F20`)
 - **Bone Density ROI (`F4`)**, **TMJ Bilateral Condyle Views (`F6`)**, **Maxillary Sinus Floor Analysis (`F7`)**, **Airway Pharyngeal Volume & Minimum Cross-Sectional Area (`F8`)**, **Superimposition (`F9`)**, **Endodontic Working-Length & Root-Canal Curvature (`F10`)**, **3D Cephalometry (`SNA, SNB, ANB, FMA, GoGn-SN, U1-L1`, `F17`)**, **AutomatedDentalTools Bridges (`ASO, AMASSS, ALI, AReg, AutoCrop3D, BatchDentalSegmentator, MRI2CBCT`, `F18`)**, **DICOM SEG & Structured Report Export (`F15`)**, and **Headless Batch CLI (`CBCTPlanner/cli_batch.py`, `F20`)**.
 
+## Orientation, Auto-Fit & Print Layout Workflow
+
+### RAS orientation (Step 1)
+- **Detected axcodes** are shown next to **Standardize to RAS**, **Auto-detect issues**, and **Flip L-R / A-P / S-I**.
+- Standardization is a lossless axis permutation/flip: voxel data, spacing and world coordinates are preserved. Oblique volumes are flagged and must be resampled explicitly with Slicer's `OrientScalarVolume` / `vtkImageReslice`; they are never silently resampled.
+- **Auto-detect issues** uses the segmentation: mandible below maxilla (S-I), anterior arch convexity toward +Y (A-P), and FDI-labelled teeth on the correct side (L-R). With 5-class labels the left/right test reports *cannot determine* instead of guessing.
+- The manual flip buttons are for wrong headers; they mirror the anatomy in the chosen axis. Auto-standardize on load is **off by default** (QSettings) so patient data is never mutated silently.
+
+### Auto-Fit Arch (Step 2)
+- Auto-Fit needs a **segmentation with tooth labels** (DentalSegmentator 5-class, ToothFairy-style FDI, or both). No segmentation triggers an explicit warning and manual point placement.
+- The fit uses label voxels only (no surface meshes): per-FDI centroids when at least six teeth exist, otherwise a principal-curve fallback on the crown half of the 5-class tooth mask. The result is ordered Patient Right -> Patient Left and reported as `Fitted N pts, L mm, RMS r mm (method)`.
+- Fits with RMS > 3 mm or arc length outside 60-200 mm are rejected with the reason shown; previous curve points are pushed to Undo. A manually edited curve is never overwritten by the mask pipeline.
+
+### Step 5 slice series and 8x10 film
+- Slice counts come from one rule: 1 tooth -> 15 slices @ 0.75 mm, 2-3 teeth -> 21 @ 0.85 mm, 4+ teeth -> 27 @ 1.00 mm. Selections are sorted anatomically, and teeth are grouped by quadrant into one page each.
+- Every overlay is derived from measured millimetre coordinates in the arch cross-section; unmeasurable sites print `--` / `not measurable`, never a synthetic bone drawing.
+- The panoramic strip is rendered from the panoramic volume with arc ticks (not a screenshot), and VR uses the real 3D view. If either is unavailable the page says so explicitly.
+- PDF pages are composed at 8x10 in / 300 dpi (MediaBox 576x720 pt); the HTML file remains a browser-viewable report. Segment visibility is restored after generation, and opening the browser is left to the user.
+
 ## Installation in 3D Slicer
 1. Open **3D Slicer** (5.6 or newer).
 2. Navigate to **Edit -> Application Settings -> Modules**.
