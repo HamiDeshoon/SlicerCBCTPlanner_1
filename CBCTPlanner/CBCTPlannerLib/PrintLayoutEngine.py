@@ -42,8 +42,7 @@ except ImportError:
     ImageDraw = None
     ImageFont = None
 
-from .core.measurements import ImplantSiteMeasurement
-from .core_print_render import render_cross_section, render_panoramic_strip
+from .core_print_render import render_cross_section, render_panoramic_strip, unavailable_tile
 
 logger = logging.getLogger(__name__)
 
@@ -68,49 +67,6 @@ class CrossSectionSliceSpec:
     nerve_dist_mm: Optional[float] = None
     is_mandible: bool = True
     image_data_uri: str = ""
-    pixmap: Any = None
-
-
-def render_annotated_cross_section_slice(
-    img_2d_hu: Optional[np.ndarray],
-    meas: Optional[ImplantSiteMeasurement],
-    slice_idx: int,
-    total_slices: int,
-    offset_mm: float,
-    fdi: int,
-    is_mandible: bool = True,
-    width_px: int = 240,
-    height_px: int = 300,
-) -> Tuple[str, Any]:
-    """Legacy entry point: render from an image-only slice.
-
-    Geometry overlays require `CrossSectionData`; this shim delegates to the
-    real renderer with an unknown-millimetre grid so no fake lines are drawn.
-    New code should call `render_cross_section` with measured data.
-    """
-    if Image is None or img_2d_hu is None or np.asarray(img_2d_hu).size == 0:
-        return _unavailable_data_uri("Cross-section"), None
-    from .core.measurements import CrossSectionData
-    from .core_print_render import render_cross_section
-
-    arr = np.asarray(img_2d_hu, dtype=np.float32)
-    u = np.linspace(-15.0, 15.0, arr.shape[1])
-    v = np.linspace(-25.0, 25.0, arr.shape[0])
-    cs = CrossSectionData(
-        u_coords=u,
-        v_coords=v,
-        mask_cs=np.zeros_like(arr, dtype=np.int32),
-        img_cs=arr,
-        frame=(np.zeros(3), np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), np.array([0, 0, 1.0])),
-        crest_v=None,
-        width_segments={},
-        canal_centroid_uv=None,
-    )
-    render = render_cross_section(cs, meas, scale=1)
-    if not render.available or render.image is None:
-        return _unavailable_data_uri("Cross-section"), None
-    render.image = render.image.resize((width_px, height_px))
-    return _image_to_data_uri(render.image), None
 
 
 def _image_to_data_uri(image: Any) -> str:
@@ -122,12 +78,7 @@ def _image_to_data_uri(image: Any) -> str:
 
 
 def _unavailable_data_uri(text: str) -> str:
-    if Image is None:
-        return ""
-    image = Image.new("RGB", (640, 400), (15, 23, 42))
-    draw = ImageDraw.Draw(image)
-    draw.text((20, 190), f"{text} unavailable", fill=(255, 255, 255), font=ImageFont.load_default())
-    return _image_to_data_uri(image)
+    return _image_to_data_uri(unavailable_tile(text))
 
 
 def _data_uri_to_image(uri: str) -> Optional[Any]:
@@ -239,7 +190,6 @@ class PrintLayoutEngine:
                     nerve_dist_mm=meas.distance_to_vital_structure_mm if meas else None,
                     is_mandible=is_mandible,
                     image_data_uri=data_uri,
-                    pixmap=None,
                 )
                 specs.append(spec)
                 all_specs.append(spec)
@@ -356,21 +306,12 @@ class PrintLayoutEngine:
     def _combine_html_pages(pages: List[str]) -> str:
         if not pages:
             return ""
-        first = pages[0]
-        bodies = []
-        for page in pages:
-            if "<body>" in page and "</body>" in page:
-                bodies.append(page.split("<body>", 1)[1].rsplit("</body>", 1)[0])
-            else:
-                bodies.append(page)
+        head = pages[0].partition("<body>")[0]
+        bodies = [page.partition("<body>")[2].rpartition("</body>")[0] for page in pages]
         joined = '<div style="page-break-after: always;">' + bodies[0] + "</div>"
         for body in bodies[1:]:
             joined += '<div style="page-break-before: always;">' + body + "</div>"
-        return first.replace(
-            first.split("<body>", 1)[1].rsplit("</body>", 1)[0] if "<body>" in first else first,
-            joined,
-            1,
-        )
+        return head + "<body>" + joined + "</body></html>"
 
     def _compose_page_image(
         self, record: dict, *, patient_name: str, page_number: int, total_pages: int

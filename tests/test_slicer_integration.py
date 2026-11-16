@@ -767,6 +767,106 @@ class TestSlicerIntegrationAndFeatures(unittest.TestCase):
             self.assertTrue(uri.startswith("data:image/png;base64,"))
 
 
+class PanoramicSamplerAndFrameTests(unittest.TestCase):
+    def _phantom(self) -> tuple[CBCTVolume, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        shape = (40, 48, 48)
+        z = np.arange(shape[0], dtype=np.float32)[:, None, None]
+        img = np.broadcast_to(100.0 + 3.0 * z, shape).copy()
+        vol = CBCTVolume(
+            image=img,
+            spacing=(1.0, 1.0, 1.0),
+            origin=(-20.0, -20.0, -10.0),
+            direction=np.eye(3),
+            affine=np.array(
+                [[1.0, 0.0, 0.0, -20.0], [0.0, 1.0, 0.0, -20.0], [0.0, 0.0, 1.0, -10.0], [0.0, 0.0, 0.0, 1.0]]
+            ),
+        )
+        theta = np.linspace(0.0, np.pi, 40)
+        pts = np.column_stack([12.0 * np.cos(theta), 12.0 * np.sin(theta), np.zeros_like(theta)])
+        tangents = np.column_stack([-np.sin(theta), np.cos(theta), np.zeros_like(theta)])
+        normals = np.column_stack([np.cos(theta), np.sin(theta), np.zeros_like(theta)])
+        binormals = np.tile(np.array([0.0, 0.0, 1.0]), (len(theta), 1))
+        return vol, pts, tangents, normals, binormals
+
+    def test_fast_sampler_matches_legacy_world_loop(self) -> None:
+        vol, pts, tangents, normals, binormals = self._phantom()
+        logic = PanoramicCurveLogic()
+        base, disp, offsets, _n, _dy, _dz = logic._build_slab_geometry(
+            pts_arch=pts,
+            normals=normals,
+            binormals=binormals,
+            slab_thickness_mm=6.0,
+            height_mm=20.0,
+            spacing_mm=1.0,
+            buccolingual_offset_mm=0.0,
+            flip_vertical=False,
+        )
+        accum = None
+        for u_val in offsets:
+            layer_pts = base + float(u_val) * disp[None, :, :]
+            sampled = vol.sample_world_points(layer_pts, order=1, cval=-1000.0)
+            accum = sampled.copy() if accum is None else accum + sampled
+        legacy = (accum / float(len(offsets))).astype(np.float32)
+        fast = logic.sample_panoramic_slab_array(
+            vol,
+            pts,
+            tangents,
+            normals,
+            binormals,
+            slab_thickness_mm=6.0,
+            height_mm=20.0,
+            spacing_mm=1.0,
+            projection_mode="Mean",
+        )
+        np.testing.assert_allclose(fast, legacy, atol=1e-3)
+
+    def test_tangent_smoothing_reduces_jitter_and_keeps_endpoints(self) -> None:
+        t = np.linspace(0.0, 1.0, 60)
+        base = np.column_stack([np.cos(t * 2.0), np.sin(t * 2.0), t])
+        rng = np.random.default_rng(7)
+        noisy = base + rng.normal(scale=0.01, size=base.shape)
+        smoothed = PanoramicCurveLogic._smooth_series(noisy)
+        self.assertEqual(smoothed.shape, noisy.shape)
+        self.assertLess(
+            np.linalg.norm(np.diff(smoothed, n=2, axis=0)), np.linalg.norm(np.diff(noisy, n=2, axis=0))
+        )
+        self.assertLess(np.max(np.abs(smoothed - noisy)), 0.02)
+
+    def test_curve_frames_remain_orthonormal_after_smoothing(self) -> None:
+        logic = PanoramicCurveLogic()
+        points = np.array(
+            [
+                [10.0, 0.0, 0.0],
+                [12.0, 2.0, 0.3],
+                [11.0, 4.0, -0.2],
+                [8.0, 5.0, 0.1],
+                [5.0, 4.0, 0.0],
+                [4.0, 2.0, 0.2],
+            ]
+        )
+        _, _, tangents, normals, binormals = logic.get_curve_points_and_frames(
+            type(
+                "_Curve",
+                (),
+                {
+                    "GetID": lambda self: "smoothed",
+                    "GetMTime": lambda self: 1,
+                    "GetNumberOfControlPoints": lambda self: len(points),
+                    "GetNthControlPointPositionWorld": lambda self, i, b: b.__setitem__(
+                        slice(None), points[i]
+                    ),
+                    "GetCurveWorld": lambda self: None,
+                },
+            )(),
+            num_samples=30,
+        )
+        for tangent, normal, binormal in zip(tangents, normals, binormals):
+            frame = np.column_stack([tangent, normal, binormal])
+            np.testing.assert_allclose(frame.T @ frame, np.eye(3), atol=1e-6)
+            np.testing.assert_allclose(np.cross(normal, tangent), binormal, atol=1e-6)
+            self.assertAlmostEqual(float(np.linalg.det(frame)), -1.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()
 

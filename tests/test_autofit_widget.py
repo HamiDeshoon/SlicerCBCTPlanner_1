@@ -39,9 +39,17 @@ class _FakeLogic:
 class _Label:
     def __init__(self) -> None:
         self.text = ""
+        self.tooltip = ""
+        self.style = ""
 
     def setText(self, text: str) -> None:
         self.text = text
+
+    def setToolTip(self, text: str) -> None:
+        self.tooltip = text
+
+    def setStyleSheet(self, style: str) -> None:
+        self.style = style
 
 
 class _Box:
@@ -93,6 +101,87 @@ class TestAutoFitWidgetFlow(unittest.TestCase):
         widget.onGeneratePanoramicClicked = _boom  # type: ignore[method-assign]
         with self.assertRaises(RuntimeError):
             CBCTPlannerWidget.onAutoFitArchClicked(widget)
+
+
+class _NodeRefs:
+    def __init__(self, refs: dict) -> None:
+        self.refs = refs
+
+    def GetNodeReference(self, role: str):
+        return self.refs.get(role)
+
+
+class _ChipLogic:
+    def __init__(self, curve) -> None:
+        self.curve = curve
+        self.last_arch_fit = _FakeFit()
+        self.last_arch_fit_error = None
+
+    def get_curve_node_for_jaw(self, *_args, **_kwargs):
+        return self.curve
+
+    def auto_fit_arch_for_jaw(self, **_kwargs):
+        return self.curve
+
+
+class TestStepChipsAndPipeline(unittest.TestCase):
+    def _widget(self, curve=None) -> CBCTPlannerWidget:
+        widget = object.__new__(CBCTPlannerWidget)
+        widget.stepStatusLabels = [_Label() for _ in range(7)]
+        widget._parameterNode = _NodeRefs(
+            {
+                "PanoramicVolume": object(),
+                "RightCanalCurve": None,
+                "LeftCanalCurve": None,
+            }
+        )
+        widget.volumeSelector = types.SimpleNamespace(currentNode=lambda: object())
+        widget.segmentationSelector = types.SimpleNamespace(currentNode=lambda: object())
+        widget.logic = _ChipLogic(curve)
+        widget.selectedTeeth = {11, 12}
+        widget._effectiveJawKey = lambda: "Lower"  # type: ignore[method-assign]
+        return widget
+
+    def test_chips_reflect_available_scene_state(self) -> None:
+        widget = self._widget(curve=_FakeCurve())
+        widget._updateStepChips()
+        texts = [label.text for label in widget.stepStatusLabels]
+        self.assertEqual(texts[:6], ["1 \u2713", "2 \u2713", "3 \u2713", "4 \u2713", "5 \u2713", "6 \u25cb"])
+        self.assertEqual(texts[6], "7 \u25cb")
+        self.assertIn("#2e7d32", widget.stepStatusLabels[0].style)
+        self.assertIn("#9e9e9e", widget.stepStatusLabels[5].style)
+
+    def test_chips_mark_missing_prerequisites(self) -> None:
+        widget = self._widget(curve=None)
+        widget.volumeSelector = types.SimpleNamespace(currentNode=lambda: None)
+        widget.selectedTeeth = set()
+        widget._parameterNode = _NodeRefs({})
+        widget._updateStepChips()
+        self.assertEqual(
+            [label.text for label in widget.stepStatusLabels], [f"{i} \u25cb" for i in range(1, 8)]
+        )
+
+    def test_run_full_pipeline_fits_then_panorama_then_canals(self) -> None:
+        widget = object.__new__(CBCTPlannerWidget)
+        widget.volumeSelector = types.SimpleNamespace(currentNode=lambda: object())
+        widget.segmentationSelector = types.SimpleNamespace(currentNode=lambda: object())
+        widget.showCurvesCheckBox = types.SimpleNamespace(isChecked=lambda: True)
+        widget.logic = _ChipLogic(_FakeCurve())
+        widget.step2HintLabel = _Label()
+        widget.step3HintLabel = _Label()
+        widget.step3Box = _Box()
+        widget.globalStatusLabel = _Label()
+        widget._effectiveJawKey = lambda: "Lower"  # type: ignore[method-assign]
+        widget._observeCurveEdits = lambda _node: None  # type: ignore[method-assign]
+        widget.updateGUIFromParameterNode = lambda: None  # type: ignore[method-assign]
+        calls: list = []
+        widget._runPanoramicGeneration = lambda preview=False: calls.append("pano")  # type: ignore[method-assign]
+        widget.onExtractCanalsClicked = lambda: calls.append("canals")  # type: ignore[method-assign]
+        CBCTPlannerWidget.onRunFullPipelineClicked(widget)
+        self.assertEqual(calls, ["pano", "canals"])
+        self.assertIn("fdi_centroids", widget.step2HintLabel.text)
+        self.assertIn("Pipeline complete", widget.globalStatusLabel.text)
+        self.assertFalse(widget.step3Box.collapsed)
 
 
 if __name__ == "__main__":

@@ -87,6 +87,11 @@ class CBCTVolume:
         vox = (self._inv_affine @ homog.T).T
         return vox[:, :3]
 
+    def world_direction_to_voxel(self, world_dirs: np.ndarray) -> np.ndarray:
+        """Map world-space direction vectors to voxel-space directions (rotation only)."""
+        dirs = np.asarray(world_dirs, dtype=np.float64)
+        return dirs @ self._inv_affine[:3, :3].T
+
     def voxel_to_world(self, voxel_index: Union[np.ndarray, List[float], Tuple[float, ...]]) -> np.ndarray:
         """Convert voxel index `(i_x, j_y, k_z)` or `(N, 3)` batch to physical world coordinate `(x_mm, y_mm, z_mm)`."""
         idx = np.asarray(voxel_index, dtype=np.float64)

@@ -275,6 +275,21 @@ class PanoramicCurveLogic:
                 pts[i] = buf
         return pts
 
+    @staticmethod
+    def _smooth_series(points: np.ndarray, kernel: Sequence[float] = (1, 2, 3, 2, 1)) -> np.ndarray:
+        """Light edge-preserving moving average to stop gradient tangents striping the CPR."""
+        pts = np.asarray(points, dtype=np.float64)
+        if len(pts) < len(kernel) + 4:
+            return pts
+        weights = np.asarray(kernel, dtype=np.float64)
+        weights /= weights.sum()
+        half = len(weights) // 2
+        padded = np.pad(pts, ((half, half), (0, 0)), mode="edge")
+        smoothed = np.zeros_like(pts)
+        for offset, weight in enumerate(weights):
+            smoothed += weight * padded[offset : offset + len(pts)]
+        return smoothed
+
     def get_curve_points_and_frames(
         self,
         curveNode: Any,
@@ -341,7 +356,7 @@ class PanoramicCurveLogic:
         up_norm = float(np.linalg.norm(up))
         up = up / up_norm if up_norm > 1e-8 else np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
-        raw_tangents = np.gradient(pts, axis=0)
+        raw_tangents = self._smooth_series(np.gradient(pts, axis=0))
         tangents = raw_tangents - np.outer(raw_tangents @ up, up)
         t_norms = np.linalg.norm(tangents, axis=1, keepdims=True)
         t_norms[t_norms < 1e-8] = 1.0
@@ -578,6 +593,44 @@ class PanoramicCurveLogic:
             accum = accum / float(max(1, n_layers))
         return accum.astype(np.float32)
 
+    @staticmethod
+    def _slab_voxel_basis(
+        cbct_volume: CBCTVolume, base_surface: np.ndarray, disp_x_cols: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Convert the world slab surface and displacement axis to voxel space once."""
+        dim_y, dim_z = base_surface.shape[:2]
+        base_vox = cbct_volume.world_to_voxel(base_surface.reshape(-1, 3)).reshape(dim_y, dim_z, 3)
+        disp_vox = cbct_volume.world_direction_to_voxel(disp_x_cols)
+        return base_vox, disp_vox
+
+    @staticmethod
+    def _sample_slab_layer(
+        cbct_volume: CBCTVolume, base_vox: np.ndarray, disp_vox: np.ndarray, u_val: float
+    ) -> np.ndarray:
+        """Sample one slab layer from precomputed voxel coordinates (no per-layer affine)."""
+        try:
+            from scipy import ndimage  # type: ignore
+        except ImportError:
+            layer_pts = cbct_volume.voxel_to_world(base_vox + float(u_val) * disp_vox[None, :, :])
+            return np.asarray(cbct_volume.sample_world_points(layer_pts, order=1, cval=-1000.0))
+        u = float(u_val)
+        coords = np.empty((3,) + base_vox.shape[:2], dtype=np.float64)
+        np.multiply(disp_vox[None, :, 2], u, out=coords[0])
+        coords[0] += base_vox[:, :, 2]
+        np.multiply(disp_vox[None, :, 1], u, out=coords[1])
+        coords[1] += base_vox[:, :, 1]
+        np.multiply(disp_vox[None, :, 0], u, out=coords[2])
+        coords[2] += base_vox[:, :, 0]
+        sampled = ndimage.map_coordinates(
+            cbct_volume.image,
+            coords,
+            order=1,
+            mode="constant",
+            cval=-1000.0,
+            prefilter=False,
+        )
+        return np.asarray(sampled)
+
     @classmethod
     def sample_panoramic_slab_array(
         cls,
@@ -614,13 +667,13 @@ class PanoramicCurveLogic:
             flip_vertical=flip_vertical,
         )
         mode = projection_mode.strip().upper()
+        base_vox, disp_vox = cls._slab_voxel_basis(cbct_volume, base_surface, disp_x_cols)
         accum: Optional[np.ndarray] = None
 
         for u_val in u_offsets:
-            layer_pts = base_surface + float(u_val) * disp_x_cols[None, :, :]
-            sampled = cbct_volume.sample_world_points(layer_pts, order=1, cval=-1000.0)
+            sampled = cls._sample_slab_layer(cbct_volume, base_vox, disp_vox, float(u_val))
             if accum is None:
-                accum = sampled.copy()
+                accum = sampled
             elif mode == "MIP":
                 np.maximum(accum, sampled, out=accum)
             elif mode == "MINIP":
@@ -776,6 +829,7 @@ class PanoramicCurveLogic:
             flip_vertical=flip_vertical,
         )
         mode = projection_mode.strip().upper()
+        base_vox, disp_vox = self._slab_voxel_basis(cbct_vol, base_surface, disp_x_cols)
         state: Dict[str, Any] = {"idx": 0, "accum": None}
 
         timer = qt.QTimer()
@@ -791,10 +845,9 @@ class PanoramicCurveLogic:
             chunk_end = min(n_layers, idx + 3)
             for l_i in range(idx, chunk_end):
                 u_val = float(u_offsets[l_i])
-                layer_pts = base_surface + u_val * disp_x_cols[None, :, :]
-                sampled = cbct_vol.sample_world_points(layer_pts, order=1, cval=-1000.0)
+                sampled = self._sample_slab_layer(cbct_vol, base_vox, disp_vox, u_val)
                 if state["accum"] is None:
-                    state["accum"] = sampled.copy()
+                    state["accum"] = sampled
                 elif mode == "MIP":
                     np.maximum(state["accum"], sampled, out=state["accum"])
                 elif mode == "MINIP":

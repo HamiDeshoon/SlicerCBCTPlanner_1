@@ -301,6 +301,22 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         undoRow.addWidget(self.btnRedo)
         undoRow.addWidget(self.globalStatusLabel, 1)
         bannerLayout.addLayout(undoRow)
+
+        chipsRow = qt.QHBoxLayout()
+        self.stepStatusLabels: list[Any] = []
+        for step in range(1, 8):
+            chip = qt.QLabel(f"{step} \u25cb")
+            chip.setToolTip(f"Step {step} status")
+            self.stepStatusLabels.append(chip)
+            chipsRow.addWidget(chip)
+        chipsRow.addStretch(1)
+        self.btnRunFullPipeline = qt.QPushButton("Run full pipeline")
+        self.btnRunFullPipeline.setToolTip(
+            "Fit the arch from the segmentation, generate the panoramic CPR, and extract canals in one pass."
+        )
+        self.btnRunFullPipeline.clicked.connect(self.onRunFullPipelineClicked)
+        chipsRow.addWidget(self.btnRunFullPipeline)
+        bannerLayout.addLayout(chipsRow)
         self.layout.addWidget(bannerFrame)
 
         # ==================== STEP 1: LOAD & CUSTOM AI CHECKPOINT ====================
@@ -1527,6 +1543,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     )
         finally:
             self._updatingGUIFromParameterNode = False
+            self._updateStepChips()
 
     def _currentCursorSettings(
         self, sync_axial_slice: bool = False, site_label: Optional[str] = None
@@ -2690,6 +2707,91 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.step5SelectionStatusLabel.setText(
             f"Active Site: Quadrant {q} ({count} tooth site{'s' if count > 1 else ''}: {', '.join(f'#{f}' for f in fdis_sorted)}) — {n_slices} Cross-Section Slices"
         )
+        self._updateStepChips()
+
+    def _updateStepChips(self) -> None:
+        """Refresh the 1-7 status chips from the current scene state."""
+        labels = getattr(self, "stepStatusLabels", None)
+        if not labels or self._parameterNode is None:
+            return
+        vol = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        curve = None
+        if vol is not None and self.logic is not None:
+            try:
+                curve = self.logic.get_curve_node_for_jaw(
+                    vol, self._effectiveJawKey(), parameterNode=self._parameterNode
+                )
+            except Exception:
+                logger.debug("Could not read arch curve for step chips", exc_info=True)
+        pano = self._parameterNode.GetNodeReference("PanoramicVolume")
+        canals = [
+            self._parameterNode.GetNodeReference(role) for role in ("RightCanalCurve", "LeftCanalCurve")
+        ]
+        states = [
+            vol is not None,
+            curve is not None and curve.GetNumberOfControlPoints() >= 4,
+            pano is not None,
+            pano is not None,
+            bool(getattr(self, "selectedTeeth", None)),
+            any(node is not None for node in canals),
+            False,
+        ]
+        for index, done in enumerate(states, start=1):
+            label = labels[index - 1]
+            label.setText(f"{index} \u2713" if done else f"{index} \u25cb")
+            color = "#2e7d32" if done else "#9e9e9e"
+            label.setStyleSheet(f"color: {color}; font-weight: bold;")
+            label.setToolTip(
+                f"Step {index}: {'complete' if done else 'pending' if index < 7 else 'optional'}"
+            )
+
+    def onRunFullPipelineClicked(self) -> None:
+        """Run segmentation -> arch fit -> panoramic CPR -> canals with shared error handling."""
+        volNode = self.volumeSelector.currentNode()
+        segNode = self.segmentationSelector.currentNode()
+        if not volNode or not self.logic:
+            if slicer:
+                slicer.util.warningDisplay("Select a CBCT volume before running the pipeline.")
+            return
+        self.globalStatusLabel.setText("Pipeline: fitting arch...")
+        try:
+            if segNode is None:
+                self.globalStatusLabel.setText("Pipeline stopped: no segmentation selected.")
+                if slicer:
+                    slicer.util.warningDisplay("Select a Segmentation node to fit the arch.")
+                return
+            jaw = self._effectiveJawKey()
+            curveNode = self.logic.auto_fit_arch_for_jaw(
+                volumeNode=volNode,
+                segmentationNode=segNode,
+                jaw=jaw,
+                visible=self.showCurvesCheckBox.isChecked(),
+                confirm_overwrite=False,
+                allow_overwrite_user_edit=False,
+            )
+            fit = self.logic.last_arch_fit
+            if curveNode is None or curveNode.GetNumberOfControlPoints() < 4:
+                reason = self.logic.last_arch_fit_error or "no accepted fit"
+                self.step2HintLabel.setText(f"Auto-Fit rejected ({reason}).")
+                self.globalStatusLabel.setText(f"Pipeline stopped: auto-fit rejected ({reason}).")
+                return
+            self._observeCurveEdits(curveNode)
+            if fit is not None:
+                self.step2HintLabel.setText(
+                    f"Fitted {len(fit.points_ras)} pts, {fit.arc_length_mm:.1f} mm, "
+                    f"RMS {fit.residual_rms_mm:.1f} mm ({fit.method})"
+                )
+            self.step3Box.collapsed = False
+            self.globalStatusLabel.setText("Pipeline: generating panoramic CPR...")
+            self._runPanoramicGeneration(preview=False)
+            self.globalStatusLabel.setText("Pipeline: extracting canals...")
+            self.onExtractCanalsClicked()
+            self.globalStatusLabel.setText("Pipeline complete: arch, panoramic CPR and canals.")
+        except Exception as exc:
+            logger.exception("Run full pipeline failed")
+            self.globalStatusLabel.setText(f"Pipeline failed: {exc}")
+        finally:
+            self.updateGUIFromParameterNode()
 
     def onGenerate8x10PrintLayout(self) -> None:
         """Generate standard 8x10 inch clinical film layout with panoramic view, 15-27 cross-sections, and VR."""
@@ -2806,8 +2908,13 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             card_l = qt.QVBoxLayout(card)
             card_l.setContentsMargins(2, 2, 2, 2)
             lbl = qt.QLabel()
-            if getattr(item, "pixmap", None) is not None:
-                lbl.setPixmap(item.pixmap.scaled(130, 160, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation))
+            uri = getattr(item, "image_data_uri", "")
+            if uri and "," in uri:
+                import base64
+
+                pixmap = qt.QPixmap()
+                if pixmap.loadFromData(base64.b64decode(uri.split(",", 1)[1])):
+                    lbl.setPixmap(pixmap.scaled(130, 160, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation))
             lbl.setAlignment(qt.Qt.AlignCenter)
             card_l.addWidget(lbl)
             grid.addWidget(card, r, c)
@@ -2962,7 +3069,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         self._confirmed_ai_suggestions: Set[int] = set()
         self._cached_engine_key: Optional[Tuple[Any, ...]] = None
         self._cached_engine: Optional[MeasurementEngine] = None
-        self._cached_engine_mask_key: Optional[Tuple[Any, ...]] = None
         self._mask_cache_key: Optional[Tuple[Any, ...]] = None
         self._mask_cache: Optional[np.ndarray] = None
         self._mask_cache_is_5class: bool = False
@@ -2986,7 +3092,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         self._ruler_observers.clear()
         self._cached_engine = None
         self._cached_engine_key = None
-        self._cached_engine_mask_key = None
         self._mask_cache_key = None
         self._mask_cache = None
 
@@ -4353,11 +4458,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         """Cache the label mask separately from the arch, so curve drags skip segment export."""
         if slicer is None or volumeNode is None or segmentationNode is None:
             return None
-        vol_id = volumeNode.GetID() if hasattr(volumeNode, "GetID") else str(id(volumeNode))
-        vol_mtime = int(volumeNode.GetMTime()) if hasattr(volumeNode, "GetMTime") else 0
-        seg_id = segmentationNode.GetID() if hasattr(segmentationNode, "GetID") else str(id(segmentationNode))
-        seg_mtime = int(segmentationNode.GetMTime()) if hasattr(segmentationNode, "GetMTime") else 0
-        mask_key = (vol_id, vol_mtime, seg_id, seg_mtime)
+        mask_key = self._mask_cache_token(volumeNode, segmentationNode)
 
         pNode = self.getParameterNode()
         c_low = self.get_curve_node_for_jaw(volumeNode, "Lower", parameterNode=pNode)
@@ -4373,7 +4474,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         if self._cached_engine is not None and self._cached_engine_key == (mask_key, curve_key):
             return self._cached_engine
 
-        if self._cached_engine is not None and self._cached_engine_mask_key == mask_key:
+        if (
+            self._cached_engine is not None
+            and self._cached_engine_key is not None
+            and self._cached_engine_key[0] == mask_key
+        ):
             # Only the curve/occlusal normal changed: update arches, keep mask and teeth.
             arches = self._collect_arches(volumeNode)
             self._cached_engine.set_arches(arches)
@@ -4382,9 +4487,17 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
 
         engine = self._build_measurement_engine(volumeNode, segmentationNode, mask_key=mask_key)
         self._cached_engine_key = (mask_key, curve_key)
-        self._cached_engine_mask_key = mask_key
         self._cached_engine = engine
         return engine
+
+    @staticmethod
+    def _mask_cache_token(volumeNode: Any, segmentationNode: Any) -> Tuple[Any, ...]:
+        """Identity plus mtime for both nodes; any segment edit invalidates the mask."""
+        key: list = []
+        for node in (volumeNode, segmentationNode):
+            key.append(node.GetID() if hasattr(node, "GetID") else str(id(node)))
+            key.append(int(node.GetMTime()) if hasattr(node, "GetMTime") else 0)
+        return tuple(key)
 
     def _collect_arches(self, volumeNode: Any) -> Dict[str, DentalArch]:
         arches: Dict[str, DentalArch] = {}
@@ -4411,13 +4524,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         if slicer is None or volumeNode is None or segmentationNode is None:
             return None
         if key is None:
-            vol_id = volumeNode.GetID() if hasattr(volumeNode, "GetID") else str(id(volumeNode))
-            vol_mtime = int(volumeNode.GetMTime()) if hasattr(volumeNode, "GetMTime") else 0
-            seg_id = (
-                segmentationNode.GetID() if hasattr(segmentationNode, "GetID") else str(id(segmentationNode))
-            )
-            seg_mtime = int(segmentationNode.GetMTime()) if hasattr(segmentationNode, "GetMTime") else 0
-            key = (vol_id, vol_mtime, seg_id, seg_mtime)
+            key = self._mask_cache_token(volumeNode, segmentationNode)
         if self._mask_cache_key == key and self._mask_cache is not None:
             return self._mask_cache, self._mask_cache_is_5class
         mask, is_5class = self._extract_combined_label_mask(volumeNode, segmentationNode)

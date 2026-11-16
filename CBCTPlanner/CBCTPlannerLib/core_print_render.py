@@ -32,15 +32,6 @@ class CrossSectionRender:
     available: bool = True
     reason: Optional[str] = None
 
-    def png_bytes(self) -> bytes:
-        if not self.available or self.image is None:
-            raise RuntimeError(self.reason or "cross-section renderer unavailable")
-        import io
-
-        buffer = io.BytesIO()
-        self.image.save(buffer, format="PNG")
-        return buffer.getvalue()
-
 
 def hu_window_to_rgb(img_cs: np.ndarray, window: float = 4000.0, level: float = 1000.0) -> np.ndarray:
     """Map HU values to 8-bit grayscale using a window/level."""
@@ -109,11 +100,10 @@ def render_cross_section(
 
     segments: Dict[float, Tuple[float, float]] = getattr(cs, "width_segments", {}) or {}
     for depth, (u_left, u_right) in segments.items():
-        v_line = crest_v - float(depth) if crest_v is not None else None
-        if v_line is None:
-            continue
-        start = _px(u_left, v_line, u_coords, v_coords, scale)
-        end = _px(u_right, v_line, u_coords, v_coords, scale)
+        if crest_v is None:
+            break
+        start = _px(u_left, crest_v - float(depth), u_coords, v_coords, scale)
+        end = _px(u_right, crest_v - float(depth), u_coords, v_coords, scale)
         colour = (0, 220, 255) if depth == 0.0 else (255, 140, 0)
         draw.line([start, end], fill=colour, width=1)
         overlay.append((start, end))
