@@ -49,24 +49,27 @@ _MAX_RIDGE_HEIGHT_FRACTION = 0.90
 
 def _ridge_region_is_plausible(
     bone: np.ndarray, u_coords: np.ndarray, v_coords: np.ndarray
-) -> bool:
-    """True only for a bone region that fits inside the cross-section field.
+) -> Tuple[bool, bool]:
+    """Return `(width_ok, height_ok)` for a bone region inside the cross-section field.
 
-    Rejects regions touching the buccolingual field border or spanning more than
-    `_MAX_RIDGE_WIDTH_FRACTION` of the field width, and regions taller than
-    `_MAX_RIDGE_HEIGHT_FRACTION` of the field height.
+    `width_ok` is False when the region touches the buccolingual field border or spans
+    more than `_MAX_RIDGE_WIDTH_FRACTION` of the field width; `height_ok` is False when
+    the region spans more than `_MAX_RIDGE_HEIGHT_FRACTION` of the field height. An
+    empty region is implausible in both dimensions.
     """
     if not bone.any():
-        return False
+        return False, False
     u_bone = u_coords[np.flatnonzero(bone.any(axis=0))]
     v_bone = v_coords[np.flatnonzero(bone.any(axis=1))]
     u_lo, u_hi = float(u_coords.min()), float(u_coords.max())
     v_lo, v_hi = float(v_coords.min()), float(v_coords.max())
-    if u_bone.min() <= u_lo + _CS_BORDER_TOL_MM or u_bone.max() >= u_hi - _CS_BORDER_TOL_MM:
-        return False
-    if u_bone.max() - u_bone.min() > _MAX_RIDGE_WIDTH_FRACTION * (u_hi - u_lo):
-        return False
-    return v_bone.max() - v_bone.min() <= _MAX_RIDGE_HEIGHT_FRACTION * (v_hi - v_lo)
+    width_ok = not (
+        u_bone.min() <= u_lo + _CS_BORDER_TOL_MM
+        or u_bone.max() >= u_hi - _CS_BORDER_TOL_MM
+        or u_bone.max() - u_bone.min() > _MAX_RIDGE_WIDTH_FRACTION * (u_hi - u_lo)
+    )
+    height_ok = v_bone.max() - v_bone.min() <= _MAX_RIDGE_HEIGHT_FRACTION * (v_hi - v_lo)
+    return bool(width_ok), bool(height_ok)
 
 
 @dataclass
@@ -416,7 +419,7 @@ class MeasurementEngine:
         cs: "CrossSectionData",
         site_source: str,
         is_approx_site: bool,
-    ) -> ImplantSiteMeasurement:
+    ) -> Optional[ImplantSiteMeasurement]:
         """Compute implant metrics from one already-resampled cross-section."""
         u_coords = cs.u_coords
         v_coords = cs.v_coords
@@ -424,10 +427,23 @@ class MeasurementEngine:
         img_cs = cs.img_cs
         P, _T, _N, B = cs.frame
         cs.is_mandible = is_mandible
-        if not _ridge_region_is_plausible(mask_cs == jaw_id, u_coords, v_coords):
+        width_ok, height_ok = _ridge_region_is_plausible(
+            mask_cs == jaw_id, u_coords, v_coords
+        )
+        if not width_ok and not height_ok:
             # Not measurable: leave crest/widths unset so the tile renders the ruler only.
             logger.info("Cross-section at FDI %s rejected: bone region is not a plausible ridge", fdi)
             return None
+        if not width_ok:
+            logger.info(
+                "Cross-section at FDI %s: implausible buccolingual width; reporting height only",
+                fdi,
+            )
+        if not height_ok:
+            logger.info(
+                "Cross-section at FDI %s: implausible ridge height; reporting widths only",
+                fdi,
+            )
         vital_candidates = self._vital_ids(info.quadrant, is_mandible)
         vital_id = next((vid for vid in vital_candidates if (self.mask == vid).any()), None)
         vital_name = "Inferior Alveolar Canal" if is_mandible else "Maxillary Sinus Floor"
@@ -436,16 +452,22 @@ class MeasurementEngine:
             u_coords, v_coords, mask_cs, P, B, is_mandible, jaw_id, vital_id
         )
         cs.crest_v = crest_v
+        if not height_ok:
+            bone_height_mm = None
         if crest_v is not None and bone_height_mm is not None:
             cs.basal_v = crest_v - bone_height_mm if is_mandible else crest_v + bone_height_mm
 
         depths = [0.0, 3.0, 5.0, 6.0, 9.0]
-        widths = self._compute_bone_widths_in_cs(
-            u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths
-        )
-        cs.width_segments = self._compute_bone_widths_with_endpoints_in_cs(
-            u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths
-        )
+        if width_ok:
+            widths = self._compute_bone_widths_in_cs(
+                u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths
+            )
+            cs.width_segments = self._compute_bone_widths_with_endpoints_in_cs(
+                u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths
+            )
+        else:
+            widths = {depth: None for depth in depths}
+            cs.width_segments = {}
         if 0.0 in cs.width_segments:
             u_l, u_r = cs.width_segments[0.0]
             cs.height_u = 0.5 * (u_l + u_r)
@@ -548,7 +570,9 @@ class MeasurementEngine:
         if arch is None:
             return None, None
         frame = arch.get_frame_at_mm(float(arc_mm))
-        cs = self._resample_frame_data(frame)
+        cs = self._resample_frame_data(
+            (frame.point, frame.tangent, frame.normal, frame.binormal)
+        )
         is_mandible = jaw_key == "lower"
 
         fdi = str(fdi_hint) if fdi_hint is not None else ""

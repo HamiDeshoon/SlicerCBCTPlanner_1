@@ -445,6 +445,67 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertAlmostEqual(meas_oblique.bone_height_mm or 0.0, meas_std.bone_height_mm or 0.0, delta=0.75)
         self.assertAlmostEqual(meas_oblique.crest_width_mm or 0.0, meas_std.crest_width_mm or 0.0, delta=0.75)
 
+    @staticmethod
+    def _ridge_engine(mask: np.ndarray, img: np.ndarray) -> MeasurementEngine:
+        vol = CBCTVolume(
+            image=img,
+            spacing=(1.0, 1.0, 1.0),
+            origin=(0.0, 0.0, 0.0),
+            direction=np.eye(3),
+            affine=np.eye(4, dtype=np.float64),
+        )
+        arch = DentalArch(
+            np.array(
+                [[35.0, 25.0, 29.0], [28.0, 25.0, 29.0], [20.0, 25.0, 29.0], [12.0, 25.0, 29.0]],
+                dtype=np.float64,
+            ),
+            jaw_type="lower",
+            ras_convention=True,
+        )
+        return MeasurementEngine(
+            vol, mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=True
+        )
+
+    def test_ridge_plausibility_rejects_full_cross_section_mask(self) -> None:
+        """A mask filling the whole cross-section is not measurable: no crest or width segments."""
+        img = np.full((50, 50, 50), 950.0, dtype=np.float32)
+        mask = np.full((50, 50, 50), 2, dtype=np.uint16)  # 5-class mandible fills the field
+        engine = self._ridge_engine(mask, img)
+        meas, cs = engine.measure_at_arc_mm("lower", 20.0, fdi_hint="46")
+        self.assertIsNone(meas)
+        self.assertIsNotNone(cs)
+        assert cs is not None
+        self.assertIsNone(cs.crest_v)
+        self.assertEqual(cs.width_segments, {})
+
+    def test_ridge_plausibility_accepts_normal_8x19mm_ridge(self) -> None:
+        """A normal 8 mm wide x 19 mm tall ridge still measures."""
+        img = np.full((50, 50, 50), -500.0, dtype=np.float32)
+        mask = np.zeros((50, 50, 50), dtype=np.uint16)
+        mask[10:30, 21:29, 10:40] = 2  # 19 mm tall (Z=10..29), 8 mm wide (Y=21..28)
+        img[10:30, 21:29, 10:40] = 950.0
+        engine = self._ridge_engine(mask, img)
+        meas = engine.measure_implant_site("46")
+        self.assertIsNotNone(meas)
+        assert meas is not None
+        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 19.0, delta=0.75)
+        self.assertAlmostEqual(meas.crest_width_mm or 0.0, 7.0, delta=1.0)
+
+    def test_ridge_plausibility_rejected_tile_draws_no_hw_overlays(self) -> None:
+        """The rendered tile for a rejected cross-section draws no H/W measurement overlays."""
+        from CBCTPlannerLib.core_print_render import render_cross_section
+
+        img = np.full((50, 50, 50), 950.0, dtype=np.float32)
+        mask = np.full((50, 50, 50), 2, dtype=np.uint16)
+        engine = self._ridge_engine(mask, img)
+        meas, cs = engine.measure_at_arc_mm("lower", 20.0, fdi_hint="46")
+        self.assertIsNone(meas)
+        assert cs is not None
+        render = render_cross_section(cs, None, scale=2)
+        self.assertTrue(render.available)
+        self.assertEqual(render.overlay_px, [])
+        self.assertFalse(any(label[2].startswith(("H", "W")) for label in render.labels))
+
     def test_b5_cpr_displacement_and_grid_frame_identical_handedness(self) -> None:
         """B5: Verify CPR displacement frame (-N, B, T) and grid frame both have det = +1 (no mirroring)."""
         dir_mat = PanoramicCurveLogic.compute_cpr_direction_matrix(
@@ -861,6 +922,10 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
             self.assertIn("Quadrant 4", html_txt)
             self.assertIn("Panoramic View", html_txt)
             self.assertNotIn("simulated", html_txt.lower())
+            # Legend boxes must use the same colours the renderer draws for W0/W3/W5.
+            self.assertIn("background: #00dcff", html_txt)
+            self.assertIn("background: #ffb400", html_txt)
+            self.assertIn("background: #ff7828", html_txt)
             pdf_bytes = pdf_p.read_bytes()
             self.assertTrue(pdf_bytes.startswith(b"%PDF"))
             import re
@@ -886,6 +951,10 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
             )
             self.assertEqual(len(slices_multi), 30)
             self.assertGreaterEqual(pdf_multi.read_bytes().count(b"/Type /Page"), 2)
+            multi_html = html_p.read_text(encoding="utf-8")
+            self.assertIn("Page 1 of 2", multi_html)
+            self.assertIn("Page 2 of 2", multi_html)
+            self.assertNotIn("Page 1 of 1", multi_html)
 
     def test_dental_segmentator_vr_preset_is_available_and_ramps_up(self) -> None:
         from CBCTPlannerLib.VRVisualization import VRVisualizationLogic
