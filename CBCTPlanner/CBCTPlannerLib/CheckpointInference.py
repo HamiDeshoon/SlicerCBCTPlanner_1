@@ -367,6 +367,45 @@ def _load_custom_user_architecture(
             return factory()
 
 
+def remove_small_label_islands(labelmap_zyx: np.ndarray, min_voxels: int = 8) -> np.ndarray:
+    """Drop only extra speckle components, never a label's main component.
+
+    Sliding-window argmax often leaves a few isolated voxels at patch seams. For each
+    label the largest connected component is always kept, even when the whole label is
+    smaller than ``min_voxels`` (thin roots and impacted third molars are real anatomy).
+    Only additional components below the threshold are removed, and each pass is
+    restricted to that label's bounding box.
+    """
+    labels = np.asarray(labelmap_zyx)
+    if labels.ndim != 3 or min_voxels <= 1:
+        return labels
+    try:
+        from scipy import ndimage  # type: ignore
+    except ImportError:  # pragma: no cover
+        return labels
+    cleaned = labels.copy()
+    # find_objects returns one bounding box per label value, so each connected-component
+    # pass runs on a small crop instead of the full CBCT volume.
+    for value, bbox in enumerate(ndimage.find_objects(labels), start=1):
+        if bbox is None:
+            continue
+        crop = labels[bbox]
+        components, count = ndimage.label(crop == value)
+        if count <= 0:
+            continue
+        sizes = np.bincount(components.ravel())
+        keep = sizes >= int(min_voxels)
+        keep[0] = False
+        if np.any(sizes[1:]):
+            keep[1 + int(np.argmax(sizes[1:]))] = True
+        if np.all(keep):
+            continue
+        crop_clean = cleaned[bbox]
+        crop_clean[(components > 0) & ~keep[components]] = 0
+        cleaned[bbox] = crop_clean
+    return cleaned
+
+
 class CheckpointInferenceEngine:
     """Loads a user's checkpoint (`.pth`, `.pt`, `.ckpt`, `.onnx`, `.npy`, `.nii.gz`) and runs 3D segmentation."""
 
@@ -477,13 +516,15 @@ class CheckpointInferenceEngine:
             def _onnx_patch_fn(patch_5d: np.ndarray) -> np.ndarray:
                 return np.asarray(sess.run(None, {input_name: patch_5d})[0], dtype=np.float32)
 
-            labelmap = sliding_window_inference_3d(
-                norm_vol,
-                predict_patch_fn=_onnx_patch_fn,
-                patch_size_zyx=spec.patch_size_zyx,
-                num_classes=n_cls,
-                overlap=spec.overlap,
-                on_progress=on_progress,
+            labelmap = remove_small_label_islands(
+                sliding_window_inference_3d(
+                    norm_vol,
+                    predict_patch_fn=_onnx_patch_fn,
+                    patch_size_zyx=spec.patch_size_zyx,
+                    num_classes=n_cls,
+                    overlap=spec.overlap,
+                    on_progress=on_progress,
+                )
             )
             summary = CheckpointLoadSummary(
                 format_type="onnx",
@@ -515,13 +556,15 @@ class CheckpointInferenceEngine:
                             t_out = t_out[0]
                         return t_out.detach().cpu().numpy()
 
-                labelmap = sliding_window_inference_3d(
-                    norm_vol,
-                    predict_patch_fn=_jit_patch_fn,
-                    patch_size_zyx=spec.patch_size_zyx,
-                    num_classes=spec.num_classes or 6,
-                    overlap=spec.overlap,
-                    on_progress=on_progress,
+                labelmap = remove_small_label_islands(
+                    sliding_window_inference_3d(
+                        norm_vol,
+                        predict_patch_fn=_jit_patch_fn,
+                        patch_size_zyx=spec.patch_size_zyx,
+                        num_classes=spec.num_classes or 6,
+                        overlap=spec.overlap,
+                        on_progress=on_progress,
+                    )
                 )
                 summary = CheckpointLoadSummary(
                     format_type="torchscript",
@@ -578,13 +621,15 @@ class CheckpointInferenceEngine:
                     t_out = t_out[0]
                 return t_out.detach().cpu().numpy()
 
-        labelmap = sliding_window_inference_3d(
-            norm_vol,
-            predict_patch_fn=_pt_patch_fn,
-            patch_size_zyx=spec.patch_size_zyx,
-            num_classes=n_cls,
-            overlap=spec.overlap,
-            on_progress=on_progress,
+        labelmap = remove_small_label_islands(
+            sliding_window_inference_3d(
+                norm_vol,
+                predict_patch_fn=_pt_patch_fn,
+                patch_size_zyx=spec.patch_size_zyx,
+                num_classes=n_cls,
+                overlap=spec.overlap,
+                on_progress=on_progress,
+            )
         )
         summary = CheckpointLoadSummary(
             format_type="pytorch_state_dict",

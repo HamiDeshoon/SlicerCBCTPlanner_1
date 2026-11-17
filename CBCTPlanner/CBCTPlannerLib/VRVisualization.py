@@ -46,6 +46,7 @@ class VRVisualizationLogic:
         "CT-AAA",
         "CT-MIP",
         "CT-Cardiac",
+        "DentalSegmentator (Teeth & Bone)",
     )
 
     def __init__(self) -> None:
@@ -286,6 +287,71 @@ class VRVisualizationLogic:
             if was_mod is not None and hasattr(volumePropertyNode, "EndModify"):
                 volumePropertyNode.EndModify(was_mod)
 
+    @classmethod
+    def _apply_dental_segmentator_transfer_function(
+        cls, volumePropertyNode: Any, volume_array: Optional[np.ndarray] = None
+    ) -> None:
+        """DentalSegmentator-style VR: enamel and teeth bright, bone warm, soft tissue transparent."""
+        if not volumePropertyNode:
+            return
+        if volume_array is not None and np.asarray(volume_array).size:
+            sample = np.asarray(volume_array).reshape(-1)
+            step = max(1, sample.size // 50000)
+            values = sample[::step].astype(np.float64)
+            p50, p75, p86, p93, p97, p995 = np.percentile(values, [50.0, 75.0, 86.0, 93.0, 97.0, 99.5])
+            xs = np.maximum.accumulate([p50, p75, p86, p93, p97, p995])
+            for index in range(1, len(xs)):
+                if xs[index] <= xs[index - 1]:
+                    xs[index] = xs[index - 1] + 1.0
+            opacities = [0.0, 0.0, 0.045, 0.28, 0.62, 1.0]
+        else:
+            xs = [-400.0, 80.0, 320.0, 650.0, 1200.0, 2600.0]
+            opacities = [0.0, 0.0, 0.05, 0.32, 0.7, 1.0]
+        colors = [
+            (0.0, 0.0, 0.0),
+            (0.45, 0.18, 0.12),
+            (0.78, 0.55, 0.38),
+            (0.90, 0.80, 0.60),
+            (0.97, 0.93, 0.80),
+            (1.0, 1.0, 0.96),
+        ]
+
+        was_mod = volumePropertyNode.StartModify() if hasattr(volumePropertyNode, "StartModify") else None
+        if hasattr(volumePropertyNode, "DisableModifiedEventOn"):
+            volumePropertyNode.DisableModifiedEventOn()
+        try:
+            opacity_tf = volumePropertyNode.GetScalarOpacity()
+            color_tf = volumePropertyNode.GetColor()
+            gradient_tf = volumePropertyNode.GetGradientOpacity()
+            if opacity_tf:
+                opacity_tf.RemoveAllPoints()
+                for x_val, alpha in zip(xs, opacities):
+                    opacity_tf.AddPoint(float(x_val), float(alpha))
+            if color_tf:
+                color_tf.RemoveAllPoints()
+                for x_val, (r, g, b) in zip(xs, colors):
+                    color_tf.AddRGBPoint(float(x_val), float(r), float(g), float(b))
+            if gradient_tf:
+                gradient_tf.RemoveAllPoints()
+                gradient_tf.AddPoint(0.0, 0.0)
+                gradient_tf.AddPoint(80.0, 0.55)
+                gradient_tf.AddPoint(300.0, 1.0)
+            if hasattr(volumePropertyNode, "SetShade"):
+                volumePropertyNode.SetShade(True)
+            if hasattr(volumePropertyNode, "SetAmbient"):
+                volumePropertyNode.SetAmbient(0.28)
+            if hasattr(volumePropertyNode, "SetDiffuse"):
+                volumePropertyNode.SetDiffuse(0.9)
+            if hasattr(volumePropertyNode, "SetSpecular"):
+                volumePropertyNode.SetSpecular(0.35)
+            if hasattr(volumePropertyNode, "SetSpecularPower"):
+                volumePropertyNode.SetSpecularPower(18.0)
+        finally:
+            if hasattr(volumePropertyNode, "DisableModifiedEventOff"):
+                volumePropertyNode.DisableModifiedEventOff()
+            if was_mod is not None and hasattr(volumePropertyNode, "EndModify"):
+                volumePropertyNode.EndModify(was_mod)
+
     def get_or_create_vr_display_node(self, volumeNode: Any) -> Tuple[Any, bool]:
         """Return (vtkMRMLVolumeRenderingDisplayNode, created_new)."""
         if slicer is None or not volumeNode:
@@ -418,6 +484,10 @@ class VRVisualizationLogic:
         if current_active != preset_name or prop_id not in self._active_baseline_by_prop:
             if preset_name == "CT-Dental-CBCT":
                 self._apply_custom_dental_cbct_transfer_function(
+                    volumePropertyNode, volume_array=volume_array
+                )
+            elif preset_name == "DentalSegmentator (Teeth & Bone)":
+                self._apply_dental_segmentator_transfer_function(
                     volumePropertyNode, volume_array=volume_array
                 )
             else:

@@ -185,6 +185,53 @@ class OrientationSegmentReencodeTests(unittest.TestCase):
         self.assertEqual(target.attrs.get("CBCTPlanner.Orientation"), "RAS")
         self.assertTrue(any("2 segment(s) re-encoded" in note for note in report.notes))
 
+    def test_in_place_standardize_snapshots_segments_before_rewriting_geometry(self) -> None:
+        """The old labelmap must be read in source geometry, not through the new affine."""
+        arr = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+        affine = np.diag([-1.0, 1.0, -1.0, 1.0])
+        result = canonicalize_to_ras(arr, affine)
+        seg_arrays = {
+            "Segment_0": (arr > 20).astype(np.uint8),
+            "Segment_1": (arr < 10).astype(np.uint8),
+        }
+        written: dict[str, np.ndarray] = {}
+        state = {"mutated": False, "reads_after_mutation": 0}
+
+        def _array_from_segment(_node, segment_id, _vol):
+            if state["mutated"]:
+                state["reads_after_mutation"] += 1
+                return np.zeros(arr.shape, dtype=np.uint8)
+            return seg_arrays[segment_id]
+
+        def _write_volume(_self, _node, _image, _affine):
+            state["mutated"] = True
+
+        fake_slicer = SimpleNamespace(
+            util=SimpleNamespace(
+                arrayFromSegmentBinaryLabelmap=_array_from_segment,
+                updateSegmentBinaryLabelmapFromArray=lambda image, _node, segment_id, _vol: (
+                    written.__setitem__(segment_id, np.asarray(image))
+                ),
+            ),
+        )
+        segmentation = _SegmentationNode([_Segment("Tooth 11", True, "11"), _Segment("Tooth 21", True, "21")])
+        volume = _VolumeNode()
+        logic = object.__new__(CBCTPlannerLogic)
+        with (
+            patch.object(planner_module, "slicer", fake_slicer),
+            patch.object(CBCTPlannerLogic, "_volume_array_and_affine", lambda _self, _node: (arr, affine)),
+            patch.object(CBCTPlannerLogic, "_write_volume_array_and_affine", _write_volume),
+            patch.object(
+                CBCTPlannerLogic, "_extract_combined_label_mask", lambda _self, _v, _s: (None, True)
+            ),
+        ):
+            updated_volume, _report = logic.standardize_orientation(volume, segmentation, mode="in_place")
+
+        self.assertIs(updated_volume, volume)
+        self.assertEqual(state["reads_after_mutation"], 0)
+        for segment_id, source in seg_arrays.items():
+            np.testing.assert_array_equal(written[segment_id], apply_ops(source, result.ops))
+
 
 if __name__ == "__main__":
     unittest.main()

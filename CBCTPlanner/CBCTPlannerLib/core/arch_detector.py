@@ -597,6 +597,7 @@ def compute_fdi_arc_positions_mm(
     curve_arc_s: Optional[np.ndarray] = None,
     segmented_centroids: Optional[Dict[str, np.ndarray]] = None,
     calibrated_arc_mm: Optional[Dict[str, float]] = None,
+    tooth_bearing_span_mm: Optional[Tuple[float, float]] = None,
 ) -> Dict[str, ToothArcSite]:
     """B2: Map every FDI tooth in `jaw_type` to its arc-length position along the curve."""
     jaw_key = "lower" if jaw_type.lower().startswith("low") else "upper"
@@ -620,8 +621,13 @@ def compute_fdi_arc_positions_mm(
 
     widths = np.array([ANATOMICAL_MESIODISTAL_WIDTHS_MM.get(fdi, 7.5) for fdi in order], dtype=np.float64)
     cum_centers = np.cumsum(widths) - 0.5 * widths
-    span_start = 0.04 * L
-    span_end = 0.96 * L
+    if tooth_bearing_span_mm is not None:
+        span_start, span_end = (float(v) for v in tooth_bearing_span_mm)
+        span_start = float(np.clip(span_start, 0.0, L))
+        span_end = float(np.clip(span_end, span_start + 1.0, L))
+    else:
+        span_start = 0.04 * L
+        span_end = 0.96 * L
     norm_w = (cum_centers - cum_centers[0]) / max(1e-6, float(cum_centers[-1] - cum_centers[0]))
     table_arcs = span_start + norm_w * (span_end - span_start)
 
@@ -711,12 +717,100 @@ class ArchFitResult:
     method: str  # "fdi_centroids" | "principal_curve"
     accepted: bool = True
     reason: str = ""
+    tooth_bearing_arc_mm: float = 0.0
+    end_extension_mm: float = 0.0
+    applied_extension_mm: float = 0.0
 
 
 def _polyline_arc_length(points: np.ndarray) -> float:
     if len(points) < 2:
         return 0.0
     return float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
+
+
+def _limit_ray_to_box(
+    origin: np.ndarray,
+    direction: np.ndarray,
+    length: float,
+    bounds: Tuple[np.ndarray, np.ndarray],
+) -> float:
+    """Return the usable ray length before leaving an axis-aligned box."""
+    if length <= 0.0:
+        return length
+    lo, hi = (np.asarray(bounds[0], dtype=np.float64), np.asarray(bounds[1], dtype=np.float64))
+    limit = float(length)
+    for axis in range(3):
+        component = float(direction[axis])
+        if component > 1e-12:
+            limit = min(limit, (float(hi[axis]) - float(origin[axis])) / component)
+        elif component < -1e-12:
+            limit = min(limit, (float(lo[axis]) - float(origin[axis])) / component)
+    return float(max(0.0, min(length, limit)))
+
+
+def _extend_arch_endpoints(
+    points: np.ndarray,
+    extension_mm: float,
+    *,
+    inverse_affine: Optional[np.ndarray] = None,
+    shape_zyx: Optional[Tuple[int, int, int]] = None,
+) -> np.ndarray:
+    """Extend a right-to-left arch polyline tangentially at both ends.
+
+    The extension follows the end segment direction, so a horseshoe arch keeps its
+    curvature trend and reaches the retromolar/tuberosity region without inventing
+    a new curve shape. It is sampled at the source curve spacing (no 12 mm teleport)
+    and clipped to the voxel field of view so it cannot leave the scan or double back.
+    Non-positive extensions are a no-op.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    if extension_mm <= 0.0 or len(pts) < 3:
+        return pts
+    start_dir = pts[0] - pts[1]
+    end_dir = pts[-1] - pts[-2]
+    start_norm = float(np.linalg.norm(start_dir))
+    end_norm = float(np.linalg.norm(end_dir))
+    if start_norm < 1e-9 or end_norm < 1e-9:
+        return pts
+    start_dir /= start_norm
+    end_dir /= end_norm
+
+    def _usable_length(origin: np.ndarray, direction: np.ndarray) -> float:
+        if inverse_affine is None or shape_zyx is None:
+            return float(extension_mm)
+        inv = np.asarray(inverse_affine, dtype=np.float64)
+        shape = tuple(int(v) for v in shape_zyx)
+        dir_vox = inv[:3, :3] @ direction
+        speed = float(np.linalg.norm(dir_vox))
+        if speed < 1e-12:
+            return float(extension_mm)
+        origin_vox = inv[:3, :3] @ origin + inv[:3, 3]
+        vox_bounds = (
+            np.zeros(3, dtype=np.float64),
+            np.array([shape[2] - 1, shape[1] - 1, shape[0] - 1], dtype=np.float64),
+        )
+        allowed_vox = _limit_ray_to_box(origin_vox, dir_vox / speed, float(extension_mm) * speed, vox_bounds)
+        return allowed_vox / speed
+
+    start_len = _usable_length(pts[0], start_dir)
+    end_len = _usable_length(pts[-1], end_dir)
+    if start_len <= 1e-9 and end_len <= 1e-9:
+        return pts
+
+    base_steps = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    positive = base_steps[base_steps > 1e-9]
+    spacing = float(np.median(positive)) if len(positive) else float(extension_mm)
+    spacing = max(1e-3, spacing)
+
+    def _samples(origin: np.ndarray, direction: np.ndarray, length: float) -> np.ndarray:
+        if length <= 1e-9:
+            return np.empty((0, 3), dtype=np.float64)
+        count = min(10000, max(1, int(np.ceil(length / spacing))))
+        return origin[None, :] + direction[None, :] * np.linspace(0.0, length, count + 1)[1:, None]
+
+    start_pts = _samples(pts[0], start_dir, start_len)
+    end_pts = _samples(pts[-1], end_dir, end_len)
+    return np.vstack([start_pts[::-1], pts, end_pts])
 
 
 def _spline_through_ordered(
@@ -807,6 +901,7 @@ def fit_arch_from_label_mask(
     jaw: str,
     is_5class: bool,
     num_control_points: int = 11,
+    end_extension_mm: float = 0.0,
 ) -> Optional[ArchFitResult]:
     """Fit a dental arch curve directly from tooth voxels (no mesh extraction).
 
@@ -923,15 +1018,36 @@ def fit_arch_from_label_mask(
         residual = _rms_to_polyline(crown, dense)
         n_used = len(crown)
 
+    tooth_bearing_arc = _polyline_arc_length(dense)
+
+    # Clip against the true voxel field of view, not just a world AABB: an oblique
+    # AABB can include corners that are outside the scanned volume.
+    inverse_affine = np.linalg.inv(matrix)
+    base_ctrl = ctrl.copy()
+    ctrl = _extend_arch_endpoints(
+        ctrl, float(end_extension_mm), inverse_affine=inverse_affine, shape_zyx=mask.shape
+    )
+    dense = _extend_arch_endpoints(
+        dense, float(end_extension_mm), inverse_affine=inverse_affine, shape_zyx=mask.shape
+    )
     arc_length = _polyline_arc_length(dense)
+    applied_extension = min(
+        float(np.linalg.norm(ctrl[0] - base_ctrl[0])),
+        float(np.linalg.norm(ctrl[-1] - base_ctrl[-1])),
+    )
+
     reason = ""
     accepted = True
     if residual > 3.0:
         accepted = False
         reason = f"residual RMS {residual:.2f} mm exceeds 3.0 mm"
-    if not (60.0 <= arc_length <= 200.0):
+    # The clinical gate applies to the segmented tooth row, not the added retromolar
+    # extension, otherwise a short/failed tooth fit could pass by growing its ends.
+    if not (60.0 <= tooth_bearing_arc <= 200.0):
         accepted = False
-        reason = (reason + "; " if reason else "") + f"arc length {arc_length:.1f} mm outside [60, 200] mm"
+        reason = (reason + "; " if reason else "") + (
+            f"tooth-bearing arc {tooth_bearing_arc:.1f} mm outside [60, 200] mm"
+        )
     if len(ctrl) < 4:
         return None
     if ctrl[0, 0] < ctrl[-1, 0]:
@@ -944,5 +1060,8 @@ def fit_arch_from_label_mask(
         method=method,
         accepted=accepted,
         reason=reason,
+        tooth_bearing_arc_mm=float(tooth_bearing_arc),
+        end_extension_mm=float(end_extension_mm),
+        applied_extension_mm=float(applied_extension),
     )
     return result

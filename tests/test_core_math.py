@@ -758,7 +758,7 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         v = np.arange(-10.0, 10.01, 0.25)
         mask_cs = np.zeros((len(v), len(u)), dtype=np.int32)
         mask_cs[v <= 2.0, :] = 2
-        img_cs = np.full_like(mask_cs, 900.0, dtype=np.float32)
+        img_cs = (600.0 + np.add.outer(v * 40.0, u * 20.0)).astype(np.float32)
 
         def _cs() -> CrossSectionData:
             return CrossSectionData(
@@ -840,6 +840,24 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
             self.assertTrue(pdf_p.exists())
             html_txt = html_p.read_text(encoding="utf-8")
             self.assertIn("size: 8in 10in", html_txt)
+            self.assertTrue(
+                all(spec.image_data_uri.startswith("data:image/png;base64,") for spec in slices_15)
+            )
+            self.assertIn("data:image/png;base64,", html_txt)
+            # The PNG must contain real rendered anatomy, not a blank placeholder tile.
+            import base64
+            import io
+
+            from PIL import Image
+
+            first_png = base64.b64decode(slices_15[0].image_data_uri.split(",", 1)[1])
+            with Image.open(io.BytesIO(first_png)) as png:
+                self.assertEqual(png.size, (160, 160))
+                pixels = np.asarray(png.convert("L"), dtype=np.float32)
+            self.assertGreater(float(pixels.std()), 15.0)
+            self.assertGreater(float(pixels.max()) - float(pixels.min()), 80.0)
+            self.assertGreaterEqual(float(pixels.min()), 0.0)
+            self.assertLessEqual(float(pixels.max()), 255.0)
             self.assertIn("Quadrant 4", html_txt)
             self.assertIn("Panoramic View", html_txt)
             self.assertNotIn("simulated", html_txt.lower())
@@ -868,6 +886,91 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
             )
             self.assertEqual(len(slices_multi), 30)
             self.assertGreaterEqual(pdf_multi.read_bytes().count(b"/Type /Page"), 2)
+
+    def test_dental_segmentator_vr_preset_is_available_and_ramps_up(self) -> None:
+        from CBCTPlannerLib.VRVisualization import VRVisualizationLogic
+
+        self.assertIn("DentalSegmentator (Teeth & Bone)", VRVisualizationLogic.SUPPORTED_VR_PRESETS)
+
+        class _TF:
+            def __init__(self):
+                self.points = []
+
+            def RemoveAllPoints(self):
+                self.points = []
+
+            def AddPoint(self, x, a):
+                self.points.append((x, a))
+
+            def AddRGBPoint(self, x, r, g, b):
+                self.points.append((x, r, g, b))
+
+        class _Prop:
+            def __init__(self):
+                self.op = _TF()
+                self.col = _TF()
+                self.grad = _TF()
+
+            def GetScalarOpacity(self):
+                return self.op
+
+            def GetColor(self):
+                return self.col
+
+            def GetGradientOpacity(self):
+                return self.grad
+
+        prop = _Prop()
+        VRVisualizationLogic._apply_dental_segmentator_transfer_function(
+            prop, volume_array=np.linspace(-1000, 3000, 5000, dtype=np.float32)
+        )
+        xs = [p[0] for p in prop.op.points]
+        alphas = [p[1] for p in prop.op.points]
+        self.assertEqual(len(xs), 6)
+        self.assertTrue(all(b > a for a, b in zip(xs, xs[1:])))
+        self.assertEqual(alphas[0], 0.0)
+        self.assertEqual(alphas[-1], 1.0)
+        self.assertEqual(len(prop.col.points), 6)
+
+    def test_remove_small_label_islands_keeps_main_component(self) -> None:
+        from CBCTPlannerLib.CheckpointInference import remove_small_label_islands
+
+        labels = np.zeros((20, 20, 20), dtype=np.uint16)
+        labels[2:10, 2:10, 2:10] = 46
+        labels[15, 15, 15] = 46
+        cleaned = remove_small_label_islands(labels, min_voxels=20)
+        self.assertEqual(int(np.count_nonzero(cleaned == 46)), 8 * 8 * 8)
+        self.assertEqual(int(cleaned[15, 15, 15]), 0)
+
+    def test_remove_small_label_islands_preserves_sub_threshold_sliver_and_blob(self) -> None:
+        """A thin root and a small impacted molar, each below the threshold, must survive."""
+        from CBCTPlannerLib.CheckpointInference import remove_small_label_islands
+
+        labels = np.zeros((24, 24, 24), dtype=np.uint16)
+        labels[2:14, 2, 2] = 38  # 12-voxel thin-root sliver (main component)
+        labels[2, 2, 2] = 38  # extra speckle inside the same bbox
+        labels[16:18, 16:18, 16:19] = 48  # 12-voxel compact impacted-molar blob
+        labels[20, 20, 20] = 48  # isolated one-voxel seam speckle
+        cleaned = remove_small_label_islands(labels, min_voxels=20)
+        self.assertEqual(int(np.count_nonzero(cleaned == 38)), 12)
+        self.assertEqual(int(np.count_nonzero(cleaned == 48)), 12)
+        self.assertTrue(np.all(cleaned[2:14, 2, 2] == 38))
+        self.assertTrue(np.all(cleaned[16:18, 16:18, 16:19] == 48))
+        self.assertEqual(int(cleaned[20, 20, 20]), 0)
+
+    def test_remove_small_label_islands_is_deterministic_and_bbox_bounded(self) -> None:
+        """Repeated runs match, and a neighbouring label inside the crop is never cleared."""
+        from CBCTPlannerLib.CheckpointInference import remove_small_label_islands
+
+        labels = np.zeros((20, 20, 20), dtype=np.uint16)
+        labels[2, 2, 2] = 38
+        labels[2, 2, 18] = 38  # same label's bbox spans x=2..18
+        labels[2, 2, 8:13] = 46  # neighbouring label's only (small) component
+        outputs = [remove_small_label_islands(labels, min_voxels=8) for _ in range(8)]
+        for output in outputs[1:]:
+            np.testing.assert_array_equal(output, outputs[0])
+        self.assertTrue(np.all(outputs[0][2, 2, 8:13] == 46))
+        self.assertEqual(int(np.count_nonzero(outputs[0] == 38)), 1)
 
 
 if __name__ == "__main__":

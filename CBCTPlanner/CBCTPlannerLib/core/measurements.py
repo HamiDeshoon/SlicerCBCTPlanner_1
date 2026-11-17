@@ -14,9 +14,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from . import ensure_optional_package
-from .arch_detector import DentalArch, compute_fdi_arc_positions_mm
+from .arch_detector import (
+    DentalArch,
+    compute_fdi_arc_positions_mm,
+    project_point_to_polyline_arc_mm,
+)
 from .labels import (
     DENTALSEGMENTATOR_CANAL_ID,
+    DENTALSEGMENTATOR_LOWER_TEETH_ID,
+    DENTALSEGMENTATOR_UPPER_TEETH_ID,
     LEFT_IAN_ID,
     LEFT_SINUS_ID,
     LOWER_JAW_ID,
@@ -130,6 +136,7 @@ class MeasurementEngine:
         )
         # O3: Cache ROI-cropped distance transforms keyed by structure_id -> (dt_sub, z_slice, y_slice, x_slice)
         self._cropped_dt_cache: Dict[int, Tuple[np.ndarray, slice, slice, slice]] = {}
+        self._tooth_span_cache: Dict[Tuple[str, int], Optional[Tuple[float, float]]] = {}
 
     def _jaw_id(self, is_mandible: bool) -> int:
         if self.is_dental_segmentator_5class:
@@ -147,8 +154,49 @@ class MeasurementEngine:
     def _arch_for_jaw(self, is_mandible: bool) -> Optional[DentalArch]:
         return self.arches.get("lower" if is_mandible else "upper") or self.arch
 
+    def _tooth_bearing_span_mm(
+        self, arch: Optional[DentalArch], jaw_type: str
+    ) -> Optional[Tuple[float, float]]:
+        """Return the arc interval actually occupied by tooth voxels (5-class masks).
+
+        The arch curve is intentionally extended ~12 mm past the last molar for
+        panoramic coverage. Without anchors, the width table must not be spread over
+        that retromolar extension, or every approximate site shifts posteriorly.
+        """
+        if arch is None or not self.is_dental_segmentator_5class:
+            return None
+        key = (jaw_type, id(arch))
+        if key in self._tooth_span_cache:
+            return self._tooth_span_cache[key]
+        label = (
+            DENTALSEGMENTATOR_LOWER_TEETH_ID
+            if jaw_type.lower().startswith("low")
+            else DENTALSEGMENTATOR_UPPER_TEETH_ID
+        )
+        vox = np.argwhere(self.mask == label)
+        if len(vox) < 20:
+            self._tooth_span_cache[key] = None
+            return None
+        # Bound the projection work irrespective of mask resolution.
+        step = max(1, len(vox) // 4000)
+        world = self.volume.voxel_to_world(vox[::step, ::-1])  # zyx -> xyz
+        arcs = np.asarray(
+            [project_point_to_polyline_arc_mm(arch.pts_dense, arch.cum_arc_lengths, pt)[0] for pt in world],
+            dtype=np.float64,
+        )
+        if len(arcs) < 10:
+            self._tooth_span_cache[key] = None
+            return None
+        lo, hi = np.percentile(arcs, [0.5, 99.5])
+        span = (float(lo), float(hi)) if hi - lo >= 20.0 else None
+        self._tooth_span_cache[key] = span
+        return span
+
     def set_arches(self, arches: Dict[str, DentalArch], arch: Optional[DentalArch] = None) -> None:
         """Update arch geometry without rebuilding the mask or tooth localizer."""
+        cache = getattr(self, "_tooth_span_cache", None)
+        if cache is not None:
+            cache.clear()
         self.arches = dict(arches)
         if arch is not None:
             self.arch = arch
@@ -461,6 +509,7 @@ class MeasurementEngine:
                 jaw_type=jaw_key,
                 arch=arch,
                 segmented_centroids=seg_centroids,
+                tooth_bearing_span_mm=self._tooth_bearing_span_mm(arch, jaw_key),
             )
             fdi = min(site_map, key=lambda key: abs(site_map[key].arc_mm - float(arc_mm)))
         info = get_tooth_label(fdi)
@@ -750,6 +799,7 @@ class MeasurementEngine:
             jaw_type=jaw_type,
             arch=arch,
             segmented_centroids=seg_centroids,
+            tooth_bearing_span_mm=self._tooth_bearing_span_mm(arch, jaw_type),
         )
         site = site_map.get(str(fdi))
         if site is not None:
