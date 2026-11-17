@@ -15,11 +15,17 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/AdvancedTools.py
   ${MODULE_NAME}Lib/CheckpointInference.py
   ${MODULE_NAME}Lib/Phase7Tools.py
+  ${MODULE_NAME}Lib/PrintLayoutEngine.py
+  ${MODULE_NAME}Lib/core_print_render.py
+  ${MODULE_NAME}Lib/RiseMarEngine.py
+  ${MODULE_NAME}Lib/AutomatedDentalToolsEngine.py
   ${MODULE_NAME}Lib/core/__init__.py
   ${MODULE_NAME}Lib/core/arch_detector.py
   ${MODULE_NAME}Lib/core/labels.py
   ${MODULE_NAME}Lib/core/mask_centerline.py
   ${MODULE_NAME}Lib/core/measurements.py
+  ${MODULE_NAME}Lib/core/orientation.py
+  ${MODULE_NAME}Lib/core/print_layout.py
   ${MODULE_NAME}Lib/core/tooth_localizer.py
   ${MODULE_NAME}Lib/core/volume_loader.py
   )

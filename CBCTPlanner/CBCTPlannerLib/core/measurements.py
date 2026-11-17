@@ -96,6 +96,9 @@ class CrossSectionData:
     crest_v: Optional[float]
     width_segments: Dict[float, Tuple[float, float]]
     canal_centroid_uv: Optional[Tuple[float, float]]
+    basal_v: Optional[float] = None
+    height_u: float = 0.0
+    is_mandible: bool = True
 
 
 @dataclass
@@ -365,6 +368,7 @@ class MeasurementEngine:
             crest_v=None,
             width_segments={},
             canal_centroid_uv=None,
+            is_mandible=is_mandible,
         )
         return self._measure_from_cs(
             str(fdi), info, is_mandible, jaw_id, tooth, cs, site_source, is_approx_site
@@ -387,6 +391,7 @@ class MeasurementEngine:
         mask_cs = cs.mask_cs
         img_cs = cs.img_cs
         P, _T, _N, B = cs.frame
+        cs.is_mandible = is_mandible
         vital_candidates = self._vital_ids(info.quadrant, is_mandible)
         vital_id = next((vid for vid in vital_candidates if (self.mask == vid).any()), None)
         vital_name = "Inferior Alveolar Canal" if is_mandible else "Maxillary Sinus Floor"
@@ -395,6 +400,8 @@ class MeasurementEngine:
             u_coords, v_coords, mask_cs, P, B, is_mandible, jaw_id, vital_id
         )
         cs.crest_v = crest_v
+        if crest_v is not None and bone_height_mm is not None:
+            cs.basal_v = crest_v - bone_height_mm if is_mandible else crest_v + bone_height_mm
 
         depths = [0.0, 3.0, 5.0, 6.0, 9.0]
         widths = self._compute_bone_widths_in_cs(
@@ -403,6 +410,13 @@ class MeasurementEngine:
         cs.width_segments = self._compute_bone_widths_with_endpoints_in_cs(
             u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths
         )
+        if 0.0 in cs.width_segments:
+            u_l, u_r = cs.width_segments[0.0]
+            cs.height_u = 0.5 * (u_l + u_r)
+        elif 3.0 in cs.width_segments:
+            u_l, u_r = cs.width_segments[3.0]
+            cs.height_u = 0.5 * (u_l + u_r)
+
         crest_w = widths.get(0.0)
         mid_w = widths.get(6.0) if widths.get(6.0) is not None else widths.get(3.0)
         apical_w = widths.get(9.0)
@@ -454,6 +468,10 @@ class MeasurementEngine:
             is_approximate_site=is_approx_site,
             buccal_bone_thickness_mm=buccal_plate_w,
             lingual_bone_thickness_mm=lingual_plate_w,
+            tooth_length_mm=tooth.total_length_mm if tooth is not None else None,
+            crown_length_mm=tooth.crown_length_mm if tooth is not None else None,
+            root_length_mm=tooth.root_length_mm if tooth is not None else None,
+            crown_to_root_ratio=tooth.crown_to_root_ratio if tooth is not None else None,
             nnt_density_summary=nnt_summary,
         )
 
@@ -546,6 +564,10 @@ class MeasurementEngine:
             wider_u = np.abs(u_coords) <= 4.0
             jaw_central = (mask_cs[:, wider_u] == jaw_id).any(axis=1)
         if not jaw_central.any():
+            # Dentate socket fallback: alveolar cortical plates may sit at |u| up to 7.5 mm around a wide molar root
+            socket_u = np.abs(u_coords) <= 7.5
+            jaw_central = (mask_cs[:, socket_u] == jaw_id).any(axis=1)
+        if not jaw_central.any():
             return None, None, None
 
         v_jaw = v_coords[jaw_central]
@@ -554,7 +576,7 @@ class MeasurementEngine:
             inf_v = float(np.min(v_jaw))
             full_jaw_height = float(max(0.0, crest_v - inf_v))
             if vital_id is not None:
-                canal_u = np.abs(u_coords) <= 4.0
+                canal_u = np.abs(u_coords) <= 5.5
                 canal_rows = (mask_cs[:, canal_u] == vital_id).any(axis=1) & (v_coords <= crest_v)
                 if canal_rows.any():
                     canal_top_v = float(np.max(v_coords[canal_rows]))
@@ -570,7 +592,7 @@ class MeasurementEngine:
             sup_v = float(np.max(v_jaw))
             full_jaw_height = float(max(0.0, sup_v - crest_v))
             if vital_id is not None:
-                sinus_u = np.abs(u_coords) <= 4.0
+                sinus_u = np.abs(u_coords) <= 5.5
                 sinus_rows = (mask_cs[:, sinus_u] == vital_id).any(axis=1) & (v_coords >= crest_v)
                 if sinus_rows.any():
                     sinus_floor_v = float(np.min(v_coords[sinus_rows]))

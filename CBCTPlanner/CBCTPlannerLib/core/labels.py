@@ -1,15 +1,16 @@
 """
 Anatomical Label Registry for Dental CBCT Segmentation (ToothFairy3 / FDI + DentalSegmentator).
-Includes standard adult mesiodistal crown widths (B2) and deterministic segment matching with
-explicit anatomical precedence (B19: pulp > tooth > canal > sinus > jaw).
+Includes standard adult mesiodistal crown widths (B2), vivid SlicerDentalSegmentator-inspired RGB
+colors for every anatomical class and FDI tooth, safe 1-arg/2-arg VTK segment tag reading, and
+deterministic segment matching with explicit anatomical precedence (B19: pulp > tooth > canal > sinus > jaw).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
-from typing import Dict, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class AnatomicalLabel:
     fdi: Optional[str] = None
     quadrant: Optional[int] = None
     tooth_number: Optional[int] = None
+    color: Tuple[float, float, float] = (0.95, 0.92, 0.82)
 
 
 LOWER_JAW_ID = 1
@@ -112,20 +114,87 @@ _TOOTH_TYPE_NAMES = {
     8: "Third Molar (Wisdom)",
 }
 
+# Vivid SlicerDentalSegmentator-inspired tooth palette per quadrant and tooth number
+# Makes crowns and roots vivid and easily distinguishable in both 3D and 2D views.
+_VIVID_TOOTH_COLORS_BY_QUADRANT: Dict[int, Dict[int, Tuple[float, float, float]]] = {
+    # Q1 (Upper Right): Warm Vivid Enamel Gold / Coral Ivory
+    1: {
+        1: (1.00, 0.88, 0.65),
+        2: (0.98, 0.82, 0.56),
+        3: (0.96, 0.74, 0.46),
+        4: (0.95, 0.68, 0.42),
+        5: (0.93, 0.63, 0.38),
+        6: (0.91, 0.57, 0.34),
+        7: (0.88, 0.52, 0.30),
+        8: (0.85, 0.47, 0.27),
+    },
+    # Q2 (Upper Left): Vivid Amber / Golden Pearlescent
+    2: {
+        1: (1.00, 0.90, 0.68),
+        2: (0.99, 0.85, 0.58),
+        3: (0.97, 0.78, 0.48),
+        4: (0.96, 0.72, 0.44),
+        5: (0.94, 0.66, 0.40),
+        6: (0.92, 0.60, 0.36),
+        7: (0.89, 0.55, 0.32),
+        8: (0.86, 0.50, 0.28),
+    },
+    # Q3 (Lower Left): Vivid Pearl Ivory / Cream White
+    3: {
+        1: (0.99, 0.97, 0.86),
+        2: (0.97, 0.94, 0.80),
+        3: (0.95, 0.90, 0.73),
+        4: (0.93, 0.87, 0.68),
+        5: (0.91, 0.84, 0.63),
+        6: (0.89, 0.80, 0.58),
+        7: (0.86, 0.76, 0.53),
+        8: (0.83, 0.72, 0.48),
+    },
+    # Q4 (Lower Right): Vivid Champagne Ivory / Warm Pearl
+    4: {
+        1: (0.98, 0.96, 0.84),
+        2: (0.96, 0.92, 0.78),
+        3: (0.94, 0.88, 0.71),
+        4: (0.92, 0.85, 0.66),
+        5: (0.90, 0.82, 0.61),
+        6: (0.88, 0.78, 0.56),
+        7: (0.85, 0.74, 0.51),
+        8: (0.82, 0.70, 0.46),
+    },
+}
+
 LABELS_BY_ID: Dict[int, AnatomicalLabel] = {
-    LOWER_JAW_ID: AnatomicalLabel(LOWER_JAW_ID, "Lower Jawbone (Mandible)", "jaw"),
-    UPPER_JAW_ID: AnatomicalLabel(UPPER_JAW_ID, "Upper Jawbone (Maxilla)", "jaw"),
-    LEFT_IAN_ID: AnatomicalLabel(LEFT_IAN_ID, "Left Inferior Alveolar Canal", "canal"),
-    RIGHT_IAN_ID: AnatomicalLabel(RIGHT_IAN_ID, "Right Inferior Alveolar Canal", "canal"),
-    LEFT_SINUS_ID: AnatomicalLabel(LEFT_SINUS_ID, "Left Maxillary Sinus", "sinus"),
-    RIGHT_SINUS_ID: AnatomicalLabel(RIGHT_SINUS_ID, "Right Maxillary Sinus", "sinus"),
-    PHARYNX_ID: AnatomicalLabel(PHARYNX_ID, "Pharynx", "airway"),
-    BRIDGE_ID: AnatomicalLabel(BRIDGE_ID, "Bridge", "restoration"),
-    CROWN_ID: AnatomicalLabel(CROWN_ID, "Crown", "restoration"),
-    IMPLANT_ID: AnatomicalLabel(IMPLANT_ID, "Implant", "restoration"),
-    LINGUAL_CANAL_ID: AnatomicalLabel(LINGUAL_CANAL_ID, "Lingual Canal", "canal"),
-    LEFT_INCISIVE_CANAL_ID: AnatomicalLabel(LEFT_INCISIVE_CANAL_ID, "Left Incisive Canal", "canal"),
-    RIGHT_INCISIVE_CANAL_ID: AnatomicalLabel(RIGHT_INCISIVE_CANAL_ID, "Right Incisive Canal", "canal"),
+    LOWER_JAW_ID: AnatomicalLabel(
+        LOWER_JAW_ID, "Lower Jawbone (Mandible)", "jaw", color=(0.83, 0.63, 0.90)
+    ),
+    UPPER_JAW_ID: AnatomicalLabel(
+        UPPER_JAW_ID, "Upper Jawbone (Maxilla)", "jaw", color=(0.89, 0.87, 0.56)
+    ),
+    LEFT_IAN_ID: AnatomicalLabel(
+        LEFT_IAN_ID, "Left Inferior Alveolar Canal", "canal", color=(0.98, 0.24, 0.18)
+    ),
+    RIGHT_IAN_ID: AnatomicalLabel(
+        RIGHT_IAN_ID, "Right Inferior Alveolar Canal", "canal", color=(1.00, 0.32, 0.16)
+    ),
+    LEFT_SINUS_ID: AnatomicalLabel(
+        LEFT_SINUS_ID, "Left Maxillary Sinus", "sinus", color=(0.22, 0.74, 0.97)
+    ),
+    RIGHT_SINUS_ID: AnatomicalLabel(
+        RIGHT_SINUS_ID, "Right Maxillary Sinus", "sinus", color=(0.18, 0.68, 0.94)
+    ),
+    PHARYNX_ID: AnatomicalLabel(PHARYNX_ID, "Pharynx", "airway", color=(0.35, 0.85, 0.65)),
+    BRIDGE_ID: AnatomicalLabel(BRIDGE_ID, "Bridge", "restoration", color=(0.30, 0.82, 0.95)),
+    CROWN_ID: AnatomicalLabel(CROWN_ID, "Crown", "restoration", color=(0.40, 0.90, 0.95)),
+    IMPLANT_ID: AnatomicalLabel(IMPLANT_ID, "Implant", "restoration", color=(0.20, 0.92, 0.55)),
+    LINGUAL_CANAL_ID: AnatomicalLabel(
+        LINGUAL_CANAL_ID, "Lingual Canal", "canal", color=(1.00, 0.45, 0.20)
+    ),
+    LEFT_INCISIVE_CANAL_ID: AnatomicalLabel(
+        LEFT_INCISIVE_CANAL_ID, "Left Incisive Canal", "canal", color=(1.00, 0.50, 0.25)
+    ),
+    RIGHT_INCISIVE_CANAL_ID: AnatomicalLabel(
+        RIGHT_INCISIVE_CANAL_ID, "Right Incisive Canal", "canal", color=(1.00, 0.50, 0.25)
+    ),
 }
 
 FDI_TO_TOOTH_ID: Dict[str, int] = {}
@@ -140,6 +209,7 @@ for _q in range(1, 5):
         _pulp_id = 100 + _tooth_id
         _q_name = _QUADRANT_NAMES[_q]
         _t_name = _TOOTH_TYPE_NAMES[_t]
+        _t_col = _VIVID_TOOTH_COLORS_BY_QUADRANT[_q][_t]
 
         LABELS_BY_ID[_tooth_id] = AnatomicalLabel(
             id=_tooth_id,
@@ -148,6 +218,7 @@ for _q in range(1, 5):
             fdi=_fdi,
             quadrant=_q,
             tooth_number=_t,
+            color=_t_col,
         )
         LABELS_BY_ID[_pulp_id] = AnatomicalLabel(
             id=_pulp_id,
@@ -156,6 +227,7 @@ for _q in range(1, 5):
             fdi=_fdi,
             quadrant=_q,
             tooth_number=_t,
+            color=(1.00, 0.12, 0.56),
         )
         FDI_TO_TOOTH_ID[_fdi] = _tooth_id
         TOOTH_ID_TO_FDI[_tooth_id] = _fdi
@@ -184,6 +256,42 @@ _EXPLICIT_TOOTH_FDI_RE = re.compile(
     r"(?:(?<![a-zA-Z0-9])(?:tooth|fdi|t)|#)[\s_\-]*([1-4][1-8])(?![0-9])", re.IGNORECASE
 )
 _EXACT_FDI_TOKEN_RE = re.compile(r"(?:^|[^a-zA-Z0-9_])([1-4][1-8])(?:$|[^a-zA-Z0-9_])")
+
+
+def safe_get_segment_tag(segment: Any, tag_name: str) -> Optional[str]:
+    """Read a tag from a Slicer `vtkSegment` supporting both VTK C++ 2-arg `vtk.reference` and 1-arg test mocks."""
+    if segment is None:
+        return None
+    if hasattr(segment, "GetTag"):
+        # 1. Try 2-arg VTK C++ signature first
+        try:
+            import vtk  # type: ignore
+
+            if hasattr(vtk, "reference"):
+                ref_val = vtk.reference("")
+                if segment.GetTag(tag_name, ref_val):
+                    val_str = str(ref_val).strip()
+                    if val_str:
+                        return val_str
+        except TypeError:
+            pass
+        except Exception:
+            pass
+        # 2. Fallback to 1-arg Python/mock signature
+        try:
+            val = segment.GetTag(tag_name)
+            if val is not None and str(val).strip():
+                return str(val).strip()
+        except Exception:
+            pass
+    if hasattr(segment, "GetAttribute"):
+        try:
+            val = segment.GetAttribute(tag_name)
+            if val is not None and str(val).strip():
+                return str(val).strip()
+        except Exception:
+            pass
+    return None
 
 
 def get_label_info(label_id: int) -> Optional[AnatomicalLabel]:
@@ -286,6 +394,24 @@ def match_segment_to_label_and_precedence(
                 return info.id, info.category, False, SEGMENT_PRECEDENCE.get(info.category, 1)
 
     return 0, "unknown", False, SEGMENT_PRECEDENCE["unknown"]
+
+
+def resolve_combined_mask_scheme(
+    matched_records: Sequence[Tuple[int, str, bool, int]],
+) -> bool:
+    """Determine whether a set of matched `(label_val, category, seg_is_5class, prec)` segments is truly 5-class.
+
+    If ANY segment maps to an individual FDI tooth (`11..48`), pulp (`111..148`), split Left/Right IAN
+    (`LEFT_IAN_ID=3`, `RIGHT_IAN_ID=4` with `seg_is_5class=False`), or sinus (`5, 6` with `seg_is_5class=False`),
+    the segmentation uses the canonical ToothFairy3 / multi-class numbering (`is_5class = False`).
+    """
+    has_multi_class_token = any(
+        (not is_5c and lbl > 0) or (lbl >= 11)
+        for lbl, _cat, is_5c, _prec in matched_records
+    )
+    if has_multi_class_token:
+        return False
+    return any(is_5c for _lbl, _cat, is_5c, _prec in matched_records)
 
 
 _FDI_TOOTH_ORDER = [

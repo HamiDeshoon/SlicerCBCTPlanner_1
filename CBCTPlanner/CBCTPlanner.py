@@ -100,8 +100,13 @@ except ImportError:
 
 from CBCTPlannerLib import (
     CLINICAL_DISCLAIMER_TEXT,
+    DEFAULT_RISEMAR_WEIGHTS_PATH,
     SOFTWARE_VERSION,
+    VIVID_3D_STYLE_PRESETS,
+    ALILandmarkResult,
+    ASOOrientationResult,
     AirwayAnalysisResult,
+    AutomatedDentalToolsEngine,
     CanalTracerLogic,
     CephalometricMeasurement,
     CheckpointInferenceEngine,
@@ -110,14 +115,19 @@ from CBCTPlannerLib import (
     CrossSectionNavigator,
     CursorSettings,
     GuideSleeveSpec,
+    ImpactedToothCLICResult,
     ImplantPlannerLogic,
     PanoramicCurveLogic,
     PlacedImplant,
     ProstheticPlanner,
     ProstheticProposal,
+    RiseMarConfig,
+    RiseMarEngine,
+    RiseMarResult,
     SurgicalGuideGenerator,
     TMJCondyleFrame,
     UndoRedoManager,
+    VFACEAsymmetryResult,
     VRVisualizationLogic,
     capture_slice_view_png_base64,
     compute_3d_cephalometry,
@@ -149,6 +159,8 @@ from CBCTPlannerLib.core.labels import (
     MANDIBULAR_TEETH_IDS,
     MAXILLARY_TEETH_IDS,
     match_segment_to_label_and_precedence,
+    resolve_combined_mask_scheme,
+    safe_get_segment_tag,
 )
 from CBCTPlannerLib.core.measurements import (
     MISCH_APPROXIMATE_DISCLAIMER,
@@ -235,6 +247,48 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.step6ContentWidget: Any = None
         self.step7ContentWidget: Any = None
 
+        # v3.0 UI/UX Upgrade attributes (Radiologist/Dentist Workspace, RISE-MAR, Vivid 3D Roots, Inline Gallery, ADT)
+        self.roleModeCombo: Any = None
+        self.btnQuickVividRoots: Any = None
+        self.btnQuickRiseMar: Any = None
+        self.btnQuickMeasureGallery: Any = None
+        self.btnQuickPrintLayout: Any = None
+        self.risemarBox: Any = None
+        self.risemarWeightsPathEdit: Any = None
+        self.btnBrowseRiseMarWeights: Any = None
+        self.risemarFastCheck: Any = None
+        self.risemarPreserveMetalCheck: Any = None
+        self.risemarInPlaceCheck: Any = None
+        self.btnRunRiseMar: Any = None
+        self.risemarStatusLabel: Any = None
+        self.surfaceStylePresetCombo: Any = None
+        self.jawOpacitySlider: Any = None
+        self.surfaceSmoothingSlider: Any = None
+        self.siteClinicalCalloutLabel: Any = None
+        self.printOutputDirEdit: Any = None
+        self.btnBrowsePrintDir: Any = None
+        self.btnOpenPrintDir: Any = None
+        self.inlineGalleryBox: Any = None
+        self.inlineGalleryStatusLabel: Any = None
+        self.inlineGalleryScroll: Any = None
+        self.inlineGalleryContainer: Any = None
+        self.inlineGalleryGrid: Any = None
+        self.btnRefreshInlineGallery: Any = None
+        self.btnRunNativeALI: Any = None
+        self.btnRunNativeASO: Any = None
+        self.btnRunNativeCLIC: Any = None
+        self.btnRunNativeVFACE: Any = None
+        self.btnRunAutoCropROI: Any = None
+        self.adtResultsLabel: Any = None
+
+    def getParameterNode(self) -> Any:
+        """Return active MRML ParameterNode safely from widget or logic."""
+        if self._parameterNode is not None:
+            return self._parameterNode
+        if self.logic is not None and hasattr(self.logic, "getParameterNode"):
+            return self.logic.getParameterNode()
+        return None
+
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
         self.logic = CBCTPlannerLogic()
@@ -317,6 +371,60 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnRunFullPipeline.clicked.connect(self.onRunFullPipelineClicked)
         chipsRow.addWidget(self.btnRunFullPipeline)
         bannerLayout.addLayout(chipsRow)
+
+        # v3.0 Clinical Role Workspace & 1-Click Radiologist / Dentist Action Bar
+        roleRow = qt.QHBoxLayout()
+        roleRow.addWidget(qt.QLabel("<b>Clinical Workspace:</b>"))
+        self.roleModeCombo = qt.QComboBox()
+        self.roleModeCombo.addItems(
+            [
+                "All Clinical Tools (Full Suite)",
+                "Radiologist Workspace (Measurements, RISE-MAR & Film Print)",
+                "Implant & Surgical Dentist (Vivid Roots 3D, Implants & Guide)",
+                "Ortho & Craniofacial (ALI Landmarks, ASO, CLI-C, VFACE & Ceph)",
+            ]
+        )
+        self.roleModeCombo.setToolTip(
+            "Switch clinical workspace focus tailored for Radiologists, Implant Dentists, or Orthodontists."
+        )
+        roleRow.addWidget(self.roleModeCombo, 1)
+        bannerLayout.addLayout(roleRow)
+
+        quickBar = qt.QHBoxLayout()
+        self.btnQuickVividRoots = qt.QPushButton("🦷 Vivid Teeth & Roots 3D")
+        self.btnQuickVividRoots.setToolTip(
+            "Apply SlicerDentalSegmentator vivid tooth & root colors with translucent bone (0.25 opacity) so roots & canals shine through."
+        )
+        self.btnQuickVividRoots.setStyleSheet(
+            "font-weight: bold; background-color: #0d9488; color: white; padding: 4px 8px; border-radius: 3px;"
+        )
+        self.btnQuickRiseMar = qt.QPushButton("🧲 RISE-MAR (Artifact Reduction)")
+        self.btnQuickRiseMar.setToolTip(
+            "Run RISE-MAR Metal Artifact Reduction using C:\\Users\\hamid\\Downloads\\risemar_dental_preview.pkl."
+        )
+        self.btnQuickRiseMar.setStyleSheet(
+            "font-weight: bold; background-color: #7c3aed; color: white; padding: 4px 8px; border-radius: 3px;"
+        )
+        self.btnQuickMeasureGallery = qt.QPushButton("📐 Measure & Show Slices")
+        self.btnQuickMeasureGallery.setToolTip(
+            "Compute bone morphometry and display measured cross-sectional images directly in Step 5."
+        )
+        self.btnQuickMeasureGallery.setStyleSheet(
+            "font-weight: bold; background-color: #2563eb; color: white; padding: 4px 8px; border-radius: 3px;"
+        )
+        self.btnQuickPrintLayout = qt.QPushButton("🖨️ Print 8×10″ Film (PDF+PNG)")
+        self.btnQuickPrintLayout.setToolTip(
+            "Generate printable 8x10 inch clinical film (PDF, 300 DPI PNG, and HTML) and open preview."
+        )
+        self.btnQuickPrintLayout.setStyleSheet(
+            "font-weight: bold; background-color: #0284c7; color: white; padding: 4px 8px; border-radius: 3px;"
+        )
+        quickBar.addWidget(self.btnQuickVividRoots)
+        quickBar.addWidget(self.btnQuickRiseMar)
+        quickBar.addWidget(self.btnQuickMeasureGallery)
+        quickBar.addWidget(self.btnQuickPrintLayout)
+        bannerLayout.addLayout(quickBar)
+
         self.layout.addWidget(bannerFrame)
 
         # AI segmentation configuration lives outside the clinical workflow steps.
@@ -573,14 +681,87 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.showVrCheckBox.setToolTip("Toggle 3D Volume Rendering on the input CBCT volume.")
         self.cropVrCheckBox = qt.QCheckBox("ROI Crop")
         self.cropVrCheckBox.setToolTip("Enable 3D ROI cropping box for Volume Rendering.")
-        self.btnApplyDental3D = qt.QPushButton("Style 3D + FDI Overlays")
+        self.btnApplyDental3D = qt.QPushButton("Style Vivid 3D Teeth & Roots + FDI Overlays")
         self.btnApplyDental3D.setToolTip(
-            "Apply DentalSegmentator 3D colors/opacities and show tooth outlines & #FDI labels on Pano/CS (F4)."
+            "Apply SlicerDentalSegmentator vivid 3D tooth & root colors, translucent bone, and #FDI labels on Pano/CS."
         )
         vrToggleRow.addWidget(self.showVrCheckBox)
         vrToggleRow.addWidget(self.cropVrCheckBox)
         vrToggleRow.addWidget(self.btnApplyDental3D)
         step1Layout.addRow(vrToggleRow)
+
+        # SlicerDentalSegmentator Vivid 3D Surface & Root Visibility Controls
+        self.surfaceStylePresetCombo = qt.QComboBox()
+        self.surfaceStylePresetCombo.addItems(list(VIVID_3D_STYLE_PRESETS.keys()))
+        self.surfaceStylePresetCombo.setToolTip(
+            "Select 3D segmentation surface preset (e.g. Vivid Teeth & Roots with translucent bone, Roots & Nerve X-Ray, or Endo Root-Canal view)."
+        )
+        step1Layout.addRow("3D Surface Style Preset:", self.surfaceStylePresetCombo)
+
+        vividSlidersRow = qt.QHBoxLayout()
+        self.jawOpacitySlider = ctk.ctkSliderWidget()
+        self.jawOpacitySlider.minimum = 0.0
+        self.jawOpacitySlider.maximum = 1.0
+        self.jawOpacitySlider.singleStep = 0.05
+        self.jawOpacitySlider.decimals = 2
+        self.jawOpacitySlider.value = 0.25
+        self.jawOpacitySlider.setToolTip(
+            "Adjust Maxilla & Mandible 3D bone opacity (0.25 default makes tooth roots and mandibular canal vividly visible through bone)."
+        )
+        self.surfaceSmoothingSlider = ctk.ctkSliderWidget()
+        self.surfaceSmoothingSlider.minimum = 0.0
+        self.surfaceSmoothingSlider.maximum = 1.0
+        self.surfaceSmoothingSlider.singleStep = 0.05
+        self.surfaceSmoothingSlider.decimals = 2
+        self.surfaceSmoothingSlider.value = 0.40
+        self.surfaceSmoothingSlider.setToolTip(
+            "SlicerDentalSegmentator 3D closed-surface smoothing factor (0.40 default)."
+        )
+        vividSlidersRow.addWidget(qt.QLabel("Bone 3D Opacity:"))
+        vividSlidersRow.addWidget(self.jawOpacitySlider)
+        vividSlidersRow.addWidget(qt.QLabel("Smoothing:"))
+        vividSlidersRow.addWidget(self.surfaceSmoothingSlider)
+        step1Layout.addRow("Root Visibility & Smoothing:", vividSlidersRow)
+
+        # RISE-MAR Metal Artifact Reduction Section (Masaaki-75/rise-mar)
+        self.risemarBox = ctk.ctkCollapsibleButton()
+        self.risemarBox.text = "RISE-MAR Dental Metal Artifact Reduction (Masaaki-75/rise-mar)"
+        self.risemarBox.collapsed = False
+        step1Layout.addRow(self.risemarBox)
+        risemarLayout = qt.QFormLayout(self.risemarBox)
+
+        marPathRow = qt.QHBoxLayout()
+        self.risemarWeightsPathEdit = qt.QLineEdit()
+        self.risemarWeightsPathEdit.setText(DEFAULT_RISEMAR_WEIGHTS_PATH)
+        self.risemarWeightsPathEdit.setToolTip(
+            "Path to RISE-MAR model weights (.pkl / .pth). Defaults to C:\\Users\\hamid\\Downloads\\risemar_dental_preview.pkl."
+        )
+        self.btnBrowseRiseMarWeights = qt.QPushButton("Browse...")
+        marPathRow.addWidget(self.risemarWeightsPathEdit, 1)
+        marPathRow.addWidget(self.btnBrowseRiseMarWeights)
+        risemarLayout.addRow("RISE-MAR Weights (.pkl):", marPathRow)
+
+        marOptRow = qt.QHBoxLayout()
+        self.risemarFastCheck = qt.QCheckBox("Fast Mode (Metal Slices >= 2200 HU Only)")
+        self.risemarFastCheck.setChecked(True)
+        self.risemarPreserveMetalCheck = qt.QCheckBox("Preserve Metal Core")
+        self.risemarPreserveMetalCheck.setChecked(True)
+        self.risemarInPlaceCheck = qt.QCheckBox("Apply In-Place")
+        self.risemarInPlaceCheck.setChecked(False)
+        marOptRow.addWidget(self.risemarFastCheck)
+        marOptRow.addWidget(self.risemarPreserveMetalCheck)
+        marOptRow.addWidget(self.risemarInPlaceCheck)
+        risemarLayout.addRow("MAR Options:", marOptRow)
+
+        marRunRow = qt.QHBoxLayout()
+        self.btnRunRiseMar = qt.QPushButton("🧲 Run RISE-MAR Metal Artifact Reduction")
+        self.btnRunRiseMar.setStyleSheet(
+            "font-weight: bold; background-color: #7c3aed; color: white; padding: 6px;"
+        )
+        self.risemarStatusLabel = qt.QLabel("Ready (Weights: risemar_dental_preview.pkl)")
+        marRunRow.addWidget(self.btnRunRiseMar)
+        marRunRow.addWidget(self.risemarStatusLabel, 1)
+        risemarLayout.addRow(marRunRow)
 
         # ==================== STEP 2: ARCH (B18, B20, F3) ====================
         self.step2Box = ctk.ctkCollapsibleButton()
@@ -953,9 +1134,41 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.step5SelectionStatusLabel.setStyleSheet("font-weight: bold; color: #38bdf8; padding: 4px;")
         step5Layout.addWidget(self.step5SelectionStatusLabel)
 
+        # Radiologist & Dentist Clinical Callout Card for Active Tooth Site
+        self.siteClinicalCalloutLabel = qt.QLabel(
+            "<b>Clinical Callout:</b> Select a tooth or quadrant above to inspect Ridge Height (H), "
+            "Crestal/3mm/5mm Widths (W0/W3/W5), IAN Nerve Clearance, Bone Density (HU / Misch D1–D4), and Implant Sizing."
+        )
+        self.siteClinicalCalloutLabel.setWordWrap(True)
+        self.siteClinicalCalloutLabel.setStyleSheet(
+            "background-color: #0f172a; color: #f8fafc; border: 1px solid #334155; border-left: 4px solid #38bdf8; padding: 8px; border-radius: 4px;"
+        )
+        step5Layout.addWidget(self.siteClinicalCalloutLabel)
+
+        # Print Output Folder Picker (ensures print files are saved to a visible user directory)
+        printDirRow = qt.QHBoxLayout()
+        printDirRow.addWidget(qt.QLabel("Print Output Folder:"))
+        self.printOutputDirEdit = qt.QLineEdit()
+        try:
+            from CBCTPlannerLib.PrintLayoutEngine import PrintLayoutEngine
+
+            self.printOutputDirEdit.setText(str(PrintLayoutEngine.default_export_directory()))
+        except Exception:
+            self.printOutputDirEdit.setText(str(Path.home() / "Documents" / "CBCTPlanner_Prints"))
+        self.printOutputDirEdit.setToolTip(
+            "Folder where printable PDF, 300 DPI PNG, and HTML film layouts are saved."
+        )
+        self.btnBrowsePrintDir = qt.QPushButton("Browse...")
+        self.btnOpenPrintDir = qt.QPushButton("📂 Open Folder")
+        self.btnOpenPrintDir.setToolTip("Open the print output folder in your system file explorer.")
+        printDirRow.addWidget(self.printOutputDirEdit, 1)
+        printDirRow.addWidget(self.btnBrowsePrintDir)
+        printDirRow.addWidget(self.btnOpenPrintDir)
+        step5Layout.addLayout(printDirRow)
+
         # Primary Action: 8x10 Print Layout Button
         self.btnGenerate8x10PrintLayout = qt.QPushButton(
-            "🖨️ Generate 8×10″ Print Layout (Pano + 15–27 Cross-Sections + VR)"
+            "🖨️ Generate 8×10″ Print Layout (Saves PDF + 300 DPI PNG + HTML & Opens Preview)"
         )
         self.btnGenerate8x10PrintLayout.setToolTip(
             "Generate standard 8x10 inch clinical film layout with panoramic reformat, "
@@ -965,6 +1178,35 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "font-size: 13px; font-weight: bold; padding: 8px; background-color: #0284c7; color: white; border-radius: 4px;"
         )
         step5Layout.addWidget(self.btnGenerate8x10PrintLayout)
+
+        # Embedded Inline Measured Cross-Section Images Gallery (always visible in Step 5!)
+        self.inlineGalleryBox = ctk.ctkCollapsibleButton()
+        self.inlineGalleryBox.text = "Live Measured Cross-Section Images (H, W0, W3, W5 & Nerve Overlays)"
+        self.inlineGalleryBox.collapsed = False
+        galleryOuter = qt.QVBoxLayout(self.inlineGalleryBox)
+
+        galleryTopRow = qt.QHBoxLayout()
+        self.inlineGalleryStatusLabel = qt.QLabel(
+            "Click any tooth/quadrant or 'Refresh Measured Slices' to render measured cross-section images inline."
+        )
+        self.inlineGalleryStatusLabel.setWordWrap(True)
+        self.btnRefreshInlineGallery = qt.QPushButton("🔄 Refresh Measured Slices")
+        self.btnRefreshInlineGallery.setToolTip(
+            "Render and display measured cross-sectional slices with H, W0, W3, W5, and Nerve lines right here in the panel."
+        )
+        galleryTopRow.addWidget(self.inlineGalleryStatusLabel, 1)
+        galleryTopRow.addWidget(self.btnRefreshInlineGallery)
+        galleryOuter.addLayout(galleryTopRow)
+
+        self.inlineGalleryScroll = qt.QScrollArea()
+        self.inlineGalleryScroll.setWidgetResizable(True)
+        self.inlineGalleryScroll.setMinimumHeight(230)
+        self.inlineGalleryContainer = qt.QWidget()
+        self.inlineGalleryGrid = qt.QGridLayout(self.inlineGalleryContainer)
+        self.inlineGalleryGrid.setSpacing(6)
+        self.inlineGalleryScroll.setWidget(self.inlineGalleryContainer)
+        galleryOuter.addWidget(self.inlineGalleryScroll)
+        step5Layout.addWidget(self.inlineGalleryBox)
 
         # Collapsible Section for Advanced Details (prevents UI clutter)
         self.advancedStep5Box = ctk.ctkCollapsibleButton()
@@ -1181,18 +1423,56 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         cephRow.addWidget(self.btnCompute3DCeph)
         step7Layout.addRow("Cephalometry:", cephRow)
 
+        adtNativeRow1 = qt.QHBoxLayout()
+        self.btnRunNativeALI = qt.QPushButton("📍 ALI: Auto-Identify 3D Landmarks")
+        self.btnRunNativeALI.setToolTip(
+            "Automatically identify 3D craniofacial & dental landmarks (S, N, A, B, ANS, PNS, Go, Co, Me, Gn, Pg, Mental Foramen, Crown/Apex) and create Slicer Markups."
+        )
+        self.btnRunNativeASO = qt.QPushButton("🧭 ASO: Auto-Orient Head & Occlusal")
+        self.btnRunNativeASO.setToolTip(
+            "Compute and apply 3D Standardized Orientation (Midsagittal + Occlusal/Frankfort Horizontal alignment)."
+        )
+        adtNativeRow1.addWidget(self.btnRunNativeALI)
+        adtNativeRow1.addWidget(self.btnRunNativeASO)
+        step7Layout.addRow("ALI & ASO (Native):", adtNativeRow1)
+
+        adtNativeRow2 = qt.QHBoxLayout()
+        self.btnRunNativeCLIC = qt.QPushButton("🦷 CLI-C: Impacted Canine/Molar Analysis")
+        self.btnRunNativeCLIC.setToolTip(
+            "Classify impacted canines (#13,#23,#33,#43) & wisdom teeth (#18,#28,#38,#48) into Buccal/Bicortical/Palatal zones and assess adjacent root resorption risk."
+        )
+        self.btnRunNativeVFACE = qt.QPushButton("⚖️ VFACE: Facial & Mandibular Asymmetry")
+        self.btnRunNativeVFACE.setToolTip(
+            "Quantify Left vs Right Ramus height, Mandibular body length, Condylar height, and Menton chin deviation."
+        )
+        self.btnRunAutoCropROI = qt.QPushButton("✂️ AutoCrop3D: Fit Dental ROI")
+        self.btnRunAutoCropROI.setToolTip(
+            "Fit a tight 3D Region of Interest (ROI) bounding box around the segmented dental arches."
+        )
+        adtNativeRow2.addWidget(self.btnRunNativeCLIC)
+        adtNativeRow2.addWidget(self.btnRunNativeVFACE)
+        adtNativeRow2.addWidget(self.btnRunAutoCropROI)
+        step7Layout.addRow("CLI-C, VFACE & Crop:", adtNativeRow2)
+
+        self.adtResultsLabel = qt.QLabel("AutomatedDentalTools ready — click ALI, ASO, CLI-C, VFACE, or AutoCrop3D above.")
+        self.adtResultsLabel.setWordWrap(True)
+        self.adtResultsLabel.setStyleSheet(
+            "background-color: #0f172a; color: #e2e8f0; padding: 6px; border-radius: 4px; border: 1px solid #334155;"
+        )
+        step7Layout.addRow("Clinical Analysis:", self.adtResultsLabel)
+
         adtRow = qt.QHBoxLayout()
         self.adtToolCombo = qt.QComboBox()
-        for tool in ("ASO", "AMASSS", "ALI", "AReg", "AutoCrop3D", "BatchDentalSegmentator", "MRI2CBCT"):
+        for tool in ("ASO", "AMASSS", "ALI", "AReg", "AutoCrop3D", "BatchDentalSegmentator", "MRI2CBCT", "CLI-C", "VFACE"):
             self.adtToolCombo.addItem(tool, tool)
-        self.adtToolCombo.setToolTip("Installed SlicerAutomatedDentalTools module to launch (F18).")
-        self.btnLaunchAdtTool = qt.QPushButton("Launch Tool")
+        self.adtToolCombo.setToolTip("Installed SlicerAutomatedDentalTools module to launch (or run built-in native engine).")
+        self.btnLaunchAdtTool = qt.QPushButton("Launch / Run Tool")
         self.btnLaunchAdtTool.setToolTip(
-            "Launch the selected SlicerAutomatedDentalTools module if installed (F18)."
+            "Launch the selected SlicerAutomatedDentalTools module if installed, or execute the built-in native algorithm."
         )
         adtRow.addWidget(self.adtToolCombo)
         adtRow.addWidget(self.btnLaunchAdtTool)
-        step7Layout.addRow("Automated Dental Tools:", adtRow)
+        step7Layout.addRow("External Module Bridge:", adtRow)
 
         self.layout.addStretch()
 
@@ -1290,6 +1570,26 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnCompute3DCeph.clicked.connect(self.onCompute3DCephClicked)
         self.btnExportDicomSegSr.clicked.connect(self.onExportDicomSegSrClicked)
         self.btnLaunchAdtTool.clicked.connect(self.onLaunchAdtToolClicked)
+
+        # v3.0 Signal Connections
+        self.roleModeCombo.currentTextChanged.connect(self.onRoleModeChanged)
+        self.btnQuickVividRoots.clicked.connect(self.onApplyDental3DStyling)
+        self.btnQuickRiseMar.clicked.connect(self.onRunRiseMarClicked)
+        self.btnQuickMeasureGallery.clicked.connect(self.onRefreshInlineGalleryClicked)
+        self.btnQuickPrintLayout.clicked.connect(self.onGenerate8x10PrintLayout)
+        self.surfaceStylePresetCombo.currentTextChanged.connect(self.onSurfaceStylePresetChanged)
+        self.jawOpacitySlider.valueChanged.connect(self.onJawOpacitySliderChanged)
+        self.surfaceSmoothingSlider.valueChanged.connect(self.onSurfaceSmoothingSliderChanged)
+        self.btnBrowseRiseMarWeights.clicked.connect(self.onBrowseRiseMarWeightsClicked)
+        self.btnRunRiseMar.clicked.connect(self.onRunRiseMarClicked)
+        self.btnBrowsePrintDir.clicked.connect(self.onBrowsePrintDirClicked)
+        self.btnOpenPrintDir.clicked.connect(self.onOpenPrintDirClicked)
+        self.btnRefreshInlineGallery.clicked.connect(self.onRefreshInlineGalleryClicked)
+        self.btnRunNativeALI.clicked.connect(self.onRunNativeALIClicked)
+        self.btnRunNativeASO.clicked.connect(self.onRunNativeASOClicked)
+        self.btnRunNativeCLIC.clicked.connect(self.onRunNativeCLICClicked)
+        self.btnRunNativeVFACE.clicked.connect(self.onRunNativeVFACEClicked)
+        self.btnRunAutoCropROI.clicked.connect(self.onRunAutoCropROIClicked)
 
     def _createOdontogramButton(self, fdi: int) -> Any:
         btn = qt.QToolButton()
@@ -1865,7 +2165,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         for idx in range(segmentation.GetNumberOfSegments()):
             seg = segmentation.GetNthSegment(idx)
             sid = segmentation.GetNthSegmentID(idx)
-            fdi_tag = seg.GetTag("CBCTPlanner.FDI") if hasattr(seg, "GetTag") else None
+            fdi_tag = safe_get_segment_tag(seg, "CBCTPlanner.FDI")
             label_id, category, _, _ = match_segment_to_label_and_precedence(
                 sid, seg.GetName(), fdi_attribute=fdi_tag
             )
@@ -1874,11 +2174,34 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 seg.SetName(info.name)
                 r, g, b = (float(c) / 255.0 if max(info.color) > 1.0 else float(c) for c in info.color)
                 seg.SetColor(r, g, b)
-                seg.SetTag("CBCTPlanner.LabelID", str(info.id))
-                seg.SetTag("CBCTPlanner.Category", info.category)
-                if info.category == "tooth" or (11 <= info.id <= 48):
-                    seg.SetTag("CBCTPlanner.FDI", str(info.id))
-                    detected_teeth.append(int(info.id))
+                if hasattr(seg, "SetTag"):
+                    seg.SetTag("CBCTPlanner.LabelID", str(info.id))
+                    seg.SetTag("CBCTPlanner.Category", info.category)
+                    if info.category == "tooth" or (11 <= info.id <= 48):
+                        seg.SetTag("CBCTPlanner.FDI", str(info.id))
+                        detected_teeth.append(int(info.id))
+        if self.logic is not None:
+            preset_name = (
+                self.surfaceStylePresetCombo.currentText
+                if getattr(self, "surfaceStylePresetCombo", None) is not None
+                else "DentalSegmentator Vivid (Teeth & Roots)"
+            )
+            jaw_op = (
+                float(self.jawOpacitySlider.value)
+                if getattr(self, "jawOpacitySlider", None) is not None
+                else 0.25
+            )
+            smooth_val = (
+                float(self.surfaceSmoothingSlider.value)
+                if getattr(self, "surfaceSmoothingSlider", None) is not None
+                else 0.40
+            )
+            self.logic.vr.apply_dental_segmentator_styling(
+                segNode,
+                smoothing_factor=smooth_val,
+                style_preset=preset_name,
+                jaw_opacity_override=jaw_op,
+            )
         if detected_teeth and hasattr(self, "selectedTeeth"):
             for fdi in detected_teeth:
                 self.selectedTeeth.add(int(fdi))
@@ -2073,9 +2396,152 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if slicer:
                 slicer.util.warningDisplay("Please select a Segmentation node first.")
             return
-        self.logic.vr.apply_dental_segmentator_styling(segNode)
+        preset_name = (
+            self.surfaceStylePresetCombo.currentText
+            if getattr(self, "surfaceStylePresetCombo", None) is not None
+            else "DentalSegmentator Vivid (Teeth & Roots)"
+        )
+        jaw_op = (
+            float(self.jawOpacitySlider.value)
+            if getattr(self, "jawOpacitySlider", None) is not None
+            else 0.25
+        )
+        smooth_val = (
+            float(self.surfaceSmoothingSlider.value)
+            if getattr(self, "surfaceSmoothingSlider", None) is not None
+            else 0.40
+        )
+        self.logic.vr.apply_dental_segmentator_styling(
+            segNode,
+            smoothing_factor=smooth_val,
+            style_preset=preset_name,
+            jaw_opacity_override=jaw_op,
+        )
         if volNode is not None:
             self.logic.update_fdi_overlays_from_segmentation(volNode, segNode, visible=True)
+        self.globalStatusLabel.setText(f"Applied 3D style: {preset_name} (Bone opacity: {jaw_op:.2f})")
+
+    def onSurfaceStylePresetChanged(self, preset_name: str) -> None:
+        if getattr(self, "jawOpacitySlider", None) is not None and preset_name in VIVID_3D_STYLE_PRESETS:
+            jaw_op = VIVID_3D_STYLE_PRESETS[preset_name][0]
+            self.jawOpacitySlider.blockSignals(True)
+            self.jawOpacitySlider.setValue(jaw_op)
+            self.jawOpacitySlider.blockSignals(False)
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if segNode is not None and self.logic is not None:
+            self.onApplyDental3DStyling()
+
+    def onJawOpacitySliderChanged(self, val: float) -> None:
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if segNode is not None and self.logic is not None:
+            self.logic.vr.set_jawbone_3d_opacity(segNode, jaw_opacity=float(val), tooth_opacity=1.0)
+            self.globalStatusLabel.setText(f"Jawbone 3D Opacity: {float(val) * 100:.0f}% (Teeth & Roots: 100%)")
+
+    def onSurfaceSmoothingSliderChanged(self, _val: float) -> None:
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if segNode is not None and self.logic is not None:
+            self.onApplyDental3DStyling()
+
+    def onRoleModeChanged(self, mode_text: str) -> None:
+        mode_low = (mode_text or "").lower()
+        if "radiologist" in mode_low:
+            self.step1Box.collapsed = False
+            self.step3Box.collapsed = False
+            self.step4Box.collapsed = False
+            self.step5Box.collapsed = False
+            self.step6Box.collapsed = False
+            self.step7Box.collapsed = True
+            self.globalStatusLabel.setText("Workspace: Radiologist (Measurements, Cross-Sections, MAR & Print Film)")
+        elif "implant" in mode_low or "dentist" in mode_low:
+            self.step1Box.collapsed = False
+            self.step2Box.collapsed = False
+            self.step5Box.collapsed = False
+            if getattr(self, "advancedStep5Box", None) is not None:
+                self.advancedStep5Box.collapsed = False
+            self.step6Box.collapsed = False
+            self.globalStatusLabel.setText("Workspace: Implant & Surgical Dentist (Vivid 3D Roots, Implants & Guide)")
+        elif "ortho" in mode_low or "craniofacial" in mode_low:
+            self.step1Box.collapsed = False
+            self.step6Box.collapsed = False
+            self.step7Box.collapsed = False
+            self.globalStatusLabel.setText("Workspace: Ortho & Craniofacial (ALI, ASO, CLI-C, VFACE, Ceph & Airway)")
+        else:
+            self.step1Box.collapsed = False
+            self.globalStatusLabel.setText("Workspace: Full Clinical Suite")
+
+    def onBrowseRiseMarWeightsClicked(self) -> None:
+        if qt is None:
+            return
+        path = qt.QFileDialog.getOpenFileName(
+            self.parent,
+            "Select RISE-MAR Model Weights (.pkl / .pth)",
+            str(Path(self.risemarWeightsPathEdit.text or DEFAULT_RISEMAR_WEIGHTS_PATH).parent),
+            "RISE-MAR Weights (*.pkl *.pth *.pt);;All Files (*)",
+        )
+        if path:
+            self.risemarWeightsPathEdit.setText(path)
+
+    def onRunRiseMarClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        if not volNode or not self.logic:
+            if slicer:
+                slicer.util.warningDisplay("Please select an input CBCT volume first.")
+            return
+        w_path = (
+            self.risemarWeightsPathEdit.text.strip()
+            if getattr(self, "risemarWeightsPathEdit", None) is not None
+            else DEFAULT_RISEMAR_WEIGHTS_PATH
+        ) or DEFAULT_RISEMAR_WEIGHTS_PATH
+        fast_only = (
+            bool(self.risemarFastCheck.isChecked())
+            if getattr(self, "risemarFastCheck", None) is not None
+            else True
+        )
+        preserve_metal = (
+            bool(self.risemarPreserveMetalCheck.isChecked())
+            if getattr(self, "risemarPreserveMetalCheck", None) is not None
+            else True
+        )
+        in_place = (
+            bool(self.risemarInPlaceCheck.isChecked())
+            if getattr(self, "risemarInPlaceCheck", None) is not None
+            else False
+        )
+
+        def _prog(pct: int, msg: str) -> None:
+            if getattr(self, "risemarStatusLabel", None) is not None:
+                self.risemarStatusLabel.setText(f"[{pct}%] {msg}")
+            self.globalStatusLabel.setText(f"[{pct}%] {msg}")
+            if slicer and hasattr(slicer, "app"):
+                slicer.app.processEvents()
+
+        try:
+            marNode, res = self.logic.run_risemar_metal_artifact_reduction(
+                volumeNode=volNode,
+                weights_path=w_path,
+                metal_slices_only=fast_only,
+                preserve_metal_core=preserve_metal,
+                in_place=in_place,
+                progress_callback=_prog,
+            )
+            if marNode is not None:
+                self.volumeSelector.setCurrentNode(marNode)
+                if slicer:
+                    try:
+                        slicer.util.setSliceViewerLayers(background=marNode, fit=False)
+                    except Exception:
+                        logger.debug("Could not set MAR volume in slice viewers", exc_info=True)
+            summary_txt = (
+                f"RISE-MAR Complete ({res.mode_used}): {res.processed_slices}/{res.total_slices} slices | "
+                f"CQA Quality: {res.cqa_score_before:.2f} -> {res.cqa_score_after:.2f} ({res.elapsed_sec:.1f}s)"
+            )
+            if getattr(self, "risemarStatusLabel", None) is not None:
+                self.risemarStatusLabel.setText(summary_txt)
+            self.globalStatusLabel.setText(summary_txt)
+        except Exception as exc:
+            logger.exception("RISE-MAR execution failed")
+            if slicer:
+                slicer.util.errorDisplay(f"RISE-MAR failed:\n{exc}")
 
     # ------------------------------------------------------------------
     # Step 2 Callbacks: Dental Arch Curve (Shared vs Per-Jaw, Auto-Fit vs Manual)
@@ -2515,6 +2981,10 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.toggleToothPlanMembership(fdi)
         else:
             self.selectedTeeth.add(int(fdi))
+            if self.logic is not None:
+                self.treatmentPlanByFDI[int(fdi)] = self.logic.analyze_single_tooth(
+                    int(fdi), volNode, segmentationNode=self.segmentationSelector.currentNode()
+                )
             btn = self.toothButtons.get(int(fdi))
             if btn is not None:
                 btn.blockSignals(True)
@@ -2522,6 +2992,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white;")
                 btn.blockSignals(False)
             self._updateSelectionStatusLabel()
+            self._refreshPlanTableFromCache()
+            self._updateActiveSiteClinicalCallout(int(fdi))
+            self.onRefreshInlineGalleryClicked()
 
     def onToggleActiveToothInPlanClicked(self) -> None:
         fdi = self.activeToothFDI or 46
@@ -2781,7 +3254,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 btn.blockSignals(False)
         self.activeToothFDI = quad_teeth[len(quad_teeth) // 2]
         self._updateSelectionStatusLabel()
-        self._refreshPlanTableFromCache()
+        self.onRefreshAllSelectedTeeth()
+        self._updateActiveSiteClinicalCallout(self.activeToothFDI)
+        self.onRefreshInlineGalleryClicked()
 
     def onClearToothSelection(self) -> None:
         """Clear all active tooth selections."""
@@ -2967,7 +3442,18 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if hasattr(self, "includePatientMetaCheckBox")
             else False
         )
-        out_dir = Path(slicer.app.temporaryPath if slicer else ".")
+        custom_dir_str = (
+            self.printOutputDirEdit.text.strip()
+            if getattr(self, "printOutputDirEdit", None) is not None
+            else ""
+        )
+        if custom_dir_str:
+            out_dir = Path(custom_dir_str)
+        elif slicer and getattr(slicer, "app", None) is not None:
+            out_dir = PrintLayoutEngine.default_export_directory()
+        else:
+            out_dir = Path(".")
+        out_dir.mkdir(parents=True, exist_ok=True)
         engine = PrintLayoutEngine(logic=self.logic)
 
         progress = None
@@ -3004,9 +3490,17 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if progress is not None:
                 progress.close()
 
+        png_file = getattr(engine, "last_png_file", None)
+        self._populateInlineMeasuredGallery(
+            slices_data, html_path=html_file, pdf_path=pdf_file, png_path=png_file
+        )
         self._showPrintPreviewDialog(html_file, pdf_file, slices_data, quadrant, sorted(selected_fdis))
+        self.globalStatusLabel.setText(
+            f"Saved print files to {out_dir}: {pdf_file.name}"
+            + (f", {png_file.name}" if png_file else "")
+        )
         if slicer:
-            slicer.util.showStatusMessage(f"Generated 8×10″ Print Layout: {html_file.name}", 5000)
+            slicer.util.showStatusMessage(f"Generated 8×10″ Print Layout: {pdf_file}", 5000)
 
     def _showPrintPreviewDialog(
         self, html_path: Path, pdf_path: Path, slices_data: List[Any], quadrant: int, fdis: List[int]
@@ -3027,16 +3521,29 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         top_bar.addWidget(info_lbl)
         top_bar.addStretch()
 
+        png_candidate = pdf_path.with_suffix(".png")
         btn_open_pdf = qt.QPushButton("📄 Open PDF (Print)")
         btn_open_pdf.clicked.connect(
             lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(pdf_path)))
+        )
+        btn_open_png = qt.QPushButton("🖼️ Open 300 DPI PNG")
+        btn_open_png.clicked.connect(
+            lambda: qt.QDesktopServices.openUrl(
+                qt.QUrl.fromLocalFile(str(png_candidate if png_candidate.exists() else pdf_path))
+            )
         )
         btn_open_html = qt.QPushButton("🌐 Open in Browser (HTML)")
         btn_open_html.clicked.connect(
             lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(html_path)))
         )
+        btn_open_folder = qt.QPushButton("📂 Open Output Folder")
+        btn_open_folder.clicked.connect(
+            lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(pdf_path.parent)))
+        )
         top_bar.addWidget(btn_open_pdf)
+        top_bar.addWidget(btn_open_png)
         top_bar.addWidget(btn_open_html)
+        top_bar.addWidget(btn_open_folder)
         d_layout.addLayout(top_bar)
 
         scroll = qt.QScrollArea()
@@ -3189,9 +3696,273 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         self.step7HintLabel.setText(f"Exported DICOM SEG & SR: {seg_dcm.name}, {sr_dcm.name}")
 
+    def _updateActiveSiteClinicalCallout(self, fdi: Optional[int] = None) -> None:
+        """Update the Step 5 Radiologist/Dentist clinical callout card for `fdi`."""
+        if getattr(self, "siteClinicalCalloutLabel", None) is None:
+            return
+        target_fdi = fdi or self.activeToothFDI or (next(iter(self.selectedTeeth)) if self.selectedTeeth else None)
+        if not target_fdi:
+            return
+        row = self.treatmentPlanByFDI.get(int(target_fdi))
+        if row is None and self.logic is not None and hasattr(self, "volumeSelector"):
+            volNode = self.volumeSelector.currentNode()
+            segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+            if volNode is not None:
+                row = self.logic.analyze_single_tooth(int(target_fdi), volNode, segmentationNode=segNode)
+                self.treatmentPlanByFDI[int(target_fdi)] = row
+        if not row:
+            return
+
+        h_val = row.get("height_mm")
+        w0_val = row.get("w_crest_mm")
+        w3_val = row.get("w_3mm")
+        w5_val = row.get("w_5mm")
+        nerve_val = row.get("nerve_clearance_mm")
+        hu_val = row.get("hu")
+        misch_val = str(row.get("misch") or "N/A").split()[0]
+        rec_d = row.get("rec_diameter")
+        rec_l = row.get("rec_length")
+
+        if nerve_val is not None and float(nerve_val) < 2.0:
+            badge = "<span style='color:#ef4444;font-weight:bold;'>[ALERT: Nerve &lt; 2.0 mm]</span>"
+        elif h_val is not None and w0_val is not None and float(h_val) >= 8.0 and float(w0_val) >= 5.5:
+            badge = "<span style='color:#22c55e;font-weight:bold;'>[ADEQUATE BONE VOLUME]</span>"
+        else:
+            badge = "<span style='color:#f59e0b;font-weight:bold;'>[VERIFY RIDGE / GRAFT]</span>"
+
+        imp_txt = f"Ø{rec_d:.1f} × {rec_l:.1f} mm" if (rec_d and rec_l) else "Manual / Graft Required"
+        hu_txt = f"{hu_val:.0f} gray ({misch_val})" if hu_val is not None else "N/A"
+        self.siteClinicalCalloutLabel.setText(
+            f"<b>Site #{target_fdi} ({str(row.get('jaw', '')).capitalize()}):</b> {badge} | "
+            f"<b>Height (H):</b> {format_metric(h_val, 'mm')} | "
+            f"<b>W0:</b> {format_metric(w0_val, 'mm')} | "
+            f"<b>W3:</b> {format_metric(w3_val, 'mm')} | "
+            f"<b>W5:</b> {format_metric(w5_val, 'mm')}<br>"
+            f"<b>Vital Distance:</b> {format_metric(nerve_val, 'mm')} | "
+            f"<b>Bone Quality:</b> {hu_txt} | "
+            f"<b>Suggested Implant:</b> {imp_txt}"
+        )
+
+    def onBrowsePrintDirClicked(self) -> None:
+        if qt is None:
+            return
+        folder = qt.QFileDialog.getExistingDirectory(
+            self.parent,
+            "Select Print Layout Output Folder",
+            self.printOutputDirEdit.text if getattr(self, "printOutputDirEdit", None) else "",
+        )
+        if folder and getattr(self, "printOutputDirEdit", None) is not None:
+            self.printOutputDirEdit.setText(folder)
+
+    def onOpenPrintDirClicked(self) -> None:
+        if qt is None or getattr(self, "printOutputDirEdit", None) is None:
+            return
+        out_path = Path(self.printOutputDirEdit.text.strip() or ".")
+        out_path.mkdir(parents=True, exist_ok=True)
+        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(out_path)))
+
+    def onRefreshInlineGalleryClicked(self) -> None:
+        """Render and display measured cross-sectional slices directly in the Step 5 inline gallery."""
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if not volNode or not self.logic:
+            return
+        selected = sort_teeth_anatomically(list(self.selectedTeeth))
+        fdi = self.activeToothFDI or (selected[0] if selected else 46)
+        jaw_key = "Lower" if int(str(fdi)[0]) in (3, 4) else "Upper"
+        curve = self.logic.get_curve_node_for_jaw(volNode, jaw_key, parameterNode=self._parameterNode)
+        if (curve is None or curve.GetNumberOfControlPoints() < 4) and segNode is not None:
+            curve = self.logic.auto_fit_arch_for_jaw(
+                volumeNode=volNode,
+                segmentationNode=segNode,
+                jaw=jaw_key,
+                visible=False,
+                confirm_overwrite=False,
+                allow_overwrite_user_edit=False,
+            )
+        series = self.logic.generate_cross_section_slice_series(
+            fdi=fdi,
+            volumeNode=volNode,
+            segmentationNode=segNode,
+            num_slices=9 if len(selected) <= 2 else 15,
+            step_mm=1.0,
+            fdis=selected or [fdi],
+        )
+        self._populateInlineMeasuredGallery(series)
+        self._updateActiveSiteClinicalCallout(fdi)
+
+    def _populateInlineMeasuredGallery(
+        self,
+        slices_items: Sequence[Any],
+        html_path: Optional[Path] = None,
+        pdf_path: Optional[Path] = None,
+        png_path: Optional[Path] = None,
+    ) -> None:
+        """Populate the embedded Step 5 measured cross-section image gallery from `slices_items`."""
+        if qt is None or getattr(self, "inlineGalleryGrid", None) is None:
+            return
+        while self.inlineGalleryGrid.count():
+            child = self.inlineGalleryGrid.takeAt(0)
+            if child and child.widget():
+                child.widget().deleteLater()
+
+        if not slices_items:
+            if getattr(self, "inlineGalleryStatusLabel", None) is not None:
+                self.inlineGalleryStatusLabel.setText(
+                    "No measured slices available yet — ensure a segmentation is loaded and arch is fitted."
+                )
+            return
+
+        import base64
+
+        cols = 5
+        shown = list(slices_items)[:15]
+        for idx, item in enumerate(shown):
+            r, c = divmod(idx, cols)
+            card = qt.QFrame()
+            card.setFrameShape(qt.QFrame.StyledPanel)
+            card.setStyleSheet("background-color: #020617; border: 1px solid #1e293b; border-radius: 4px;")
+            c_lay = qt.QVBoxLayout(card)
+            c_lay.setContentsMargins(3, 3, 3, 3)
+
+            if isinstance(item, dict):
+                uri = item.get("image_data_uri", "")
+                off = float(item.get("offset_mm", 0.0))
+                h_txt = str(item.get("height_mm", "--"))
+                w0_txt = str(item.get("w_crest_mm", "--"))
+                w3_txt = str(item.get("w_3mm", "--"))
+            else:
+                uri = getattr(item, "image_data_uri", "")
+                off = float(getattr(item, "offset_mm", 0.0))
+                h_v = getattr(item, "height_mm", None)
+                w0_v = getattr(item, "crest_width_mm", None)
+                w3_v = getattr(item, "width_3mm", None)
+                h_txt = f"{h_v:.1f}" if h_v is not None else "--"
+                w0_txt = f"{w0_v:.1f}" if w0_v is not None else "--"
+                w3_txt = f"{w3_v:.1f}" if w3_v is not None else "--"
+
+            hdr = qt.QLabel(f"<b>S{idx + 1}</b> ({off:+.1f} mm)")
+            hdr.setAlignment(qt.Qt.AlignCenter)
+            hdr.setStyleSheet("color: #38bdf8; font-size: 10px;")
+            c_lay.addWidget(hdr)
+
+            img_lbl = qt.QLabel()
+            if uri and "," in uri:
+                pixmap = qt.QPixmap()
+                if pixmap.loadFromData(base64.b64decode(uri.split(",", 1)[1])):
+                    img_lbl.setPixmap(
+                        pixmap.scaled(125, 135, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+                    )
+            else:
+                img_lbl.setText("No slice")
+            img_lbl.setAlignment(qt.Qt.AlignCenter)
+            c_lay.addWidget(img_lbl)
+
+            ftr = qt.QLabel(f"H:{h_txt} | W0:{w0_txt} | W3:{w3_txt}")
+            ftr.setAlignment(qt.Qt.AlignCenter)
+            ftr.setStyleSheet("color: #e2e8f0; font-size: 9.5px;")
+            c_lay.addWidget(ftr)
+            self.inlineGalleryGrid.addWidget(card, r, c)
+
+        if getattr(self, "inlineGalleryStatusLabel", None) is not None:
+            files_note = ""
+            if pdf_path is not None:
+                files_note = f" | Saved: <b>{pdf_path.name}</b>" + (
+                    f" &amp; <b>{png_path.name}</b>" if png_path else ""
+                )
+            self.inlineGalleryStatusLabel.setText(
+                f"Showing <b>{len(shown)} measured cross-sections</b> with Green Height (H), Cyan/Gold Width (W0/W3/W5) &amp; Red Nerve lines{files_note}."
+            )
+
+    def onRunNativeALIClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if not volNode or not self.logic:
+            return
+        lms, fidNode = self.logic.run_native_ali_landmarks(volNode, segNode)
+        msg = f"ALI identified {len(lms)} 3D landmarks ({', '.join(list(lms.keys())[:8])}...)."
+        if getattr(self, "adtResultsLabel", None) is not None:
+            self.adtResultsLabel.setText(msg)
+        self.step7HintLabel.setText(msg)
+
+    def onRunNativeASOClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if not volNode or not self.logic:
+            return
+        aso_res = self.logic.run_native_aso_orientation(volNode, segNode)
+        msg = (
+            f"ASO Standardized Orientation applied: Pitch={aso_res.pitch_deg:+.1f}°, "
+            f"Roll={aso_res.roll_deg:+.1f}°, Yaw={aso_res.yaw_deg:+.1f}° "
+            f"(Landmarks: {', '.join(aso_res.landmarks_used[:6]) or 'Bone SVD'})."
+        )
+        if getattr(self, "adtResultsLabel", None) is not None:
+            self.adtResultsLabel.setText(msg)
+        self.step7HintLabel.setText(msg)
+
+    def onRunNativeCLICClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if not volNode or not segNode or not self.logic:
+            if slicer:
+                slicer.util.warningDisplay("Select both a CBCT volume and a ToothFairy3 segmentation for CLI-C.")
+            return
+        items = self.logic.run_native_clic_impaction_analysis(volNode, segNode)
+        if not items:
+            msg = "CLI-C: No canines/wisdom teeth detected in current segmentation."
+        else:
+            parts = [
+                f"#{it.fdi}: {it.intra_osseous_zone} ({it.winter_angulation_class}, {it.angulation_to_midline_deg:.0f}°, Risk: {it.resorption_risk})"
+                for it in items[:4]
+            ]
+            msg = "CLI-C Canine/Molar Localization: " + " | ".join(parts)
+        if getattr(self, "adtResultsLabel", None) is not None:
+            self.adtResultsLabel.setText(msg)
+        self.step7HintLabel.setText(msg)
+
+    def onRunNativeVFACEClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if not volNode or not self.logic:
+            return
+        vf = self.logic.run_native_vface_asymmetry_analysis(volNode, segNode)
+        if getattr(self, "adtResultsLabel", None) is not None:
+            self.adtResultsLabel.setText(f"VFACE Asymmetry: {vf.summary_text}")
+        self.step7HintLabel.setText(f"VFACE: {vf.summary_text}")
+
+    def onRunAutoCropROIClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if not volNode or not self.logic:
+            return
+        min_ras, max_ras, _roiNode = self.logic.run_native_autocrop_roi(volNode, segNode, padding_mm=10.0)
+        msg = (
+            f"AutoCrop3D ROI fitted: [{min_ras[0]:.1f}..{max_ras[0]:.1f}, "
+            f"{min_ras[1]:.1f}..{max_ras[1]:.1f}, {min_ras[2]:.1f}..{max_ras[2]:.1f}] mm."
+        )
+        if getattr(self, "adtResultsLabel", None) is not None:
+            self.adtResultsLabel.setText(msg)
+        self.step7HintLabel.setText(msg)
+
     def onLaunchAdtToolClicked(self) -> None:
         tool_name = str(self.adtToolCombo.currentData or "ASO")
         res = run_automated_dental_tool(tool_name)
+        if res.get("status") == "not_installed":
+            if tool_name == "ALI":
+                self.onRunNativeALIClicked()
+                return
+            if tool_name == "ASO":
+                self.onRunNativeASOClicked()
+                return
+            if tool_name == "CLI-C":
+                self.onRunNativeCLICClicked()
+                return
+            if tool_name == "VFACE":
+                self.onRunNativeVFACEClicked()
+                return
+            if tool_name == "AutoCrop3D":
+                self.onRunAutoCropROIClicked()
+                return
         self.step7HintLabel.setText(f"AutomatedDentalTools [{tool_name}]: {res['status']}")
 
 
@@ -3206,6 +3977,8 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         self.canals = CanalTracerLogic()
         self.implants = ImplantPlannerLogic()
         self.checkpoint_engine = CheckpointInferenceEngine()
+        self.risemar = RiseMarEngine()
+        self.adt_engine = AutomatedDentalToolsEngine()
         self.surgical_guides = SurgicalGuideGenerator()
         self.prosthetics = ProstheticPlanner()
         self.undo_redo = UndoRedoManager(max_depth=50)
@@ -4035,7 +4808,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             seg = segmentation.GetSegment(sid)
             if not seg:
                 continue
-            fdi_attr = seg.GetTag("CBCTPlanner.FDI") if hasattr(seg, "GetTag") else None
+            fdi_attr = safe_get_segment_tag(seg, "CBCTPlanner.FDI")
             label_val, category, is_5class, _ = match_segment_to_label_and_precedence(
                 sid, seg.GetName() or "", fdi_attribute=fdi_attr
             )
@@ -4448,45 +5221,40 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         vol_arr = slicer.util.arrayFromVolume(volumeNode)
         combined = np.zeros(vol_arr.shape, dtype=np.uint16)
         precedence_buf = np.zeros(vol_arr.shape, dtype=np.uint8)
-        is_5class = False
+        matched_records: List[Tuple[int, str, bool, int]] = []
+        per_seg_matches: List[Tuple[str, int, int]] = []
 
         for idx, sid in enumerate(seg_ids):
             seg = segmentation.GetSegment(sid)
             seg_name = seg.GetName() if seg else ""
-            fdi_attr = None
-            term_str = None
-            if seg is not None and hasattr(seg, "GetTag"):
-                t_val = vtk.reference("") if (vtk is not None and hasattr(vtk, "reference")) else None
-                if t_val is not None:
-                    try:
-                        if seg.GetTag("CBCTPlanner.FDI", t_val):
-                            fdi_attr = str(t_val)
-                        if seg.GetTag("TerminologyEntry", t_val):
-                            term_str = str(t_val)
-                    except Exception:
-                        logger.debug(
-                            "Best-effort operation failed", exc_info=True
-                        )  # silent-ok: non-critical cleanup/probe
-            if fdi_attr is None and seg is not None and hasattr(seg, "GetAttribute"):
-                try:
-                    fdi_attr = seg.GetAttribute("CBCTPlanner.FDI")
-                except Exception:
-                    logger.debug(
-                        "Best-effort operation failed", exc_info=True
-                    )  # silent-ok: non-critical cleanup/probe
+            fdi_attr = safe_get_segment_tag(seg, "CBCTPlanner.FDI")
+            term_str = safe_get_segment_tag(seg, "TerminologyEntry")
 
-            label_val, _cat, seg_is_5class, prec = match_segment_to_label_and_precedence(
+            label_val, cat, seg_is_5class, prec = match_segment_to_label_and_precedence(
                 sid, seg_name, fdi_attribute=fdi_attr, terminology_str=term_str
             )
-            if seg_is_5class:
-                is_5class = True
             if label_val == 0:
                 if len(seg_ids) == 5:
                     label_val = idx + 1
-                    is_5class = True
+                    seg_is_5class = True
+                    cat = "canal" if label_val == 5 else ("tooth" if label_val in (3, 4) else "jaw")
                     prec = 3 if label_val == 5 else (4 if label_val in (3, 4) else 1)
                 else:
                     continue
+            matched_records.append((label_val, cat, seg_is_5class, prec))
+            per_seg_matches.append((sid, label_val, prec))
+
+        is_5class = resolve_combined_mask_scheme(matched_records)
+
+        for sid, label_val, prec in per_seg_matches:
+            # If the overall segmentation is ToothFairy3 (not 5-class), ensure Mandible=1 and Maxilla=2
+            if not is_5class and label_val in (1, 2):
+                seg = segmentation.GetSegment(sid)
+                sname_l = (seg.GetName() if seg else "").lower()
+                if "mandible" in sname_l or "lower" in sname_l:
+                    label_val = LOWER_JAW_ID
+                elif "maxilla" in sname_l or "upper" in sname_l or "skull" in sname_l:
+                    label_val = UPPER_JAW_ID
 
             try:
                 seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, sid, volumeNode)
@@ -5204,7 +5972,15 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             writer.SetWriteToMemory(True)
             writer.SetInputConnection(window_to_image.GetOutputPort())
             writer.Write()
-            data = bytes(writer.GetResult())
+            result = writer.GetResult()
+            if result is None or result.GetNumberOfTuples() == 0:
+                return None
+            try:
+                from vtk.util.numpy_support import vtk_to_numpy  # type: ignore
+
+                data = bytes(vtk_to_numpy(result))
+            except Exception:
+                data = bytes(result.GetValue(i) for i in range(result.GetNumberOfValues()))
             if not data:
                 return None
             import base64 as _b64
@@ -5221,31 +5997,167 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             yield
             return
         segmentation = segmentationNode.GetSegmentation()
+        disp = segmentationNode.GetDisplayNode() if hasattr(segmentationNode, "GetDisplayNode") else None
         quadrants = {int(str(fdi)[0]) for fdi in fdis}
         previous: Dict[str, bool] = {}
+
+        def _get_vis(seg_obj: Any, seg_id: str) -> bool:
+            if hasattr(seg_obj, "GetSegmentVisibility"):
+                return bool(seg_obj.GetSegmentVisibility())
+            if disp is not None and hasattr(disp, "GetSegmentVisibility"):
+                return bool(disp.GetSegmentVisibility(seg_id))
+            return True
+
+        def _set_vis(seg_id: str, vis: bool) -> None:
+            if hasattr(segmentationNode, "SetSegmentVisibility"):
+                segmentationNode.SetSegmentVisibility(seg_id, bool(vis))
+            if disp is not None and hasattr(disp, "SetSegmentVisibility"):
+                disp.SetSegmentVisibility(seg_id, bool(vis))
+
         try:
             for index in range(segmentation.GetNumberOfSegments()):
                 segment = segmentation.GetNthSegment(index)
                 segment_id = segmentation.GetNthSegmentID(index)
-                previous[segment_id] = bool(segment.GetSegmentVisibility())
-                tag = segment.GetTag("CBCTPlanner.FDI") if hasattr(segment, "GetTag") else None
-                if tag is None:
-                    tag = segment.GetTag("FDI") if hasattr(segment, "GetTag") else None
+                previous[segment_id] = _get_vis(segment, segment_id)
+                tag = safe_get_segment_tag(segment, "CBCTPlanner.FDI") or safe_get_segment_tag(segment, "FDI")
                 fdi = int(tag) if tag and str(tag).isdigit() else None
                 keep = False
                 if fdi is not None:
                     keep = int(str(fdi)[0]) in quadrants
                 else:
                     name = (segment.GetName() or "").lower()
-                    keep = any(word in name for word in ("jaw", "canal", "nerve", "mandible", "maxilla"))
-                segmentationNode.SetSegmentVisibility(segment_id, keep)
+                    keep = any(word in name for word in ("jaw", "canal", "nerve", "mandible", "maxilla", "teeth"))
+                _set_vis(segment_id, keep)
             yield
         finally:
             for segment_id, visible in previous.items():
                 try:
-                    segmentationNode.SetSegmentVisibility(segment_id, visible)
+                    _set_vis(segment_id, visible)
                 except Exception:
                     logger.exception("Could not restore segment visibility for %s", segment_id)
+
+    # ------------------------------------------------------------------
+    # RISE-MAR & Native SlicerAutomatedDentalTools Operations (v3.0)
+    # ------------------------------------------------------------------
+    def run_risemar_metal_artifact_reduction(
+        self,
+        volumeNode: Any,
+        weights_path: str = DEFAULT_RISEMAR_WEIGHTS_PATH,
+        metal_slices_only: bool = True,
+        preserve_metal_core: bool = True,
+        in_place: bool = False,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> Tuple[Any, RiseMarResult]:
+        """Run RISE-MAR metal artifact reduction on `volumeNode`."""
+        cfg = RiseMarConfig(
+            weights_path=weights_path or DEFAULT_RISEMAR_WEIGHTS_PATH,
+            metal_slices_only=metal_slices_only,
+            preserve_metal_core=preserve_metal_core,
+            in_place=in_place,
+        )
+        pNode = self.getParameterNode() if slicer is not None else None
+        return self.risemar.run_risemar_on_slicer_volume_node(
+            volumeNode, config=cfg, parameterNode=pNode, progress_callback=progress_callback
+        )
+
+    def run_native_ali_landmarks(
+        self, volumeNode: Any, segmentationNode: Any = None
+    ) -> Tuple[Dict[str, ALILandmarkResult], Any]:
+        """Run native ALI 3D Landmark Identification and create a Slicer Markups Fiducial node."""
+        vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+        mask, is_5c = (
+            self._extract_combined_label_mask(volumeNode, segmentationNode)
+            if segmentationNode is not None
+            else (None, False)
+        )
+        lms = self.adt_engine.identify_ali_landmarks(vol, mask=mask, is_5class=is_5c)
+        fidNode = None
+        if slicer is not None and getattr(slicer, "mrmlScene", None) is not None:
+            name = f"{volumeNode.GetName()}_ALI_Landmarks"
+            fidNode = slicer.mrmlScene.GetFirstNodeByName(name)
+            if not fidNode:
+                fidNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", name)
+                fidNode.CreateDefaultDisplayNodes()
+            was_mod = fidNode.StartModify() if hasattr(fidNode, "StartModify") else None
+            try:
+                fidNode.RemoveAllControlPoints()
+                for lm in lms.values():
+                    if lm.category in ("skeletal", "dental", "foramen"):
+                        idx = fidNode.AddControlPoint(*[float(c) for c in lm.position_ras])
+                        fidNode.SetNthControlPointLabel(idx, lm.label)
+            finally:
+                if was_mod is not None and hasattr(fidNode, "EndModify"):
+                    fidNode.EndModify(was_mod)
+        return lms, fidNode
+
+    def run_native_aso_orientation(
+        self, volumeNode: Any, segmentationNode: Any = None
+    ) -> ASOOrientationResult:
+        """Run native ASO Standardized Orientation and apply non-destructive parent transform."""
+        vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+        mask, is_5c = (
+            self._extract_combined_label_mask(volumeNode, segmentationNode)
+            if segmentationNode is not None
+            else (None, False)
+        )
+        aso_res = self.adt_engine.compute_aso_standardized_orientation(vol, mask=mask, is_5class=is_5c)
+        self.apply_non_destructive_occlusal_transform(
+            volumeNode,
+            normal_vec=aso_res.occlusal_normal_ras,
+            center_ras=aso_res.reference_center_ras,
+            segmentationNode=segmentationNode,
+        )
+        return aso_res
+
+    def run_native_clic_impaction_analysis(
+        self, volumeNode: Any, segmentationNode: Any
+    ) -> List[ImpactedToothCLICResult]:
+        """Run native CLI-C Impacted Canine & Wisdom Tooth localization and risk classification."""
+        vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+        mask, is_5c = self._extract_combined_label_mask(volumeNode, segmentationNode)
+        if mask is None:
+            return []
+        return self.adt_engine.analyze_impacted_teeth_clic(vol, mask=mask, is_5class=is_5c)
+
+    def run_native_vface_asymmetry_analysis(
+        self, volumeNode: Any, segmentationNode: Any = None
+    ) -> VFACEAsymmetryResult:
+        """Run native VFACE bilateral mandibular and facial asymmetry analysis."""
+        vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+        mask, is_5c = (
+            self._extract_combined_label_mask(volumeNode, segmentationNode)
+            if segmentationNode is not None
+            else (None, False)
+        )
+        return self.adt_engine.compute_vface_asymmetry_analysis(vol, mask=mask, is_5class=is_5c)
+
+    def run_native_autocrop_roi(
+        self, volumeNode: Any, segmentationNode: Any = None, padding_mm: float = 10.0
+    ) -> Tuple[np.ndarray, np.ndarray, Any]:
+        """Run native AutoCrop3D bounding box computation and create/fit a Slicer Markups ROI node."""
+        vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+        mask, _ = (
+            self._extract_combined_label_mask(volumeNode, segmentationNode)
+            if segmentationNode is not None
+            else (None, False)
+        )
+        min_ras, max_ras = self.adt_engine.compute_autocrop_roi_bounds_ras(
+            vol, mask=mask, padding_mm=padding_mm
+        )
+        roiNode = None
+        if slicer is not None and getattr(slicer, "mrmlScene", None) is not None:
+            center = 0.5 * (min_ras + max_ras)
+            size = max_ras - min_ras
+            roi_name = f"{volumeNode.GetName()}_AutoCrop_ROI"
+            roiNode = slicer.mrmlScene.GetFirstNodeByName(roi_name)
+            if not roiNode:
+                roiNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", roi_name)
+                roiNode.CreateDefaultDisplayNodes()
+            if hasattr(roiNode, "SetXYZ"):
+                roiNode.SetXYZ(float(center[0]), float(center[1]), float(center[2]))
+            if hasattr(roiNode, "SetRadiusXYZ"):
+                roiNode.SetRadiusXYZ(0.5 * float(size[0]), 0.5 * float(size[1]), 0.5 * float(size[2]))
+        return min_ras, max_ras, roiNode
 
     @staticmethod
     def export_treatment_plan_files(plan_data: Sequence[Dict[str, Any]], out_dir: Path) -> Tuple[Path, Path]:

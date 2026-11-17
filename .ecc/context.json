@@ -1,0 +1,49 @@
+{
+  "session_id": "slicer-cbct-planner-v3-upgrade",
+  "updated_at": "2026-11-17T11:48:00-05:00",
+  "active_milestone": "Milestone 2: Architectural Blueprint, Modernization Analysis & Full Upgrade Implementation",
+  "decisions": [
+    {
+      "topic": "Print File & Measured Image Bug Fixes",
+      "chosen": "Fix Widget getParameterNode(), VTK 2-arg GetTag, DisplayNode segment visibility, ToothFairy3 vs 5-class detection, dual Pillow+Qt cross-section renderer with full H/W0/W3/W5/Nerve vectors, inline UI Measured Image Gallery, and explicit output directory saving (PDF + 300 DPI PNG + HTML)",
+      "reason": "Eliminates runtime AttributeErrors/TypeErrors in 3D Slicer and ensures radiologists and dentists immediately see and export measured cross-sectional images and 10x8/8x10 film sheets."
+    },
+    {
+      "topic": "Vivid Teeth & Roots Visualization (SlicerDentalSegmentator)",
+      "chosen": "Vivid anatomical color palette with translucent alveolar bone (0.22-0.30 opacity), 1.0 opacity vivid teeth/roots with Phong specular shading (Specular=0.45, Power=25), glowing red/orange IAN canal, and root-dentin-enhancing 3D VR preset",
+      "reason": "Opaque jawbone previously occluded tooth roots in 3D surface and VR views; translucent bone + specular teeth makes crowns, roots, furcations, and canals vivid."
+    },
+    {
+      "topic": "RISE-MAR Metal Artifact Reduction Integration",
+      "chosen": "New RiseMarEngine module supporting C:\\Users\\hamid\\Downloads\\risemar_dental_preview.pkl (CBAM Attention U-Net + sinogram/streak suppression hybrid + CQA 1-10 quality scoring)",
+      "reason": "Provides on-demand Metal Artifact Reduction in Step 1 and batch CLI for scans with titanium implants, amalgam fillings, or orthodontic brackets."
+    },
+    {
+      "topic": "SlicerAutomatedDentalTools Native Feature Integration",
+      "chosen": "Native implementations of ASO (Standardized Cranial/Occlusal Orientation), ALI (3D Dental & Cephalometric Landmark Identification), CLI-C (Impacted Canine/Molar Localization), VFACE (Bilateral Mandibular Asymmetry), and AutoCrop3D/AutoMatrix",
+      "reason": "Provides immediate clinical value for orthodontists, oral surgeons, and radiologists without requiring external Conda/WSL2 setup."
+    }
+  ],
+  "modified_files": [
+    "CBCTPlanner/CBCTPlannerLib/core/labels.py",
+    "CBCTPlanner/CBCTPlannerLib/core/measurements.py",
+    "CBCTPlanner/CBCTPlannerLib/core_print_render.py",
+    "CBCTPlanner/CBCTPlannerLib/PrintLayoutEngine.py",
+    "CBCTPlanner/CBCTPlannerLib/VRVisualization.py",
+    "CBCTPlanner/CBCTPlannerLib/RiseMarEngine.py",
+    "CBCTPlanner/CBCTPlannerLib/AutomatedDentalToolsEngine.py",
+    "CBCTPlanner/CBCTPlannerLib/AdvancedTools.py",
+    "CBCTPlanner/CBCTPlannerLib/__init__.py",
+    "CBCTPlanner/CBCTPlanner.py"
+  ],
+  "completed_tasks": [
+    "Inspect SlicerCBCTPlanner_1 codebase",
+    "Diagnose print layout and measured image display bugs",
+    "Research SlicerAutomatedDentalTools, SlicerDentalSegmentator, and RISE-MAR"
+  ],
+  "next_tasks": [
+    "Implement core fixes and new modules",
+    "Upgrade CBCTPlanner UI/UX with Radiologist & Dentist workspaces",
+    "Verify 100% unit test pass rate and package deliverables"
+  ]
+}

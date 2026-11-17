@@ -677,7 +677,7 @@ class CheckpointInferenceEngine:
             else:
                 info = LABELS_BY_ID.get(lbl)
                 seg_name = info.name if info is not None else f"Segment_{lbl}"
-                rgb = (0.85, 0.78, 0.58) if (info and info.category == "tooth") else (0.75, 0.55, 0.45)
+                rgb = info.color if info is not None else (0.85, 0.78, 0.58)
                 fdi_tag = info.fdi if info is not None else None
 
             seg_id = f"Segment_{lbl}"

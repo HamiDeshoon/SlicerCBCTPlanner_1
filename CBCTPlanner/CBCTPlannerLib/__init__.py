@@ -17,6 +17,13 @@ from .AdvancedTools import (
     export_html_to_pdf,
     export_reformatted_dicom_series,
 )
+from .AutomatedDentalToolsEngine import (
+    ALILandmarkResult,
+    ASOOrientationResult,
+    AutomatedDentalToolsEngine,
+    ImpactedToothCLICResult,
+    VFACEAsymmetryResult,
+)
 from .CanalTracer import (
     CanalProximityResult,
     CanalTraceData,
@@ -60,6 +67,20 @@ from .Phase7Tools import (
     run_automated_dental_tool,
     run_headless_batch_pipeline,
 )
+from .RiseMarEngine import (
+    DEFAULT_METAL_THRESHOLD_HU,
+    DEFAULT_RISEMAR_WEIGHTS_PATH,
+    RISEMAR_HU_MAX,
+    RISEMAR_HU_MIN,
+    RiseMarConfig,
+    RiseMarEngine,
+    RiseMarResult,
+    build_risemar_cbam_unet_2d,
+    detect_metal_affected_slices,
+    evaluate_cqa_score,
+    postprocess_slice_risemar,
+    preprocess_slice_risemar,
+)
 from .Utils import (
     BoundedLRUCache,
     CLINICAL_DISCLAIMER_TEXT,
@@ -83,12 +104,16 @@ from .Utils import (
 )
 from .VRVisualization import (
     DENTAL_SEGMENT_PRESETS,
+    VIVID_3D_STYLE_PRESETS,
     VRVisualizationLogic,
 )
 
 __all__ = [
+    "ALILandmarkResult",
+    "ASOOrientationResult",
     "AUTOMATED_DENTAL_TOOLS_MODULES",
     "AirwayAnalysisResult",
+    "AutomatedDentalToolsEngine",
     "BoundedLRUCache",
     "CEPHALOMETRIC_NORMS",
     "CLINICAL_DISCLAIMER_TEXT",
@@ -105,8 +130,11 @@ __all__ = [
     "CheckpointSpec",
     "CrossSectionNavigator",
     "CursorSettings",
+    "DEFAULT_METAL_THRESHOLD_HU",
+    "DEFAULT_RISEMAR_WEIGHTS_PATH",
     "DENTAL_SEGMENT_PRESETS",
     "GuideSleeveSpec",
+    "ImpactedToothCLICResult",
     "ImplantLibraryEntry",
     "ImplantPlannerLogic",
     "PanoramicCurveLogic",
@@ -116,13 +144,21 @@ __all__ = [
     "PrinterPreset",
     "ProstheticPlanner",
     "ProstheticProposal",
+    "RISEMAR_HU_MAX",
+    "RISEMAR_HU_MIN",
+    "RiseMarConfig",
+    "RiseMarEngine",
+    "RiseMarResult",
     "SOFTWARE_VERSION",
     "SurgicalGuideGenerator",
     "TMJCondyleFrame",
     "UndoRedoManager",
     "UndoableCommand",
+    "VFACEAsymmetryResult",
+    "VIVID_3D_STYLE_PRESETS",
     "VRVisualizationLogic",
     "addInCollapsibleLayout",
+    "build_risemar_cbam_unet_2d",
     "capture_slice_view_png_base64",
     "compute_3d_cephalometry",
     "compute_3d_gaussian_importance_map",
@@ -134,6 +170,8 @@ __all__ = [
     "createButton",
     "create_or_update_fdi_segmentation_overlays",
     "detect_automated_dental_tools_modules",
+    "detect_metal_affected_slices",
+    "evaluate_cqa_score",
     "export_dicom_seg_and_sr",
     "export_html_to_pdf",
     "export_reformatted_dicom_series",
@@ -143,6 +181,8 @@ __all__ = [
     "load_state_dict_shape_safe",
     "normalize_cbct_volume",
     "normalize_state_dict_keys",
+    "postprocess_slice_risemar",
+    "preprocess_slice_risemar",
     "registerAndSetDentalLayout",
     "registerAndSetDentalLightboxLayout",
     "run_automated_dental_tool",

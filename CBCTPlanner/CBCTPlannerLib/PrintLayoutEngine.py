@@ -1,25 +1,26 @@
 """8x10-Inch Printable Clinical Dental Layout Engine (SlicerCBCTPlanner).
 
-Generates standard 8x10 inch printable film layouts (HTML & PDF) combining:
-  1. Panoramic reformat view with numbered slice indicator ticks.
+Generates standard 8x10 inch printable film layouts (HTML, PDF & 300 DPI PNG) combining:
+  1. Panoramic reformat view with numbered slice indicator ticks (auto-synthesized from
+     the fitted arch curve if the user did not manually generate a PanoramicVolume first).
   2. 15 to 27 sequential cross-sectional slices with drawn clinical measurement lines:
-     - Bone height (Green vertical line)
-     - Crestal bone width (Yellow horizontal line)
-     - Bone width at 3 mm depth (Cyan horizontal dashed line)
-     - Bone width at 5 mm depth (Blue horizontal dashed line)
+     - Bone height (Green vertical line with end-caps)
+     - Crestal bone width (Yellow/Cyan horizontal line)
+     - Bone width at 3 mm depth (Orange/Gold horizontal line)
+     - Bone width at 5 mm depth (Amber horizontal line)
      - Mandibular canal / nerve safety margin (Red circular boundary)
-  3. 3D Volume Rendering (VR) isolating the anatomical classes for the selected quadrant
-     (jawbone, teeth, and inferior alveolar nerve canal).
+  3. 3D Volume Rendering (VR) / Anatomical Quadrant Projection isolating the anatomical classes
+     for the selected quadrant (jawbone, vivid teeth & roots, and inferior alveolar nerve canal).
 """
 
 from __future__ import annotations
 
 import base64
-import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import html
 import io
+import logging
 import math
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
@@ -27,8 +28,8 @@ from typing import Any, List, Optional, Sequence, Tuple
 import numpy as np
 
 try:
-    import qt
     import ctk
+    import qt
     import slicer
 except ImportError:
     qt = None
@@ -42,7 +43,12 @@ except ImportError:
     ImageDraw = None
     ImageFont = None
 
-from .core_print_render import render_cross_section, render_panoramic_strip, unavailable_tile
+from .core_print_render import (
+    hu_window_to_rgb,
+    render_cross_section,
+    render_panoramic_strip,
+    unavailable_tile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +71,8 @@ class CrossSectionSliceSpec:
     width_3mm: Optional[float] = None
     width_5mm: Optional[float] = None
     nerve_dist_mm: Optional[float] = None
+    misch_class: Optional[str] = None
+    mean_hu: Optional[float] = None
     is_mandible: bool = True
     image_data_uri: str = ""
 
@@ -93,10 +101,25 @@ def _data_uri_to_image(uri: str) -> Optional[Any]:
 
 
 class PrintLayoutEngine:
-    """Orchestrates generation of 8x10-inch clinical print layouts."""
+    """Orchestrates generation of 8x10-inch clinical print layouts (HTML + PDF + 300 DPI PNG)."""
 
     def __init__(self, logic: Any = None) -> None:
         self.logic = logic
+        self.last_png_file: Optional[Path] = None
+        self.last_pdf_file: Optional[Path] = None
+        self.last_html_file: Optional[Path] = None
+
+    @staticmethod
+    def default_export_directory() -> Path:
+        """Return a visible, user-accessible default export folder (never hidden OS temp unless fallback)."""
+        try:
+            home_docs = Path.home() / "Documents" / "CBCTPlanner_Prints"
+            home_docs.mkdir(parents=True, exist_ok=True)
+            return home_docs
+        except Exception:
+            if slicer is not None and getattr(slicer, "app", None) is not None:
+                return Path(slicer.app.temporaryPath)
+            return Path(".")
 
     def generate_8x10_layout(
         self,
@@ -111,11 +134,11 @@ class PrintLayoutEngine:
         pano_b64: Optional[str] = None,
         vr_b64: Optional[str] = None,
     ) -> Tuple[Path, Path, List[CrossSectionSliceSpec]]:
-        """Generate genuine 8x10 inch film pages (HTML view + vector-free PDF)."""
+        """Generate genuine 8x10 inch film pages (HTML view + 300 DPI PDF + 300 DPI PNG)."""
         from .core.labels import sort_teeth_anatomically
         from .core.print_layout import slice_count_for_selection
 
-        out_path = Path(out_dir or (slicer.app.temporaryPath if slicer else "."))
+        out_path = Path(out_dir) if out_dir is not None else self.default_export_directory()
         out_path.mkdir(parents=True, exist_ok=True)
 
         fdis = sort_teeth_anatomically(list(selected_fdis or []))
@@ -174,6 +197,10 @@ class PrintLayoutEngine:
                 else:
                     data_uri = _unavailable_data_uri("Cross-section")
 
+                misch_short = None
+                if meas and getattr(meas, "misch_density_class", None):
+                    misch_short = str(meas.misch_density_class).split()[0]
+
                 spec = CrossSectionSliceSpec(
                     slice_index=s_idx + 1,
                     total_slices=n_slices,
@@ -188,15 +215,24 @@ class PrintLayoutEngine:
                     if (meas and meas.bone_width_at_depths_mm)
                     else None,
                     nerve_dist_mm=meas.distance_to_vital_structure_mm if meas else None,
+                    misch_class=misch_short,
+                    mean_hu=meas.mean_density_hu if meas else None,
                     is_mandible=is_mandible,
                     image_data_uri=data_uri,
                 )
                 specs.append(spec)
                 all_specs.append(spec)
 
-            pano_uri = pano_b64 or self._pano_strip_uri(arc_values, [s.fdi for s in specs])
+            pano_uri = pano_b64 or self._pano_strip_uri(
+                arc_values, [s.fdi for s in specs], engine=engine, is_mandible=is_mandible
+            )
             if not pano_uri:
                 pano_uri = _unavailable_data_uri("Panoramic")
+
+            vr_uri = vr_b64 or self._vr_capture(engine=engine, quadrant=q)
+            if not vr_uri:
+                vr_uri = _unavailable_data_uri("VR")
+
             page_records.append(
                 {
                     "quadrant": q,
@@ -204,7 +240,7 @@ class PrintLayoutEngine:
                     "jaw_label": jaw_label,
                     "slices": specs,
                     "pano_b64": pano_uri,
-                    "vr_b64": vr_b64 or self._vr_capture() or _unavailable_data_uri("VR"),
+                    "vr_b64": vr_uri,
                 }
             )
 
@@ -239,6 +275,7 @@ class PrintLayoutEngine:
         clean_name = "".join(c if c.isalnum() else "_" for c in vol_name) or "CBCT"
         html_file = out_path / f"{clean_name}_8x10_Print_Layout.html"
         pdf_file = out_path / f"{clean_name}_8x10_Print_Layout.pdf"
+        png_file = out_path / f"{clean_name}_8x10_Print_Layout.png"
         html_file.write_text(html_content, encoding="utf-8")
 
         if not pages:
@@ -250,6 +287,10 @@ class PrintLayoutEngine:
             save_all=True,
             append_images=pages[1:],
         )
+        pages[0].save(png_file, "PNG")
+        self.last_html_file = html_file
+        self.last_pdf_file = pdf_file
+        self.last_png_file = png_file
         return html_file, pdf_file, all_specs
 
     @staticmethod
@@ -267,40 +308,130 @@ class PrintLayoutEngine:
                 logger.exception("Could not resolve the arch position of FDI %s", fdi)
         return arcs
 
-    def _pano_strip_uri(self, arcs: Sequence[float], labels: Sequence[int]) -> Optional[str]:
-        if self.logic is None or slicer is None:
-            return None
-        try:
-            pNode = self.logic.getParameterNode()
-            panoNode = pNode.GetNodeReference("PanoramicVolume") if pNode else None
-            if not panoNode:
-                return None
-            arr = slicer.util.arrayFromVolume(panoNode)
-            spacing = float(pNode.GetParameter("PanoSpacingMm") or 0.5) if pNode else 0.5
-            render = render_panoramic_strip(
-                arr,
-                column_spacing_mm=max(1e-3, spacing),
-                tick_arcs_mm=arcs,
-                labels=[str(label) for label in labels],
-                strip_height=340,
-                scale=2,
-            )
-            return _image_to_data_uri(render.image) if render.available else None
-        except Exception:
-            logger.exception("Panoramic strip rendering failed")
-            return None
+    def _pano_strip_uri(
+        self,
+        arcs: Sequence[float],
+        labels: Sequence[int],
+        engine: Any = None,
+        is_mandible: bool = True,
+    ) -> Optional[str]:
+        """Render the panoramic strip from `PanoramicVolume`, or synthesize it in-process from `engine`."""
+        # 1. Try existing Slicer PanoramicVolume node first
+        if self.logic is not None and slicer is not None:
+            try:
+                pNode = self.logic.getParameterNode() if hasattr(self.logic, "getParameterNode") else None
+                panoNode = (
+                    pNode.GetNodeReference("PanoramicVolume")
+                    if (pNode and hasattr(pNode, "GetNodeReference"))
+                    else None
+                )
+                if panoNode is not None:
+                    arr = slicer.util.arrayFromVolume(panoNode)
+                    spacing = float(pNode.GetParameter("PanoSpacingMm") or 0.5) if pNode else 0.5
+                    render = render_panoramic_strip(
+                        arr,
+                        column_spacing_mm=max(1e-3, spacing),
+                        tick_arcs_mm=arcs,
+                        labels=[str(label) for label in labels],
+                        strip_height=340,
+                        scale=2,
+                    )
+                    if render.available and render.image is not None:
+                        return _image_to_data_uri(render.image)
+            except Exception:
+                logger.exception("Panoramic strip rendering from node failed")
 
-    def _vr_capture(self) -> Optional[str]:
-        if self.logic is None:
-            return None
-        capture = getattr(self.logic, "capture_3d_view_png_base64", None)
-        if capture is None:
-            return None
-        try:
-            return capture(view_index=0)
-        except Exception:
-            logger.exception("3D VR capture failed")
-            return None
+        # 2. Automatic in-process CPR synthesis from engine.volume + arch when PanoramicVolume node wasn't generated yet
+        vol = getattr(engine, "volume", None) if engine is not None else None
+        arch_fn = getattr(engine, "_arch_for_jaw", None) if engine is not None else None
+        arch = arch_fn(is_mandible) if callable(arch_fn) else None
+        if vol is not None and arch is not None and hasattr(arch, "pts_dense"):
+            try:
+                from .PanoramicCurveLogic import PanoramicCurveLogic
+
+                pts_dense = np.asarray(arch.pts_dense, dtype=np.float64)
+                if len(pts_dense) >= 8:
+                    up = np.asarray(getattr(arch, "occlusal_normal", (0.0, 0.0, 1.0)), dtype=np.float64)
+                    tangents = np.gradient(pts_dense, axis=0)
+                    t_norm = np.maximum(1e-8, np.linalg.norm(tangents, axis=1, keepdims=True))
+                    tangents /= t_norm
+                    normals = np.cross(tangents, up)
+                    n_norm = np.maximum(1e-8, np.linalg.norm(normals, axis=1, keepdims=True))
+                    normals /= n_norm
+                    binormals = np.cross(normals, tangents)
+                    b_norm = np.maximum(1e-8, np.linalg.norm(binormals, axis=1, keepdims=True))
+                    binormals /= b_norm
+                    if np.any((binormals @ up) < 0):
+                        binormals[(binormals @ up) < 0] *= -1.0
+
+                    pano_arr = PanoramicCurveLogic.sample_panoramic_slab_array(
+                        cbct_volume=vol,
+                        pts_arch=pts_dense,
+                        tangents=tangents,
+                        normals=normals,
+                        binormals=binormals,
+                        slab_thickness_mm=20.0,
+                        height_mm=70.0,
+                        spacing_mm=0.75,
+                        projection_mode="Mean",
+                        flip_vertical=True,
+                    )
+                    render = render_panoramic_strip(
+                        pano_arr,
+                        column_spacing_mm=0.75,
+                        tick_arcs_mm=arcs,
+                        labels=[str(label) for label in labels],
+                        strip_height=340,
+                        scale=2,
+                    )
+                    if render.available and render.image is not None:
+                        return _image_to_data_uri(render.image)
+            except Exception:
+                logger.exception("In-process panoramic synthesis for print layout failed")
+        return None
+
+    def _vr_capture(self, engine: Any = None, quadrant: int = 4) -> Optional[str]:
+        if self.logic is not None:
+            capture = getattr(self.logic, "capture_3d_view_png_base64", None)
+            if callable(capture):
+                try:
+                    uri = capture(view_index=0)
+                    if uri:
+                        return uri
+                except Exception:
+                    logger.exception("3D VR capture failed")
+
+        # Fallback: synthesize a 3D vivid MIP / segmentation projection card from engine.volume & mask
+        vol = getattr(engine, "volume", None) if engine is not None else None
+        mask = getattr(engine, "mask", None) if engine is not None else None
+        if vol is not None and Image is not None and getattr(vol, "image", None) is not None:
+            try:
+                img_3d = np.asarray(vol.image, dtype=np.float32)
+                # Coronal MIP projection (Z, X)
+                mip = np.max(img_3d, axis=1)[::-1, :]
+                gray = hu_window_to_rgb(mip)
+                rgb = np.repeat(gray[:, :, None], 3, axis=2).astype(np.float32)
+                if mask is not None and mask.shape == img_3d.shape:
+                    m_proj = np.max(mask, axis=1)[::-1, :]
+                    teeth_m = (m_proj == 3) | (m_proj == 4) | ((m_proj >= 11) & (m_proj <= 48))
+                    canal_m = (m_proj == 5) | (m_proj == 3) | (m_proj == 4)
+                    rgb[teeth_m] = 0.35 * rgb[teeth_m] + 0.65 * np.array([255.0, 220.0, 120.0])
+                    if np.any(m_proj == 5):
+                        rgb[m_proj == 5] = np.array([255.0, 60.0, 50.0])
+                pil_img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), mode="RGB").resize(
+                    (400, 220), Image.BILINEAR
+                )
+                draw = ImageDraw.Draw(pil_img)
+                draw.text(
+                    (8, 6),
+                    f"3D Vivid MIP Projection (Q{quadrant})",
+                    fill=(56, 189, 248),
+                    font=ImageFont.load_default(),
+                )
+                return _image_to_data_uri(pil_img)
+            except Exception:
+                logger.debug("Fallback MIP projection card failed", exc_info=True)
+        return None
 
     @staticmethod
     def _combine_html_pages(pages: List[str]) -> str:
@@ -372,12 +503,17 @@ class PrintLayoutEngine:
             vr_w = 800
             page.paste(vr.resize((vr_w, key_h), Image.BILINEAR), (page_w - margin - vr_w, key_top))
         draw.text((margin, key_top + 10), "Measurement key", fill=(0, 0, 0), font=font)
-        draw.text((margin, key_top + 32), "H  bone height (mm)", fill=(0, 0, 0), font=font)
-        draw.text((margin, key_top + 54), "W0 crest width / W3 / W5 depth widths", fill=(0, 0, 0), font=font)
+        draw.text((margin, key_top + 32), "H  bone height (mm) [Green vertical]", fill=(0, 120, 40), font=font)
+        draw.text(
+            (margin, key_top + 54),
+            "W0 crest width [Cyan] / W3 (3mm) / W5 (5mm) depth widths [Gold]",
+            fill=(0, 0, 0),
+            font=font,
+        )
         draw.text(
             (margin, key_top + 76),
-            "Nerve clearance is shown only when a canal/sinus is segmented",
-            fill=(0, 0, 0),
+            "IAN Nerve clearance is shown when a canal/sinus is segmented [Red]",
+            fill=(160, 20, 20),
             font=font,
         )
         draw.text((margin, footer_top + 20), CLINICAL_DISCLAIMER_TEXT, fill=(90, 90, 90), font=font)
@@ -406,8 +542,17 @@ class PrintLayoutEngine:
 
         cards_html: List[str] = []
         for s in slices:
+            h_txt = f"{s.height_mm:.1f}" if s.height_mm is not None else "--"
+            w0_txt = f"{s.crest_width_mm:.1f}" if s.crest_width_mm is not None else "--"
+            w3_txt = f"{s.width_3mm:.1f}" if s.width_3mm is not None else "--"
+            w5_txt = f"{s.width_5mm:.1f}" if s.width_5mm is not None else "--"
+            misch_badge = f" | {s.misch_class}" if s.misch_class else ""
             cards_html.append(
-                f"<div class='cs-card'><img src='{s.image_data_uri}' alt='Slice {s.slice_index}'/></div>"
+                f"<div class='cs-card'>"
+                f"<div class='cs-hdr'>#{s.fdi} S{s.slice_index} ({s.offset_mm:+.1f}mm){html.escape(misch_badge)}</div>"
+                f"<img src='{s.image_data_uri}' alt='Slice {s.slice_index}'/>"
+                f"<div class='cs-ftr'>H:{h_txt} W0:{w0_txt} W3:{w3_txt} W5:{w5_txt}</div>"
+                f"</div>"
             )
 
         fdi_list_str = ", ".join(f"#{t}" for t in fdis)
@@ -494,6 +639,8 @@ body {{
     overflow: hidden;
     text-align: center;
 }}
+.cs-hdr {{ font-size: 8px; color: #38bdf8; background: #020617; padding: 1px 2px; font-weight: 600; }}
+.cs-ftr {{ font-size: 7.5px; color: #e2e8f0; background: #020617; padding: 1px 2px; }}
 .cs-card img {{ width: 100%; height: auto; display: block; }}
 .bottom-section {{
     display: flex;

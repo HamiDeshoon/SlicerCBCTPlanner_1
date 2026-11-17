@@ -1,12 +1,25 @@
-"""Volume Rendering (VR) and DentalSegmentator 3D visualization module.
+"""Volume Rendering (VR) and SlicerDentalSegmentator Vivid Teeth & Roots 3D Visualization Module.
 
-Fixes B8 & O7:
-  - Always re-applies the selected VR preset when switching presets (`A -> B -> A`) so transfer
-    functions with different point counts are never corrupted by index-based overwrite.
-  - Caches only the current active preset's unshifted baseline points.
-  - Batches transfer function updates with `DisableModifiedEventOn/Off` / `StartModify/EndModify`.
-  - Detects non-HU CBCT intensity ranges (e.g. `min > -500` or `max > 10000`) and derives custom
-    CBCT bone/enamel transfer function points from volume intensity percentiles instead of HU constants.
+Upgrades & Guarantees:
+  - Vivid SlicerDentalSegmentator 3D surface styling (`https://github.com/gaudot/SlicerDentalSegmentator`):
+      * Vivid teeth & roots (`1.0` 3D opacity, high-contrast pearlescent/enamel colors, Phong specular
+        highlighting so root apices, furcations, and crown cusps are razor-sharp).
+      * Translucent glass-bone Maxilla & Mandible (`0.25` default 3D opacity, adjustable `0.0 - 1.0`
+        via live slider) so tooth roots and the inferior alveolar nerve canal are vividly visible
+        through the alveolar bone.
+      * Multi-class ToothFairy3 (`77` classes) AND 5-class DentalSegmentator styling support.
+      * One-click 3D Style Presets:
+          1. `"DentalSegmentator Vivid (Teeth & Roots)"` (Default — translucent bone 0.25, vivid roots 1.0, glowing red canal 1.0)
+          2. `"Roots & Nerve X-Ray (Hide Bone)"` (Bone 0.05, vivid teeth & roots 1.0, canal 1.0)
+          3. `"Endodontic Root-Canal View (Translucent Teeth)"` (Bone 0.08, teeth 0.30, pulp/root canals 1.0, IAN canal 1.0)
+          4. `"Surgical Bone & Teeth (Opaque Bone)"` (Bone 0.85, teeth 1.0, canal 1.0)
+  - Fixes B8 & O7:
+      * Always re-applies the selected VR preset when switching presets (`A -> B -> A`) so transfer
+        functions with different point counts are never corrupted by index-based overwrite.
+      * Caches only the current active preset's unshifted baseline points.
+      * Batches transfer function updates with `DisableModifiedEventOn/Off` / `StartModify/EndModify`.
+      * Detects non-HU CBCT intensity ranges (e.g. `min > -500` or `max > 10000`) and derives custom
+        CBCT bone/enamel transfer function points from volume intensity percentiles instead of HU constants.
 """
 
 from __future__ import annotations
@@ -25,29 +38,45 @@ from .Utils import (
     setConventionalWideScreenView,
     toRGB,
 )
+from .core.labels import (
+    LABELS_BY_ID,
+    match_segment_to_label_and_precedence,
+    safe_get_segment_tag,
+)
 
-# Exact 5-class anatomical presets from gaudot/SlicerDentalSegmentator
-# (Segment Name, Hex Color, 3D Opacity)
+# Vivid 5-class anatomical presets from gaudot/SlicerDentalSegmentator
+# (Segment Name, Hex Color, Default 3D Opacity — translucent bone makes tooth roots vivid!)
 DENTAL_SEGMENT_PRESETS: Dict[int, Tuple[str, str, float]] = {
-    1: ("Maxilla & Upper Skull", "#E3DD90", 0.45),
-    2: ("Mandible", "#D4A1E6", 0.45),
-    3: ("Upper Teeth", "#DC9565", 1.0),
-    4: ("Lower Teeth", "#EBDFB4", 1.0),
-    5: ("Mandibular canal", "#D8654F", 1.0),
+    1: ("Maxilla & Upper Skull", "#E8DF88", 0.25),
+    2: ("Mandible", "#D8A4EC", 0.25),
+    3: ("Upper Teeth", "#FFAB66", 1.0),
+    4: ("Lower Teeth", "#FFF3C4", 1.0),
+    5: ("Mandibular canal", "#FF3B30", 1.0),
+}
+
+# 3D Surface Style Presets -> (jaw_opacity, tooth_opacity, canal_opacity, pulp_opacity, sinus_opacity)
+VIVID_3D_STYLE_PRESETS: Dict[str, Tuple[float, float, float, float, float]] = {
+    "DentalSegmentator Vivid (Teeth & Roots)": (0.25, 1.0, 1.0, 1.0, 0.25),
+    "Roots & Nerve X-Ray (Hide Bone)": (0.05, 1.0, 1.0, 1.0, 0.12),
+    "Endodontic Root-Canal View (Translucent Teeth)": (0.08, 0.30, 1.0, 1.0, 0.15),
+    "Surgical Bone & Teeth (Opaque Bone)": (0.85, 1.0, 1.0, 1.0, 0.35),
 }
 
 
 class VRVisualizationLogic:
-    """Manages DentalSegmentator 3D surface styling and CBCT Volume Rendering."""
+    """Manages SlicerDentalSegmentator vivid 3D surface styling and CBCT Volume Rendering."""
 
     SUPPORTED_VR_PRESETS = (
+        "DentalSegmentator (Teeth & Bone)",
+        "DentalSegmentator Vivid Roots (VR)",
         "CT-Dental-CBCT",
         "CT-Bone",
         "CT-AAA",
         "CT-MIP",
         "CT-Cardiac",
-        "DentalSegmentator (Teeth & Bone)",
     )
+
+    SUPPORTED_3D_SURFACE_PRESETS = tuple(VIVID_3D_STYLE_PRESETS.keys())
 
     def __init__(self) -> None:
         # B8: Track only the currently active preset and its unshifted baseline per property node ID
@@ -63,20 +92,25 @@ class VRVisualizationLogic:
             segmentation.GetSegmentIDs(ids)
             return [ids.GetValue(i) for i in range(ids.GetNumberOfValues())]
         except Exception:
+            if hasattr(segmentation, "GetNumberOfSegments") and hasattr(segmentation, "GetNthSegmentID"):
+                return [
+                    segmentation.GetNthSegmentID(i) for i in range(segmentation.GetNumberOfSegments())
+                ]
             return []
 
     @staticmethod
     def _match_preset_by_name(segment_name: str) -> Optional[Tuple[str, str, float]]:
         lowered = (segment_name or "").lower()
         for key, hex_color, opacity in (
-            ("maxilla", "#E3DD90", 0.45),
-            ("skull", "#E3DD90", 0.45),
-            ("upper jaw", "#E3DD90", 0.45),
-            ("mandible", "#D4A1E6", 0.45),
-            ("lower jaw", "#D4A1E6", 0.45),
-            ("upper teeth", "#DC9565", 1.0),
-            ("lower teeth", "#EBDFB4", 1.0),
-            ("canal", "#D8654F", 1.0),
+            ("maxilla", "#E8DF88", 0.25),
+            ("skull", "#E8DF88", 0.25),
+            ("upper jaw", "#E8DF88", 0.25),
+            ("mandible", "#D8A4EC", 0.25),
+            ("lower jaw", "#D8A4EC", 0.25),
+            ("upper teeth", "#FFAB66", 1.0),
+            ("lower teeth", "#FFF3C4", 1.0),
+            ("canal", "#FF3B30", 1.0),
+            ("nerve", "#FF3B30", 1.0),
         ):
             if key in lowered:
                 return segment_name, hex_color, opacity
@@ -95,9 +129,9 @@ class VRVisualizationLogic:
         if switch_to_widescreen:
             setConventionalWideScreenView()
         if white_background:
-            set3DViewBackgroundColors((1.0, 1.0, 1.0), (1.0, 1.0, 1.0))
+            set3DViewBackgroundColors((0.97, 0.98, 1.0), (0.88, 0.91, 0.96))
         else:
-            set3DViewBackgroundColors((0.1, 0.12, 0.16), (0.04, 0.05, 0.08))
+            set3DViewBackgroundColors((0.08, 0.11, 0.16), (0.03, 0.04, 0.07))
         if hide_box_and_labels:
             setBoxAndTextVisibilityOnThreeDViews(False)
 
@@ -112,22 +146,32 @@ class VRVisualizationLogic:
     def apply_dental_segmentator_styling(
         self,
         segmentationNode: Any,
-        smoothing_factor: float = 0.5,
+        smoothing_factor: float = 0.40,
         group_values: Optional[List[int]] = None,
         configure_view: bool = True,
+        style_preset: str = "DentalSegmentator Vivid (Teeth & Roots)",
+        jaw_opacity_override: Optional[float] = None,
     ) -> None:
-        """Apply DentalSegmentator colors, 3D opacities, and closed-surface smoothing."""
+        """Apply vivid SlicerDentalSegmentator colors, translucent bone for root visibility, and Phong shading."""
         if not segmentationNode:
             return
         segmentation = segmentationNode.GetSegmentation()
         if hasattr(segmentation, "SetConversionParameter"):
-            segmentation.SetConversionParameter("Smoothing factor", str(smoothing_factor))
-        segmentationNode.CreateClosedSurfaceRepresentation()
+            segmentation.SetConversionParameter("Smoothing factor", str(float(smoothing_factor)))
+        if hasattr(segmentationNode, "CreateClosedSurfaceRepresentation"):
+            segmentationNode.CreateClosedSurfaceRepresentation()
 
-        if not segmentationNode.GetDisplayNode():
+        if not segmentationNode.GetDisplayNode() and hasattr(segmentationNode, "CreateDefaultDisplayNodes"):
             segmentationNode.CreateDefaultDisplayNodes()
         displayNode = segmentationNode.GetDisplayNode()
-        segmentationNode.SetDisplayVisibility(True)
+        if hasattr(segmentationNode, "SetDisplayVisibility"):
+            segmentationNode.SetDisplayVisibility(True)
+
+        jaw_op, tooth_op, canal_op, pulp_op, sinus_op = VIVID_3D_STYLE_PRESETS.get(
+            style_preset, (0.25, 1.0, 1.0, 1.0, 0.25)
+        )
+        if jaw_opacity_override is not None:
+            jaw_op = float(np.clip(jaw_opacity_override, 0.0, 1.0))
 
         seg_ids = self._get_segment_ids(segmentation)
         if not group_values or len(group_values) != len(seg_ids):
@@ -141,25 +185,78 @@ class VRVisualizationLogic:
                 segment = segmentation.GetSegment(seg_id)
                 if segment is None:
                     continue
-                spec = DENTAL_SEGMENT_PRESETS.get(group_values[index]) if group_values else None
-                if spec is None:
-                    spec = self._match_preset_by_name(segment.GetName() or "")
-                if spec is None and len(seg_ids) == len(DENTAL_SEGMENT_PRESETS):
-                    spec = DENTAL_SEGMENT_PRESETS.get(index + 1)
-                if spec is None:
-                    continue
 
-                name, hex_color, opacity = spec
-                segment.SetName(name)
-                segment.SetColor(*toRGB(hex_color))
+                seg_name = segment.GetName() or ""
+                fdi_attr = safe_get_segment_tag(segment, "CBCTPlanner.FDI")
+                label_id, category, _is_5c, _prec = match_segment_to_label_and_precedence(
+                    seg_id, seg_name, fdi_attribute=fdi_attr
+                )
+
+                spec = DENTAL_SEGMENT_PRESETS.get(group_values[index]) if group_values else None
+                if spec is None and label_id in LABELS_BY_ID and label_id >= 3 and len(seg_ids) > 5:
+                    info = LABELS_BY_ID[label_id]
+                    rgb = info.color
+                    if category == "tooth":
+                        opacity = tooth_op
+                    elif category == "pulp":
+                        opacity = pulp_op
+                    elif category == "canal":
+                        opacity = canal_op
+                    elif category == "sinus":
+                        opacity = sinus_op
+                    elif category == "jaw":
+                        opacity = jaw_op
+                    else:
+                        opacity = 0.85
+                    segment.SetName(info.name)
+                    segment.SetColor(float(rgb[0]), float(rgb[1]), float(rgb[2]))
+                else:
+                    if spec is None:
+                        spec = self._match_preset_by_name(seg_name)
+                    if spec is None and len(seg_ids) == len(DENTAL_SEGMENT_PRESETS):
+                        spec = DENTAL_SEGMENT_PRESETS.get(index + 1)
+                    if spec is not None:
+                        name, hex_color, default_op = spec
+                        segment.SetName(name)
+                        segment.SetColor(*toRGB(hex_color))
+                        name_l = name.lower()
+                        if "teeth" in name_l or "tooth" in name_l:
+                            opacity = tooth_op
+                        elif "canal" in name_l or "nerve" in name_l:
+                            opacity = canal_op
+                        elif "maxilla" in name_l or "mandible" in name_l or "jaw" in name_l or "skull" in name_l:
+                            opacity = jaw_op
+                        else:
+                            opacity = default_op
+                    elif label_id in LABELS_BY_ID:
+                        info = LABELS_BY_ID[label_id]
+                        segment.SetName(info.name)
+                        segment.SetColor(*info.color)
+                        opacity = jaw_op if info.category == "jaw" else tooth_op
+                    else:
+                        continue
+
                 if displayNode:
                     displayNode.SetSegmentVisibility(seg_id, True)
                     if hasattr(displayNode, "SetSegmentVisibility3D"):
-                        displayNode.SetSegmentVisibility3D(seg_id, True)
-                    displayNode.SetSegmentOpacity3D(seg_id, opacity)
+                        displayNode.SetSegmentVisibility3D(seg_id, opacity > 0.01)
+                    if hasattr(displayNode, "SetSegmentOpacity3D"):
+                        displayNode.SetSegmentOpacity3D(seg_id, float(opacity))
+                    if hasattr(displayNode, "SetSegmentOpacity2DFill"):
+                        displayNode.SetSegmentOpacity2DFill(
+                            seg_id, 0.18 if opacity < 0.5 else 0.30
+                        )
+                    if hasattr(displayNode, "SetSegmentOpacity2DOutline"):
+                        displayNode.SetSegmentOpacity2DOutline(seg_id, 0.95)
 
             if displayNode:
                 displayNode.SetVisibility(True)
+                if hasattr(displayNode, "SetVisibility3D"):
+                    displayNode.SetVisibility3D(True)
+                if hasattr(displayNode, "SetVisibility2DOutline"):
+                    displayNode.SetVisibility2DOutline(True)
+                if hasattr(displayNode, "SetSliceIntersectionThickness"):
+                    displayNode.SetSliceIntersectionThickness(2)
                 if hasattr(displayNode, "SetAllSegmentsVisibility"):
                     displayNode.SetAllSegmentsVisibility(True)
         finally:
@@ -168,6 +265,47 @@ class VRVisualizationLogic:
 
         if configure_view:
             self.configure_3d_view()
+
+    def set_jawbone_3d_opacity(
+        self,
+        segmentationNode: Any,
+        jaw_opacity: float = 0.25,
+        tooth_opacity: float = 1.0,
+    ) -> None:
+        """Dynamically adjust 3D opacity of jawbone vs teeth/roots so tooth roots remain vivid."""
+        if not segmentationNode:
+            return
+        segmentation = segmentationNode.GetSegmentation()
+        displayNode = segmentationNode.GetDisplayNode()
+        if not segmentation or not displayNode:
+            return
+        j_op = float(np.clip(jaw_opacity, 0.0, 1.0))
+        t_op = float(np.clip(tooth_opacity, 0.05, 1.0))
+        seg_ids = self._get_segment_ids(segmentation)
+        was_mod = displayNode.StartModify() if hasattr(displayNode, "StartModify") else None
+        try:
+            for sid in seg_ids:
+                seg = segmentation.GetSegment(sid)
+                if not seg:
+                    continue
+                name_l = (seg.GetName() or "").lower()
+                fdi_attr = safe_get_segment_tag(seg, "CBCTPlanner.FDI")
+                _lbl, cat, _is5, _pr = match_segment_to_label_and_precedence(
+                    sid, seg.GetName() or "", fdi_attribute=fdi_attr
+                )
+                if cat == "jaw" or any(k in name_l for k in ("maxilla", "mandible", "jaw", "skull")):
+                    if hasattr(displayNode, "SetSegmentOpacity3D"):
+                        displayNode.SetSegmentOpacity3D(sid, j_op)
+                    if hasattr(displayNode, "SetSegmentVisibility3D"):
+                        displayNode.SetSegmentVisibility3D(sid, j_op > 0.01)
+                elif cat == "tooth" or "teeth" in name_l or "tooth" in name_l:
+                    if hasattr(displayNode, "SetSegmentOpacity3D"):
+                        displayNode.SetSegmentOpacity3D(sid, t_op)
+                    if hasattr(displayNode, "SetSegmentVisibility3D"):
+                        displayNode.SetSegmentVisibility3D(sid, True)
+        finally:
+            if was_mod is not None and hasattr(displayNode, "EndModify"):
+                displayNode.EndModify(was_mod)
 
     @staticmethod
     def is_volume_hu_calibrated(volume_array: Optional[np.ndarray]) -> bool:
@@ -289,9 +427,12 @@ class VRVisualizationLogic:
 
     @classmethod
     def _apply_dental_segmentator_transfer_function(
-        cls, volumePropertyNode: Any, volume_array: Optional[np.ndarray] = None
+        cls,
+        volumePropertyNode: Any,
+        volume_array: Optional[np.ndarray] = None,
+        vivid_roots_mode: bool = False,
     ) -> None:
-        """DentalSegmentator-style VR: enamel and teeth bright, bone warm, soft tissue transparent."""
+        """DentalSegmentator-style VR: enamel and tooth roots vivid and bright, alveolar bone translucent."""
         if not volumePropertyNode:
             return
         if volume_array is not None and np.asarray(volume_array).size:
@@ -303,17 +444,25 @@ class VRVisualizationLogic:
             for index in range(1, len(xs)):
                 if xs[index] <= xs[index - 1]:
                     xs[index] = xs[index - 1] + 1.0
-            opacities = [0.0, 0.0, 0.045, 0.28, 0.62, 1.0]
+            opacities = (
+                [0.0, 0.0, 0.025, 0.14, 0.78, 1.0]
+                if vivid_roots_mode
+                else [0.0, 0.0, 0.045, 0.28, 0.62, 1.0]
+            )
         else:
             xs = [-400.0, 80.0, 320.0, 650.0, 1200.0, 2600.0]
-            opacities = [0.0, 0.0, 0.05, 0.32, 0.7, 1.0]
+            opacities = (
+                [0.0, 0.0, 0.025, 0.14, 0.80, 1.0]
+                if vivid_roots_mode
+                else [0.0, 0.0, 0.05, 0.32, 0.7, 1.0]
+            )
         colors = [
             (0.0, 0.0, 0.0),
             (0.45, 0.18, 0.12),
-            (0.78, 0.55, 0.38),
-            (0.90, 0.80, 0.60),
-            (0.97, 0.93, 0.80),
-            (1.0, 1.0, 0.96),
+            (0.82, 0.58, 0.38),
+            (0.95, 0.83, 0.58),
+            (1.0, 0.95, 0.82),
+            (1.0, 1.0, 0.98),
         ]
 
         was_mod = volumePropertyNode.StartModify() if hasattr(volumePropertyNode, "StartModify") else None
@@ -334,18 +483,18 @@ class VRVisualizationLogic:
             if gradient_tf:
                 gradient_tf.RemoveAllPoints()
                 gradient_tf.AddPoint(0.0, 0.0)
-                gradient_tf.AddPoint(80.0, 0.55)
-                gradient_tf.AddPoint(300.0, 1.0)
+                gradient_tf.AddPoint(70.0, 0.65)
+                gradient_tf.AddPoint(260.0, 1.0)
             if hasattr(volumePropertyNode, "SetShade"):
                 volumePropertyNode.SetShade(True)
             if hasattr(volumePropertyNode, "SetAmbient"):
-                volumePropertyNode.SetAmbient(0.28)
+                volumePropertyNode.SetAmbient(0.25)
             if hasattr(volumePropertyNode, "SetDiffuse"):
-                volumePropertyNode.SetDiffuse(0.9)
+                volumePropertyNode.SetDiffuse(0.88)
             if hasattr(volumePropertyNode, "SetSpecular"):
-                volumePropertyNode.SetSpecular(0.35)
+                volumePropertyNode.SetSpecular(0.45 if vivid_roots_mode else 0.35)
             if hasattr(volumePropertyNode, "SetSpecularPower"):
-                volumePropertyNode.SetSpecularPower(18.0)
+                volumePropertyNode.SetSpecularPower(26.0 if vivid_roots_mode else 18.0)
         finally:
             if hasattr(volumePropertyNode, "DisableModifiedEventOff"):
                 volumePropertyNode.DisableModifiedEventOff()
@@ -488,7 +637,11 @@ class VRVisualizationLogic:
                 )
             elif preset_name == "DentalSegmentator (Teeth & Bone)":
                 self._apply_dental_segmentator_transfer_function(
-                    volumePropertyNode, volume_array=volume_array
+                    volumePropertyNode, volume_array=volume_array, vivid_roots_mode=False
+                )
+            elif preset_name == "DentalSegmentator Vivid Roots (VR)":
+                self._apply_dental_segmentator_transfer_function(
+                    volumePropertyNode, volume_array=volume_array, vivid_roots_mode=True
                 )
             else:
                 preset = (
