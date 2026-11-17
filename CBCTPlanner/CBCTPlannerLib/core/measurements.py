@@ -10,6 +10,7 @@ are not calibrated Hounsfield Units (B4, F12).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
@@ -35,6 +36,37 @@ from .tooth_localizer import ToothInfo, ToothLocalizer
 from .volume_loader import CBCTVolume
 
 MISCH_APPROXIMATE_DISCLAIMER = "approximate (CBCT gray values are not calibrated HU)"
+
+logger = logging.getLogger("CBCTPlanner.measurements")
+
+# A measurable alveolar ridge sits inside the cross-section field. A bone region that reaches
+# the lateral border, or spans most of the field, means the jaw mask is missing or misaligned
+# at this site: measuring it would print invented millimetres on the clinical film.
+_CS_BORDER_TOL_MM = 0.75
+_MAX_RIDGE_WIDTH_FRACTION = 0.80
+_MAX_RIDGE_HEIGHT_FRACTION = 0.90
+
+
+def _ridge_region_is_plausible(
+    bone: np.ndarray, u_coords: np.ndarray, v_coords: np.ndarray
+) -> bool:
+    """True only for a bone region that fits inside the cross-section field.
+
+    Rejects regions touching the buccolingual field border or spanning more than
+    `_MAX_RIDGE_WIDTH_FRACTION` of the field width, and regions taller than
+    `_MAX_RIDGE_HEIGHT_FRACTION` of the field height.
+    """
+    if not bone.any():
+        return False
+    u_bone = u_coords[np.flatnonzero(bone.any(axis=0))]
+    v_bone = v_coords[np.flatnonzero(bone.any(axis=1))]
+    u_lo, u_hi = float(u_coords.min()), float(u_coords.max())
+    v_lo, v_hi = float(v_coords.min()), float(v_coords.max())
+    if u_bone.min() <= u_lo + _CS_BORDER_TOL_MM or u_bone.max() >= u_hi - _CS_BORDER_TOL_MM:
+        return False
+    if u_bone.max() - u_bone.min() > _MAX_RIDGE_WIDTH_FRACTION * (u_hi - u_lo):
+        return False
+    return v_bone.max() - v_bone.min() <= _MAX_RIDGE_HEIGHT_FRACTION * (v_hi - v_lo)
 
 
 @dataclass
@@ -392,6 +424,10 @@ class MeasurementEngine:
         img_cs = cs.img_cs
         P, _T, _N, B = cs.frame
         cs.is_mandible = is_mandible
+        if not _ridge_region_is_plausible(mask_cs == jaw_id, u_coords, v_coords):
+            # Not measurable: leave crest/widths unset so the tile renders the ruler only.
+            logger.info("Cross-section at FDI %s rejected: bone region is not a plausible ridge", fdi)
+            return None
         vital_candidates = self._vital_ids(info.quadrant, is_mandible)
         vital_id = next((vid for vid in vital_candidates if (self.mask == vid).any()), None)
         vital_name = "Inferior Alveolar Canal" if is_mandible else "Maxillary Sinus Floor"
@@ -534,16 +570,22 @@ class MeasurementEngine:
         if info is None:
             return None, cs
         jaw_id = self._jaw_id(is_mandible)
-        meas = self._measure_from_cs(
-            fdi,
-            info,
-            is_mandible,
-            jaw_id,
-            self._get_tooth_info(fdi),
-            cs,
-            "arch",
-            False,
-        )
+        try:
+            meas = self._measure_from_cs(
+                fdi,
+                info,
+                is_mandible,
+                jaw_id,
+                self._get_tooth_info(fdi),
+                cs,
+                "arch",
+                False,
+            )
+        except Exception:
+            # A single failing metric must not discard the cross-section: the crest and
+            # width geometry resolved before the failure still renders with the tile.
+            logger.exception("Cross-section metrics failed at %.2f mm", arc_mm)
+            meas = None
         return meas, cs
 
     def _compute_bone_height_in_cs(

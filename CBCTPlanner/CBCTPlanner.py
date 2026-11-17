@@ -595,15 +595,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         flipRow.addWidget(self.btnFlipSi)
         step1Layout.addRow("Manual Correction:", flipRow)
 
-        self.autoStandardizeOnLoadCheck = qt.QCheckBox("Auto-standardize on load (off by default)")
-        self.autoStandardizeOnLoadCheck.setChecked(False)
+        self.autoStandardizeOnLoadCheck = qt.QCheckBox("Auto-standardize on load (RAS)")
+        self.autoStandardizeOnLoadCheck.setChecked(True)
         self.autoStandardizeOnLoadCheck.setToolTip(
             "When enabled, loading a volume attempts a lossless RAS standardization. Data is never changed silently."
         )
         try:
             settings = qt.QSettings()
             self.autoStandardizeOnLoadCheck.setChecked(
-                str(settings.value(self.SETTINGS_PREFIX + "autoStandardizeOnLoad", "false")).lower() == "true"
+                str(settings.value(self.SETTINGS_PREFIX + "autoStandardizeOnLoad", "true")).lower() == "true"
             )
         except Exception:
             logger.debug("Could not read autoStandardizeOnLoad setting", exc_info=True)
@@ -2035,7 +2035,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         if slicer and not slicer.util.confirmOkCancelDisplay(
             f"Mirror the volume and segmentation along {axis}?\n"
-            "This changes stored voxel order and the IJK-to-RAS matrix.",
+            "This mirrors the stored voxel data and keeps the IJK-to-RAS matrix, "
+            "so the displayed anatomy flips in the sagittal/coronal views.",
             windowTitle=f"Flip {axis}",
         ):
             return
@@ -4688,7 +4689,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         return verify_orientation(mask, affine, is_5class=is_5class)
 
     def flip_orientation_axis(self, volumeNode: Any, segmentationNode: Any, axis: str) -> bool:
-        """Manually mirror a volume and segmentation along LR/AP/SI and update the affine."""
+        """Mirror a volume and segmentation along LR/AP/SI so the displayed anatomy flips.
+
+        The IJK-to-RAS matrix is intentionally kept: flipping the voxels *and* the matrix
+        only reorders data and leaves every viewer looking unchanged.
+        """
         from CBCTPlannerLib.core.orientation import flip_axis
 
         if slicer is None or volumeNode is None:
@@ -4696,8 +4701,8 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         arr, affine = self._volume_array_and_affine(volumeNode)
         if arr is None or affine is None:
             return False
-        flipped, flipped_affine = flip_axis(arr, affine, axis)
-        self._write_volume_array_and_affine(volumeNode, flipped, flipped_affine)
+        flipped = flip_axis(arr, affine, axis)[0]
+        self._write_volume_array_and_affine(volumeNode, flipped, affine)
         if segmentationNode is not None:
             self._apply_segment_ops(
                 segmentationNode,

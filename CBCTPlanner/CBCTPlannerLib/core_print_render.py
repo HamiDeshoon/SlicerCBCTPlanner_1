@@ -129,6 +129,21 @@ def render_cross_section(
     draw.text((max(2, width - 12), 2), "B", fill=(0, 255, 0), font=font)
     labels.extend([(2.0, 2.0, "L"), (float(max(2, width - 12)), 2.0, "B")])
 
+    # Millimetre ruler (left edge) and 10 mm scale bar, drawn on every tile so the image
+    # carries a measurement reference even when no metric could be computed.
+    ruler_colour = (255, 255, 255) if dark_film else (205, 205, 205)
+    for tick_mm in np.arange(np.ceil(v_coords.min() / 5.0) * 5.0, v_coords.max(), 5.0):
+        _, tick_y = _px(u_coords[0], float(tick_mm), u_coords, v_coords, scale)
+        major = abs(float(tick_mm) % 10.0) < 1e-6
+        draw.line([(0, tick_y), (11 if major else 6, tick_y)], fill=ruler_colour, width=1)
+        if major:
+            draw.text((13, tick_y - 4), f"{float(tick_mm):+.0f}", fill=ruler_colour, font=font)
+    bar_px = 10.0 / max(1e-6, abs(u_coords[-1] - u_coords[0])) * width
+    draw.line([(8, height - 34), (8 + bar_px, height - 34)], fill=ruler_colour, width=2)
+    draw.line([(8, height - 38), (8, height - 30)], fill=ruler_colour, width=1)
+    draw.line([(8 + bar_px, height - 38), (8 + bar_px, height - 30)], fill=ruler_colour, width=1)
+    draw.text((12 + bar_px, height - 39), "10 mm", fill=ruler_colour, font=font)
+
     crest_v = getattr(cs, "crest_v", None)
     if crest_v is not None:
         x_left, y_crest = _px(u_coords[0], crest_v, u_coords, v_coords, scale)
