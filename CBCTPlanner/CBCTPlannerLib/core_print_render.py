@@ -3,8 +3,9 @@
 Pure numpy geometry with Pillow (and automatic Qt fallback in 3D Slicer). Every overlay
 is derived from measured millimetre coordinates:
   - Green vertical Bone Height line (`H`) from alveolar crest (`crest_v`) to basal/canal limit (`basal_v`)
-  - Yellow Crestal reference & `W0` Crestal Buccolingual Width line
-  - Cyan `W3` (3 mm depth) and Orange/Gold `W5` (5 mm depth) Buccolingual Width lines
+  - Cyan `W0` Crestal Buccolingual Width line
+  - Gold-orange `W3` (3 mm depth) and orange `W5` (5+ mm depth) Buccolingual Width lines
+    (legend colours in PrintLayoutEngine must match the RGB tuples below)
   - Red/Cyan Inferior Alveolar Nerve Canal circle + clearance indicator
   - Subtle anatomical contours for segmented teeth/roots and jawbone cortical plates
 """
@@ -189,7 +190,9 @@ def render_cross_section(
     else:
         height_mm = getattr(meas, "bone_height_mm", None)
         crest_w = getattr(meas, "crest_width_mm", None)
-        text = "H --  W0 --" if height_mm is None else f"H {height_mm:.1f} mm  W0 {crest_w or 0:.1f} mm"
+        h_txt = f"{height_mm:.1f} mm" if height_mm is not None else "--"
+        w_txt = f"{crest_w:.1f} mm" if crest_w is not None else "--"
+        text = f"H {h_txt}  W0 {w_txt}"
         draw.rectangle([(0, max(0, height - 16)), (width, height)], fill=(10, 15, 28))
         draw.text((4, max(0, height - 14)), text, fill=(255, 255, 255), font=font)
 

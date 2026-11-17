@@ -99,6 +99,7 @@ class CrossSectionData:
     basal_v: Optional[float] = None
     height_u: float = 0.0
     is_mandible: bool = True
+    ridge_rejected_reason: Optional[str] = None
 
 
 @dataclass
@@ -400,16 +401,42 @@ class MeasurementEngine:
             u_coords, v_coords, mask_cs, P, B, is_mandible, jaw_id, vital_id
         )
         cs.crest_v = crest_v
+        cs.ridge_rejected_reason = None
         if crest_v is not None and bone_height_mm is not None:
             cs.basal_v = crest_v - bone_height_mm if is_mandible else crest_v + bone_height_mm
 
         depths = [0.0, 3.0, 5.0, 6.0, 9.0]
-        widths = self._compute_bone_widths_in_cs(
+        widths: Dict[float, Optional[float]] = self._compute_bone_widths_in_cs(
             u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths
         )
         cs.width_segments = self._compute_bone_widths_with_endpoints_in_cs(
             u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths
         )
+
+        # Ridge-plausibility guard (split checks): a bone region that fills the whole
+        # cross-section laterally is not an implantable ridge, so its buccolingual WIDTHS
+        # are implausible and must be dropped. HEIGHT is judged independently: a plausible
+        # crest-to-base/-sinus height (e.g. maxillary bone-height-to-sinus in 5-class masks)
+        # is still reported even when every width was rejected. A height spanning (nearly)
+        # the full field of view is equally implausible and removes only the height values.
+        width_rejected, height_rejected = self._ridge_plausibility_rejections(
+            u_coords, v_coords, mask_cs, crest_v, bone_height_mm, jaw_id
+        )
+        if width_rejected:
+            widths = {d: None for d in widths}
+            cs.width_segments = {}
+            cs.ridge_rejected_reason = width_rejected
+        if height_rejected:
+            bone_height_mm = None
+            vital_dist_mm = None
+            cs.basal_v = None
+            cs.ridge_rejected_reason = " / ".join(
+                r for r in (cs.ridge_rejected_reason, height_rejected) if r
+            )
+        elif width_rejected and crest_v is not None and bone_height_mm is not None:
+            # Widths gone: re-anchor the height line at the centre of the field of view.
+            cs.height_u = 0.0
+
         if 0.0 in cs.width_segments:
             u_l, u_r = cs.width_segments[0.0]
             cs.height_u = 0.5 * (u_l + u_r)
@@ -420,7 +447,6 @@ class MeasurementEngine:
         crest_w = widths.get(0.0)
         mid_w = widths.get(6.0) if widths.get(6.0) is not None else widths.get(3.0)
         apical_w = widths.get(9.0)
-
         mesiodistal_mm = self._compute_mesiodistal_space(fdi)
         mean_density_hu, nnt_summary = self._compute_site_bone_density_in_cs(
             u_coords, v_coords, mask_cs, img_cs, crest_v, is_mandible, bone_height_mm, jaw_id
@@ -603,6 +629,40 @@ class MeasurementEngine:
                 if edt_val is not None:
                     return round(min(full_jaw_height, edt_val), 2), round(edt_val, 2), crest_v
             return round(full_jaw_height, 2), None, crest_v
+
+    @staticmethod
+    def _ridge_plausibility_rejections(
+        u_coords: np.ndarray,
+        v_coords: np.ndarray,
+        mask_cs: np.ndarray,
+        crest_v: Optional[float],
+        bone_height_mm: Optional[float],
+        jaw_id: int,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Split ridge-plausibility guard: returns `(width_rejection, height_rejection)` reasons or None.
+
+        The two checks are deliberately independent so an implausible buccolingual width
+        (bone region touching both lateral borders of the field of view) only removes the
+        WIDTH values, while a plausible crest-to-base HEIGHT is still reported — maxillary
+        bone-height-to-sinus in 5-class masks must never be silently lost because a wide
+        palatal/maxillary bone block spans the whole cross-section laterally.
+        """
+        if crest_v is None:
+            return None, None
+        half_u = float(np.max(np.abs(u_coords)))
+        half_v = float(np.max(np.abs(v_coords)))
+        # Bone voxels hugging the lateral border within a 1 mm edge band (sub-voxel slack).
+        edge_tol = 1.0 + 1e-6
+        bone_rows = (mask_cs == jaw_id)
+        touches_left = bool(bone_rows[:, u_coords <= -half_u + edge_tol].any())
+        touches_right = bool(bone_rows[:, u_coords >= half_u - edge_tol].any())
+        width_reason = None
+        if touches_left and touches_right:
+            width_reason = f"bone spans full {2.0 * half_u:.0f} mm lateral field of view"
+        height_reason = None
+        if bone_height_mm is not None and float(bone_height_mm) >= 2.0 * half_v - 2.0:
+            height_reason = f"height spans the full {2.0 * half_v:.0f} mm vertical field of view"
+        return width_reason, height_reason
 
     @staticmethod
     def _compute_bone_widths_in_cs(

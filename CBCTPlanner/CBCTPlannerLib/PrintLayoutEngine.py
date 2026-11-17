@@ -3,14 +3,16 @@
 Generates standard 8x10 inch printable film layouts (HTML, PDF & 300 DPI PNG) combining:
   1. Panoramic reformat view with numbered slice indicator ticks (auto-synthesized from
      the fitted arch curve if the user did not manually generate a PanoramicVolume first).
-  2. 15 to 27 sequential cross-sectional slices with drawn clinical measurement lines:
-     - Bone height (Green vertical line with end-caps)
-     - Crestal bone width (Yellow/Cyan horizontal line)
-     - Bone width at 3 mm depth (Orange/Gold horizontal line)
-     - Bone width at 5 mm depth (Amber horizontal line)
+  2. 15 to 27 sequential cross-sectional slices with drawn clinical measurement lines
+     (colours defined in core_print_render.render_cross_section; legends below must match):
+     - Bone height H (green vertical line with end-caps, RGB 34,197,94)
+     - Crestal buccolingual width W0 (cyan horizontal line, RGB 0,220,255)
+     - Width at 3 mm depth W3 (gold-orange horizontal line, RGB 255,180,0)
+     - Widths at >= 5 mm depth W5/W6/W9 (orange horizontal line, RGB 255,120,40)
      - Mandibular canal / nerve safety margin (Red circular boundary)
   3. 3D Volume Rendering (VR) / Anatomical Quadrant Projection isolating the anatomical classes
      for the selected quadrant (jawbone, vivid teeth & roots, and inferior alveolar nerve canal).
+Multi-quadrant selections produce one page per quadrant, footered "Page N of M".
 """
 
 from __future__ import annotations
@@ -245,6 +247,7 @@ class PrintLayoutEngine:
             )
 
         # HTML browser view: one section per quadrant with a page break.
+        total_pages = len(page_records)
         html_pages = [
             self._build_8x10_html(
                 slices=rec["slices"],
@@ -255,8 +258,10 @@ class PrintLayoutEngine:
                 fdis=rec["fdis"],
                 patient_name=patient_name if include_metadata else "Anonymous",
                 patient_id=patient_id if include_metadata else "Anonymous",
+                page_number=index + 1,
+                total_pages=total_pages,
             )
-            for rec in page_records
+            for index, rec in enumerate(page_records)
         ]
         html_content = self._combine_html_pages(html_pages)
 
@@ -437,12 +442,12 @@ class PrintLayoutEngine:
     def _combine_html_pages(pages: List[str]) -> str:
         if not pages:
             return ""
-        head = pages[0].partition("<body>")[0]
+        head = pages[0].partition("<head>")[2]
         bodies = [page.partition("<body>")[2].rpartition("</body>")[0] for page in pages]
-        joined = '<div style="page-break-after: always;">' + bodies[0] + "</div>"
+        joined = '<div class="print-page" style="page-break-after: always;">' + bodies[0] + "</div>"
         for body in bodies[1:]:
-            joined += '<div style="page-break-before: always;">' + body + "</div>"
-        return head + "<body>" + joined + "</body></html>"
+            joined += '<div class="print-page" style="page-break-before: always;">' + body + "</div>"
+        return "<!DOCTYPE html>\n<html lang=\"en\">\n<head>" + head + "</head><body>" + joined + "</body></html>"
 
     def _compose_page_image(
         self, record: dict, *, patient_name: str, page_number: int, total_pages: int
@@ -504,12 +509,17 @@ class PrintLayoutEngine:
             page.paste(vr.resize((vr_w, key_h), Image.BILINEAR), (page_w - margin - vr_w, key_top))
         draw.text((margin, key_top + 10), "Measurement key", fill=(0, 0, 0), font=font)
         draw.text((margin, key_top + 32), "H  bone height (mm) [Green vertical]", fill=(0, 120, 40), font=font)
+        # Colours must match core_print_render.render_cross_section: W0 cyan, W3 gold-orange.
         draw.text(
             (margin, key_top + 54),
-            "W0 crest width [Cyan] / W3 (3mm) / W5 (5mm) depth widths [Gold]",
+            "W0 crest width [Cyan] / W3 (3mm) & W5 (5mm) depth widths [Gold-Orange]",
             fill=(0, 0, 0),
             font=font,
         )
+        swatch_x = margin + 470
+        draw.rectangle([(swatch_x, key_top + 54), (swatch_x + 10, key_top + 64)], fill=(0, 220, 255))
+        draw.rectangle([(swatch_x + 16, key_top + 54), (swatch_x + 26, key_top + 64)], fill=(255, 180, 0))
+        draw.rectangle([(swatch_x + 32, key_top + 54), (swatch_x + 42, key_top + 64)], fill=(255, 120, 40))
         draw.text(
             (margin, key_top + 76),
             "IAN Nerve clearance is shown when a canal/sinus is segmented [Red]",
@@ -535,6 +545,8 @@ class PrintLayoutEngine:
         fdis: List[int],
         patient_name: str,
         patient_id: str,
+        page_number: int = 1,
+        total_pages: int = 1,
     ) -> str:
         """Construct exact 8x10-inch standard print HTML/CSS page."""
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -722,11 +734,11 @@ body {{
             <div>All measurement lines are resampled orthogonally along the dental arch curve:</div>
             <div class="legend-row">
                 <div class="leg-item"><div class="leg-box" style="background: #22c55e;"></div><strong>Height (H):</strong> Crest to canal/base</div>
-                <div class="leg-item"><div class="leg-box" style="background: #eab308;"></div><strong>Crest Width (W0):</strong> Crestal width</div>
+                <div class="leg-item"><div class="leg-box" style="background: #00dcff;"></div><strong>Crest Width (W0):</strong> Buccolingual width at crest</div>
             </div>
             <div class="legend-row">
-                <div class="leg-item"><div class="leg-box" style="background: #06b6d4;"></div><strong>W3:</strong> Width @ 3 mm depth</div>
-                <div class="leg-item"><div class="leg-box" style="background: #3b82f6;"></div><strong>W5:</strong> Width @ 5 mm depth</div>
+                <div class="leg-item"><div class="leg-box" style="background: #ffb400;"></div><strong>W3:</strong> Width @ 3 mm depth</div>
+                <div class="leg-item"><div class="leg-box" style="background: #ff7828;"></div><strong>W5:</strong> Width @ 5 mm depth</div>
                 <div class="leg-item"><div class="leg-box" style="background: #ef4444;"></div><strong>Canal:</strong> IAN Nerve margin</div>
             </div>
             <div style="font-size: 8.5px; color: #94a3b8; margin-top: 6px; line-height: 1.3;">
@@ -736,7 +748,7 @@ body {{
     </div>
 
     <div class="footer-text">
-        Generated by SlicerCBCTPlanner | Standard 8×10-Inch Orthogonal Film Print Layout | Page 1 of 1
+        Generated by SlicerCBCTPlanner | Standard 8×10-Inch Orthogonal Film Print Layout | Page {page_number} of {total_pages}
     </div>
 </div>
 </body>
