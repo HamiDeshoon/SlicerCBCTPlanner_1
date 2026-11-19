@@ -11,7 +11,7 @@
 - **Given**: A resampled cross-section `(u_coords, v_coords, mask_cs, img_cs)` orthogonal to the dental arch at `arc_mm`.
 - **When**: Computing alveolar bone height `H`, crestal width `W0`, depth widths `W3`, `W5`, `W6`, `W9`, and vital nerve/sinus clearance.
 - **Then**:
-  1. The alveolar ridge envelope is the union of jawbone voxels (`mask_cs == jaw_id`) and any in-socket tooth root (`mask_cs == tooth_id`) across `|u| <= 6.0 mm`, with an automatic HU cortical/trabecular bone fallback (`img_cs >= 250 HU`) when segmentation masks only cover teeth or when measuring unsegmented scans.
+  1. The alveolar ridge envelope is the union of jawbone voxels (`mask_cs == jaw_id`) and any in-socket tooth root (`mask_cs == tooth_id`) across `|u| <= 6.0 mm`, with an automatic HU cortical/trabecular bone fallback (`img_cs >= 250 HU`) when segmentation masks only cover teeth or when measuring unsegmented scans. Root voxels count only apical to the jawbone's occlusal boundary, so an erupted crown is never reported as the alveolar crest. Every withheld metric records its reason on `ImplantSiteMeasurement.withheld_reason` / `CrossSectionData.withheld_reason`, which the tile surfaces as a short badge and `treatment_plan.csv` exports in the `withheld_reason` column.
   2. `render_cross_section` draws:
      - Jawbone contour (subtle translucent gold/emerald outline), tooth contour (vivid cyan/ivory outline), and canal contour (vivid red circle + safety halo).
      - Vertical Green Bone Height (`H`) line with end-caps from `crest_v` to `basal_v` / canal top.

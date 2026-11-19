@@ -10,6 +10,7 @@ are not calibrated Hounsfield Units (B4, F12).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
@@ -35,6 +36,136 @@ from .tooth_localizer import ToothInfo, ToothLocalizer
 from .volume_loader import CBCTVolume
 
 MISCH_APPROXIMATE_DISCLAIMER = "approximate (CBCT gray values are not calibrated HU)"
+
+logger = logging.getLogger("CBCTPlanner.measurements")
+
+# A measurable alveolar ridge sits inside the cross-section field. A bone region that reaches
+# the lateral border, or spans most of the field, means the jaw mask is missing or misaligned
+# at this site: measuring it would print invented millimetres on the clinical film.
+_CS_BORDER_TOL_MM = 0.75
+_MAX_RIDGE_WIDTH_FRACTION = 0.80
+_MAX_RIDGE_HEIGHT_FRACTION = 0.90
+
+# RC-01: the alveolar ridge envelope adds the in-socket root inside this buccolingual
+# window, and falls back to gray-value bone when the segmentation carries no jawbone.
+ENVELOPE_HALF_WIDTH_MM = 6.0
+BONE_HU_FALLBACK = 250.0
+
+# Recorded whenever a gate withholds a metric, so a rendered `--` stays distinguishable
+# from missing segmentation and from a metric that failed outright.
+WITHHELD_NO_SEGMENTATION = "no segmentation at site"
+WITHHELD_NO_BONE = "no jaw bone in cross-section"
+WITHHELD_WIDTH_BORDER = "widths withheld: jaw mask touches cross-section border"
+WITHHELD_WIDTH_SPAN = "widths withheld: jaw mask spans the cross-section field"
+WITHHELD_HEIGHT_SPAN = "height withheld: jaw mask exceeds cross-section height"
+WITHHELD_NO_CREST = "crest not resolved in cross-section"
+WITHHELD_METRIC_FAILED = "metric computation failed"
+
+_WITHHELD_BADGES = (
+    ("no segmentation", "no seg"),
+    ("no jaw bone", "no bone"),
+    ("touches cross-section border", "W: border"),
+    ("spans the cross-section", "W: field-wide"),
+    ("exceeds cross-section height", "H: field-tall"),
+    ("crest not resolved", "no crest"),
+    ("metric computation failed", "metric failed"),
+)
+
+
+def withheld_badge(reason: Optional[str]) -> str:
+    """Return a short tile badge for a withheld-measurement `reason` (empty when none)."""
+    text = str(reason or "").strip().lower()
+    if not text:
+        return ""
+    for needle, badge in _WITHHELD_BADGES:
+        if needle in text:
+            return badge
+    return "withheld"
+
+
+def _ridge_envelope_mask(
+    mask_cs: np.ndarray,
+    img_cs: np.ndarray,
+    u_coords: np.ndarray,
+    v_coords: np.ndarray,
+    jaw_id: int,
+    tooth_id: Optional[int],
+    is_mandible: bool,
+) -> np.ndarray:
+    """RC-01: jawbone voxels plus the in-socket root inside `|u| <= 6 mm`.
+
+    Root voxels count only apical to the jawbone's occlusal boundary, so an erupted crown
+    can never pose as the alveolar crest. When the cross-section carries no jawbone voxels
+    at all (teeth-only segmentation or an unsegmented scan), the envelope falls back to
+    voxels at or above `BONE_HU_FALLBACK` so real gray-value bone is measured instead of
+    the site being rejected as missing bone.
+    """
+    jaw_mask = mask_cs == jaw_id
+    if not jaw_mask.any():
+        return np.asarray(img_cs, dtype=np.float32) >= BONE_HU_FALLBACK
+    envelope = jaw_mask.copy()
+    if tooth_id is not None:
+        v_jaw = v_coords[np.flatnonzero(jaw_mask.any(axis=1))]
+        occlusal_v = float(np.max(v_jaw)) if is_mandible else float(np.min(v_jaw))
+        in_socket = (mask_cs == int(tooth_id)) & (
+            np.abs(u_coords)[None, :] <= ENVELOPE_HALF_WIDTH_MM
+        )
+        occlusal_side = (
+            v_coords[:, None] <= occlusal_v if is_mandible else v_coords[:, None] >= occlusal_v
+        )
+        envelope |= in_socket & occlusal_side
+    return envelope
+
+
+def _join_reasons(*reasons: Optional[str]) -> Optional[str]:
+    """Join distinct non-empty withheld reasons with `; ` (None when nothing was withheld)."""
+    unique: List[str] = []
+    for reason in reasons:
+        if reason and reason not in unique:
+            unique.append(reason)
+    return "; ".join(unique) or None
+
+
+def _ridge_region_withheld_reasons(
+    bone: np.ndarray, u_coords: np.ndarray, v_coords: np.ndarray
+) -> Tuple[Optional[str], Optional[str]]:
+    """Return `(width_reason, height_reason)`; each is None when that dimension is measurable.
+
+    The width reason names the failing gate (field border vs. field-spanning mask) and the
+    height reason covers a region taller than the cross-section field. An empty region
+    withholds both dimensions as missing bone.
+    """
+    if not bone.any():
+        return WITHHELD_NO_BONE, WITHHELD_NO_BONE
+    u_bone = u_coords[np.flatnonzero(bone.any(axis=0))]
+    v_bone = v_coords[np.flatnonzero(bone.any(axis=1))]
+    u_lo, u_hi = float(u_coords.min()), float(u_coords.max())
+    v_lo, v_hi = float(v_coords.min()), float(v_coords.max())
+    width_reason: Optional[str] = None
+    if u_bone.min() <= u_lo + _CS_BORDER_TOL_MM or u_bone.max() >= u_hi - _CS_BORDER_TOL_MM:
+        width_reason = WITHHELD_WIDTH_BORDER
+    elif u_bone.max() - u_bone.min() > _MAX_RIDGE_WIDTH_FRACTION * (u_hi - u_lo):
+        width_reason = WITHHELD_WIDTH_SPAN
+    height_reason = (
+        None
+        if v_bone.max() - v_bone.min() <= _MAX_RIDGE_HEIGHT_FRACTION * (v_hi - v_lo)
+        else WITHHELD_HEIGHT_SPAN
+    )
+    return width_reason, height_reason
+
+
+def _ridge_region_is_plausible(
+    bone: np.ndarray, u_coords: np.ndarray, v_coords: np.ndarray
+) -> Tuple[bool, bool]:
+    """Return `(width_ok, height_ok)` for a bone region inside the cross-section field.
+
+    `width_ok` is False when the region touches the buccolingual field border or spans
+    more than `_MAX_RIDGE_WIDTH_FRACTION` of the field width; `height_ok` is False when
+    the region spans more than `_MAX_RIDGE_HEIGHT_FRACTION` of the field height. An
+    empty region is implausible in both dimensions.
+    """
+    width_reason, height_reason = _ridge_region_withheld_reasons(bone, u_coords, v_coords)
+    return width_reason is None, height_reason is None
 
 
 @dataclass
@@ -82,6 +213,8 @@ class ImplantSiteMeasurement:
     canal_entrance_coord_mm: Optional[List[float]] = None
     apical_foramen_coord_mm: Optional[List[float]] = None
     nnt_density_summary: Dict[str, Any] = field(default_factory=dict)
+    # Why a metric is `None`; empty when every requested metric was measured honestly.
+    withheld_reason: Optional[str] = None
 
 
 @dataclass
@@ -99,7 +232,8 @@ class CrossSectionData:
     basal_v: Optional[float] = None
     height_u: float = 0.0
     is_mandible: bool = True
-    ridge_rejected_reason: Optional[str] = None
+    # Why this cross-section withheld a metric (implausible ridge, no crest, failure).
+    withheld_reason: Optional[str] = None
 
 
 @dataclass
@@ -141,6 +275,8 @@ class MeasurementEngine:
         # O3: Cache ROI-cropped distance transforms keyed by structure_id -> (dt_sub, z_slice, y_slice, x_slice)
         self._cropped_dt_cache: Dict[int, Tuple[np.ndarray, slice, slice, slice]] = {}
         self._tooth_span_cache: Dict[Tuple[str, int], Optional[Tuple[float, float]]] = {}
+        # Reason recorded by the most recent site/cross-section measurement (None when all metrics measured).
+        self.last_withheld_reason: Optional[str] = None
 
     def _jaw_id(self, is_mandible: bool) -> int:
         if self.is_dental_segmentator_5class:
@@ -344,6 +480,7 @@ class MeasurementEngine:
 
     def measure_implant_site(self, fdi: str, offset_mm: float = 0.0) -> Optional[ImplantSiteMeasurement]:
         """Compute implant planning metrics in the arch-frame cross-section (B4); returns None if unmeasurable."""
+        self.last_withheld_reason = None
         info = get_tooth_label(str(fdi))
         if not info:
             return None
@@ -371,9 +508,16 @@ class MeasurementEngine:
             canal_centroid_uv=None,
             is_mandible=is_mandible,
         )
-        return self._measure_from_cs(
-            str(fdi), info, is_mandible, jaw_id, tooth, cs, site_source, is_approx_site
-        )
+        try:
+            return self._measure_from_cs(
+                str(fdi), info, is_mandible, jaw_id, tooth, cs, site_source, is_approx_site
+            )
+        except Exception:
+            # A failing metric must surface as a recorded reason, not a silently blank tile.
+            logger.exception("Implant-site metrics failed for FDI %s", fdi)
+            cs.withheld_reason = _join_reasons(cs.withheld_reason, WITHHELD_METRIC_FAILED)
+            self.last_withheld_reason = WITHHELD_METRIC_FAILED
+            return None
 
     def _measure_from_cs(
         self,
@@ -385,7 +529,7 @@ class MeasurementEngine:
         cs: "CrossSectionData",
         site_source: str,
         is_approx_site: bool,
-    ) -> ImplantSiteMeasurement:
+    ) -> Optional[ImplantSiteMeasurement]:
         """Compute implant metrics from one already-resampled cross-section."""
         u_coords = cs.u_coords
         v_coords = cs.v_coords
@@ -393,50 +537,59 @@ class MeasurementEngine:
         img_cs = cs.img_cs
         P, _T, _N, B = cs.frame
         cs.is_mandible = is_mandible
+        self.last_withheld_reason = None
+        tooth_id: Optional[int] = None
+        if tooth is not None:
+            tooth_id = int(tooth.label_id)
+        elif self.is_dental_segmentator_5class:
+            tooth_id = (
+                DENTALSEGMENTATOR_LOWER_TEETH_ID if is_mandible else DENTALSEGMENTATOR_UPPER_TEETH_ID
+            )
+        bone_mask = _ridge_envelope_mask(
+            mask_cs, img_cs, u_coords, v_coords, jaw_id, tooth_id, is_mandible
+        )
+        width_reason, height_reason = _ridge_region_withheld_reasons(
+            bone_mask, u_coords, v_coords
+        )
+        width_ok, height_ok = width_reason is None, height_reason is None
+        if not width_ok and not height_ok:
+            # Not measurable: leave crest/widths unset so the tile renders the ruler only,
+            # and record why so a blank H/W is auditable instead of ambiguous.
+            cs.withheld_reason = _join_reasons(width_reason, height_reason)
+            self.last_withheld_reason = cs.withheld_reason
+            logger.info("Cross-section at FDI %s rejected: %s", fdi, cs.withheld_reason)
+            return None
         vital_candidates = self._vital_ids(info.quadrant, is_mandible)
         vital_id = next((vid for vid in vital_candidates if (self.mask == vid).any()), None)
         vital_name = "Inferior Alveolar Canal" if is_mandible else "Maxillary Sinus Floor"
 
         bone_height_mm, vital_dist_mm, crest_v = self._compute_bone_height_in_cs(
-            u_coords, v_coords, mask_cs, P, B, is_mandible, jaw_id, vital_id
+            u_coords, v_coords, mask_cs, P, B, is_mandible, jaw_id, vital_id, bone_mask=bone_mask
         )
         cs.crest_v = crest_v
-        cs.ridge_rejected_reason = None
+        withheld_reason: Optional[str] = None
+        if not height_ok:
+            # The crest still anchors the widths; only the implausible span is withheld.
+            bone_height_mm = None
+            withheld_reason = height_reason
         if crest_v is not None and bone_height_mm is not None:
             cs.basal_v = crest_v - bone_height_mm if is_mandible else crest_v + bone_height_mm
 
         depths = [0.0, 3.0, 5.0, 6.0, 9.0]
-        widths: Dict[float, Optional[float]] = self._compute_bone_widths_in_cs(
-            u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths
-        )
-        cs.width_segments = self._compute_bone_widths_with_endpoints_in_cs(
-            u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths
-        )
-
-        # Ridge-plausibility guard (split checks): a bone region that fills the whole
-        # cross-section laterally is not an implantable ridge, so its buccolingual WIDTHS
-        # are implausible and must be dropped. HEIGHT is judged independently: a plausible
-        # crest-to-base/-sinus height (e.g. maxillary bone-height-to-sinus in 5-class masks)
-        # is still reported even when every width was rejected. A height spanning (nearly)
-        # the full field of view is equally implausible and removes only the height values.
-        width_rejected, height_rejected = self._ridge_plausibility_rejections(
-            u_coords, v_coords, mask_cs, crest_v, bone_height_mm, jaw_id
-        )
-        if width_rejected:
-            widths = {d: None for d in widths}
-            cs.width_segments = {}
-            cs.ridge_rejected_reason = width_rejected
-        if height_rejected:
-            bone_height_mm = None
-            vital_dist_mm = None
-            cs.basal_v = None
-            cs.ridge_rejected_reason = " / ".join(
-                r for r in (cs.ridge_rejected_reason, height_rejected) if r
+        if width_ok:
+            widths = self._compute_bone_widths_in_cs(
+                u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths, bone_mask=bone_mask
             )
-        elif width_rejected and crest_v is not None and bone_height_mm is not None:
-            # Widths gone: re-anchor the height line at the centre of the field of view.
-            cs.height_u = 0.0
-
+            cs.width_segments = self._compute_bone_widths_with_endpoints_in_cs(
+                u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths, bone_mask=bone_mask
+            )
+        else:
+            widths = {depth: None for depth in depths}
+            withheld_reason = _join_reasons(withheld_reason, width_reason)
+        if crest_v is None:
+            withheld_reason = _join_reasons(withheld_reason, WITHHELD_NO_CREST)
+        cs.withheld_reason = withheld_reason
+        self.last_withheld_reason = withheld_reason
         if 0.0 in cs.width_segments:
             u_l, u_r = cs.width_segments[0.0]
             cs.height_u = 0.5 * (u_l + u_r)
@@ -499,6 +652,7 @@ class MeasurementEngine:
             root_length_mm=tooth.root_length_mm if tooth is not None else None,
             crown_to_root_ratio=tooth.crown_to_root_ratio if tooth is not None else None,
             nnt_density_summary=nnt_summary,
+            withheld_reason=withheld_reason,
         )
 
     def _resample_frame_data(
@@ -538,7 +692,9 @@ class MeasurementEngine:
         if arch is None:
             return None, None
         frame = arch.get_frame_at_mm(float(arc_mm))
-        cs = self._resample_frame_data(frame)
+        cs = self._resample_frame_data(
+            (frame.point, frame.tangent, frame.normal, frame.binormal)
+        )
         is_mandible = jaw_key == "lower"
 
         fdi = str(fdi_hint) if fdi_hint is not None else ""
@@ -560,16 +716,25 @@ class MeasurementEngine:
         if info is None:
             return None, cs
         jaw_id = self._jaw_id(is_mandible)
-        meas = self._measure_from_cs(
-            fdi,
-            info,
-            is_mandible,
-            jaw_id,
-            self._get_tooth_info(fdi),
-            cs,
-            "arch",
-            False,
-        )
+        try:
+            meas = self._measure_from_cs(
+                fdi,
+                info,
+                is_mandible,
+                jaw_id,
+                self._get_tooth_info(fdi),
+                cs,
+                "arch",
+                False,
+            )
+        except Exception:
+            # A single failing metric must not discard the cross-section: the crest and
+            # width geometry resolved before the failure still renders with the tile.
+            logger.exception("Cross-section metrics failed at %.2f mm", arc_mm)
+            if cs is not None:
+                cs.withheld_reason = _join_reasons(cs.withheld_reason, WITHHELD_METRIC_FAILED)
+            self.last_withheld_reason = WITHHELD_METRIC_FAILED
+            meas = None
         return meas, cs
 
     def _compute_bone_height_in_cs(
@@ -582,17 +747,19 @@ class MeasurementEngine:
         is_mandible: bool,
         jaw_id: int,
         vital_id: Optional[int],
+        bone_mask: Optional[np.ndarray] = None,
     ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """B4: Compute bone height and vital clearance along occlusal normal `B` in the cross-section plane."""
+        bone = bone_mask if bone_mask is not None else (mask_cs == jaw_id)
         central_u = np.abs(u_coords) <= 1.5
-        jaw_central = (mask_cs[:, central_u] == jaw_id).any(axis=1)
+        jaw_central = bone[:, central_u].any(axis=1)
         if not jaw_central.any():
             wider_u = np.abs(u_coords) <= 4.0
-            jaw_central = (mask_cs[:, wider_u] == jaw_id).any(axis=1)
+            jaw_central = bone[:, wider_u].any(axis=1)
         if not jaw_central.any():
             # Dentate socket fallback: alveolar cortical plates may sit at |u| up to 7.5 mm around a wide molar root
             socket_u = np.abs(u_coords) <= 7.5
-            jaw_central = (mask_cs[:, socket_u] == jaw_id).any(axis=1)
+            jaw_central = bone[:, socket_u].any(axis=1)
         if not jaw_central.any():
             return None, None, None
 
@@ -631,40 +798,6 @@ class MeasurementEngine:
             return round(full_jaw_height, 2), None, crest_v
 
     @staticmethod
-    def _ridge_plausibility_rejections(
-        u_coords: np.ndarray,
-        v_coords: np.ndarray,
-        mask_cs: np.ndarray,
-        crest_v: Optional[float],
-        bone_height_mm: Optional[float],
-        jaw_id: int,
-    ) -> Tuple[Optional[str], Optional[str]]:
-        """Split ridge-plausibility guard: returns `(width_rejection, height_rejection)` reasons or None.
-
-        The two checks are deliberately independent so an implausible buccolingual width
-        (bone region touching both lateral borders of the field of view) only removes the
-        WIDTH values, while a plausible crest-to-base HEIGHT is still reported — maxillary
-        bone-height-to-sinus in 5-class masks must never be silently lost because a wide
-        palatal/maxillary bone block spans the whole cross-section laterally.
-        """
-        if crest_v is None:
-            return None, None
-        half_u = float(np.max(np.abs(u_coords)))
-        half_v = float(np.max(np.abs(v_coords)))
-        # Bone voxels hugging the lateral border within a 1 mm edge band (sub-voxel slack).
-        edge_tol = 1.0 + 1e-6
-        bone_rows = (mask_cs == jaw_id)
-        touches_left = bool(bone_rows[:, u_coords <= -half_u + edge_tol].any())
-        touches_right = bool(bone_rows[:, u_coords >= half_u - edge_tol].any())
-        width_reason = None
-        if touches_left and touches_right:
-            width_reason = f"bone spans full {2.0 * half_u:.0f} mm lateral field of view"
-        height_reason = None
-        if bone_height_mm is not None and float(bone_height_mm) >= 2.0 * half_v - 2.0:
-            height_reason = f"height spans the full {2.0 * half_v:.0f} mm vertical field of view"
-        return width_reason, height_reason
-
-    @staticmethod
     def _compute_bone_widths_in_cs(
         u_coords: np.ndarray,
         v_coords: np.ndarray,
@@ -673,11 +806,13 @@ class MeasurementEngine:
         is_mandible: bool,
         jaw_id: int,
         depths_mm: List[float],
+        bone_mask: Optional[np.ndarray] = None,
     ) -> Dict[float, Optional[float]]:
         """B4: Measure buccolingual bone width along `N` at specified apical depths from `crest_v`."""
         widths: Dict[float, Optional[float]] = {d: None for d in depths_mm}
         if crest_v is None:
             return widths
+        bone = bone_mask if bone_mask is not None else (mask_cs == jaw_id)
 
         for depth in depths_mm:
             # At depth 0 (crest), sample 0.5 mm sub-crestal to avoid surface partial-volume grazing
@@ -689,7 +824,7 @@ class MeasurementEngine:
             # Allow +/- 1 row band for robustness
             r0 = max(0, row_idx - 1)
             r1 = min(len(v_coords), row_idx + 2)
-            in_jaw = (mask_cs[r0:r1, :] == jaw_id).any(axis=0)
+            in_jaw = bone[r0:r1, :].any(axis=0)
             if in_jaw.any():
                 u_in = u_coords[in_jaw]
                 w = float(np.max(u_in) - np.min(u_in))
@@ -705,11 +840,13 @@ class MeasurementEngine:
         is_mandible: bool,
         jaw_id: int,
         depths_mm: List[float],
+        bone_mask: Optional[np.ndarray] = None,
     ) -> Dict[float, Tuple[float, float]]:
         """Return `(u_left, u_right)` bone endpoints at each depth (empty when unmeasured)."""
         segments: Dict[float, Tuple[float, float]] = {}
         if crest_v is None:
             return segments
+        bone = bone_mask if bone_mask is not None else (mask_cs == jaw_id)
         for depth in depths_mm:
             effective_depth = max(0.25, float(depth)) if depth == 0.0 else float(depth)
             target_v = crest_v - effective_depth if is_mandible else crest_v + effective_depth
@@ -717,7 +854,7 @@ class MeasurementEngine:
             if abs(float(v_coords[row_idx]) - target_v) > 1.0:
                 continue
             rows = slice(max(0, row_idx - 1), min(len(v_coords), row_idx + 2))
-            in_jaw = (mask_cs[rows, :] == jaw_id).any(axis=0)
+            in_jaw = bone[rows, :].any(axis=0)
             if in_jaw.any():
                 u_in = u_coords[in_jaw]
                 left = float(np.min(u_in))
