@@ -446,7 +446,9 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertAlmostEqual(meas_oblique.crest_width_mm or 0.0, meas_std.crest_width_mm or 0.0, delta=0.75)
 
     @staticmethod
-    def _ridge_engine(mask: np.ndarray, img: np.ndarray) -> MeasurementEngine:
+    def _ridge_engine(
+        mask: np.ndarray, img: np.ndarray, jaw_type: str = "lower", is_5class: bool = True
+    ) -> MeasurementEngine:
         vol = CBCTVolume(
             image=img,
             spacing=(1.0, 1.0, 1.0),
@@ -459,11 +461,11 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
                 [[35.0, 25.0, 29.0], [28.0, 25.0, 29.0], [20.0, 25.0, 29.0], [12.0, 25.0, 29.0]],
                 dtype=np.float64,
             ),
-            jaw_type="lower",
+            jaw_type=jaw_type,
             ras_convention=True,
         )
         return MeasurementEngine(
-            vol, mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=True
+            vol, mask, arch=arch, arches={jaw_type: arch}, is_dental_segmentator_5class=is_5class
         )
 
     def test_ridge_plausibility_rejects_full_cross_section_mask(self) -> None:
@@ -505,6 +507,87 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertTrue(render.available)
         self.assertEqual(render.overlay_px, [])
         self.assertFalse(any(label[2].startswith(("H", "W")) for label in render.labels))
+
+    def test_ridge_plausibility_width_only_rejection_keeps_maxillary_height(self) -> None:
+        """A maxillary mask spanning the full buccolingual field drops widths but keeps the crest height."""
+        img = np.full((50, 50, 50), -500.0, dtype=np.float32)
+        mask = np.zeros((50, 50, 50), dtype=np.uint16)
+        # 5-class maxilla (id 1): spans every buccolingual voxel but only 19 mm crest-to-base.
+        mask[10:30, :, 10:40] = 1
+        img[10:30, :, 10:40] = 950.0
+        engine = self._ridge_engine(mask, img, jaw_type="upper")
+        meas, cs = engine.measure_at_arc_mm("upper", 20.0, fdi_hint="26")
+        self.assertIsNotNone(cs)
+        assert cs is not None
+        # Height survives: the crest is resolved, only the buccolingual widths are withheld.
+        self.assertIsNotNone(cs.crest_v)
+        self.assertEqual(cs.width_segments, {})
+        self.assertIsNotNone(meas)
+        assert meas is not None
+        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 19.0, delta=1.5)
+        self.assertIsNone(meas.crest_width_mm)
+        self.assertIsNone(meas.mid_root_width_mm)
+        self.assertIsNone(meas.apical_width_mm)
+        self.assertTrue(all(w is None for w in meas.bone_width_at_depths_mm.values()))
+
+    def test_cross_section_footer_prints_dashes_for_withheld_crest_width(self) -> None:
+        """RC-01: a withheld crest width prints `W0 --`, never a fabricated `W0 0.0 mm`."""
+        from CBCTPlannerLib.core_print_render import render_cross_section
+
+        img = np.full((50, 50, 50), -500.0, dtype=np.float32)
+        mask = np.zeros((50, 50, 50), dtype=np.uint16)
+        mask[10:30, :, 10:40] = 1  # 5-class maxilla spanning the whole buccolingual field
+        img[10:30, :, 10:40] = 950.0
+        engine = self._ridge_engine(mask, img, jaw_type="upper")
+        meas, cs = engine.measure_at_arc_mm("upper", 20.0, fdi_hint="26")
+        self.assertIsNotNone(meas)
+        self.assertIsNotNone(cs)
+        assert meas is not None and cs is not None
+        self.assertIsNone(meas.crest_width_mm)
+        self.assertIsNotNone(meas.bone_height_mm)
+
+        render = render_cross_section(cs, meas, scale=2)
+        footer = [label[2] for label in render.labels if label[2].startswith("H ")]
+        self.assertEqual(len(footer), 1, render.labels)
+        self.assertIn("W0 --", footer[0])
+        self.assertNotIn("0.0 mm", footer[0])
+
+    def test_ridge_envelope_includes_in_socket_root_on_partially_dentate_phantom(self) -> None:
+        """RC-01: a partially dentate ridge measures jawbone plus the in-socket root wall."""
+        img = np.full((50, 50, 50), -500.0, dtype=np.float32)
+        mask = np.zeros((50, 50, 50), dtype=np.uint16)
+        # ToothFairy3 mandible: lingual plate only (buccal plate missing) plus basal bone.
+        mask[10:28, 21:23, 10:40] = 1
+        mask[10:14, 21:29, 10:40] = 1
+        # In-socket root of #46 fills the hollow socket and closes the ridge buccally.
+        mask[14:27, 23:27, 20:30] = 46
+        img[mask != 0] = 950.0
+
+        engine = self._ridge_engine(mask, img, is_5class=False)
+        meas = engine.measure_implant_site("46")
+        self.assertIsNotNone(meas)
+        assert meas is not None
+        self.assertIsNone(meas.withheld_reason)
+        # The crest resolves from the root where the jaw mask is hollow; jawbone alone
+        # would stop at the basal block (~3 mm of height).
+        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 16.0, delta=1.0)
+        # Crest width spans the lingual plate plus the root wall; jawbone alone is ~1 mm.
+        self.assertAlmostEqual(meas.crest_width_mm or 0.0, 5.0, delta=0.75)
+
+    def test_ridge_envelope_hu_fallback_when_segmentation_covers_only_teeth(self) -> None:
+        """RC-01: a teeth-only segmentation measures gray-value bone instead of rejecting the site."""
+        img = np.full((50, 50, 50), -500.0, dtype=np.float32)
+        mask = np.zeros((50, 50, 50), dtype=np.uint16)
+        mask[10:30, 21:29, 10:40] = 46  # only the tooth is segmented
+        img[10:30, 21:29, 10:40] = 950.0  # cortical/trabecular bone well above 250 HU
+
+        engine = self._ridge_engine(mask, img, is_5class=False)
+        meas = engine.measure_implant_site("46")
+        self.assertIsNotNone(meas)
+        assert meas is not None
+        self.assertIsNone(meas.withheld_reason)
+        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 19.0, delta=0.75)
+        self.assertAlmostEqual(meas.crest_width_mm or 0.0, 7.0, delta=1.0)
 
     def test_b5_cpr_displacement_and_grid_frame_identical_handedness(self) -> None:
         """B5: Verify CPR displacement frame (-N, B, T) and grid frame both have det = +1 (no mirroring)."""

@@ -164,7 +164,9 @@ from CBCTPlannerLib.core.labels import (
 )
 from CBCTPlannerLib.core.measurements import (
     MISCH_APPROXIMATE_DISCLAIMER,
+    WITHHELD_NO_SEGMENTATION,
     MeasurementEngine,
+    withheld_badge,
 )
 from CBCTPlannerLib.core.volume_loader import CBCTVolume
 
@@ -3832,6 +3834,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 h_txt = str(item.get("height_mm", "--"))
                 w0_txt = str(item.get("w_crest_mm", "--"))
                 w3_txt = str(item.get("w_3mm", "--"))
+                reason = item.get("withheld_reason")
             else:
                 uri = getattr(item, "image_data_uri", "")
                 off = float(getattr(item, "offset_mm", 0.0))
@@ -3841,6 +3844,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 h_txt = f"{h_v:.1f}" if h_v is not None else "--"
                 w0_txt = f"{w0_v:.1f}" if w0_v is not None else "--"
                 w3_txt = f"{w3_v:.1f}" if w3_v is not None else "--"
+                reason = getattr(item, "withheld_reason", None)
 
             hdr = qt.QLabel(f"<b>S{idx + 1}</b> ({off:+.1f} mm)")
             hdr.setAlignment(qt.Qt.AlignCenter)
@@ -3863,6 +3867,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             ftr.setAlignment(qt.Qt.AlignCenter)
             ftr.setStyleSheet("color: #e2e8f0; font-size: 9.5px;")
             c_lay.addWidget(ftr)
+
+            badge = withheld_badge(reason)
+            if badge:
+                # Short badge so a `--` width reads as withheld, with the full reason on hover.
+                badge_lbl = qt.QLabel(badge)
+                badge_lbl.setAlignment(qt.Qt.AlignCenter)
+                badge_lbl.setStyleSheet("color: #f59e0b; font-size: 8.5px; font-weight: bold;")
+                badge_lbl.setToolTip(str(reason))
+                c_lay.addWidget(badge_lbl)
             self.inlineGalleryGrid.addWidget(card, r, c)
 
         if getattr(self, "inlineGalleryStatusLabel", None) is not None:
@@ -5561,11 +5574,14 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         rec_dia: Optional[float] = None
         rec_len: Optional[float] = None
         source = NOT_MEASURED
+        withheld_reason: Optional[str] = None
         site_pos_source = site_obj.source if site_obj is not None else "approximate_width_table"
         is_approx_site = site_obj.is_approximate if site_obj is not None else True
 
         if engine is None and volumeNode is not None and segmentationNode is not None:
             engine = self._get_or_build_measurement_engine(volumeNode, segmentationNode)
+        if engine is None and segmentationNode is None:
+            withheld_reason = WITHHELD_NO_SEGMENTATION
 
         if engine is not None:
             meas = engine.measure_implant_site(str(fdi))
@@ -5581,8 +5597,12 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 rec_len = meas.suggested_length_mm
                 site_pos_source = meas.site_position_source
                 is_approx_site = meas.is_approximate_site
+                withheld_reason = meas.withheld_reason
                 if any(v is not None for v in (height_mm, w_crest_mm, nerve_clearance_mm, mean_hu)):
                     source = "segmentation"
+            else:
+                # The whole site was rejected: keep the cross-section's reason for the tile/CSV.
+                withheld_reason = getattr(engine, "last_withheld_reason", None)
 
         manual_h = self._read_manual_ruler_length(f"Tooth_{fdi}_HeightRuler")
         manual_w = self._read_manual_ruler_length(f"Tooth_{fdi}_WidthRuler")
@@ -5610,6 +5630,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "fdi": int(fdi),
             "jaw": jaw,
             "source": source,
+            "withheld_reason": withheld_reason,
             "site_position_source": site_pos_source,
             "is_approximate_site": is_approx_site,
             "height_mm": height_mm,
@@ -5865,6 +5886,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             w0_str = f"{meas.crest_width_mm:.1f}" if (meas and meas.crest_width_mm is not None) else "N/A"
             w3 = meas.bone_width_at_depths_mm.get(3.0) if (meas and meas.bone_width_at_depths_mm) else None
             w5 = meas.bone_width_at_depths_mm.get(5.0) if (meas and meas.bone_width_at_depths_mm) else None
+            withheld_reason = (
+                meas.withheld_reason if meas is not None else getattr(cs, "withheld_reason", None)
+            )
             results.append(
                 {
                     "offset_mm": float(arc_mm - center_arc),
@@ -5875,6 +5899,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     "image_data_uri": data_uri,
                     "pixmap": None,
                     "measurable": meas is not None,
+                    "withheld_reason": withheld_reason,
                 }
             )
         return results
@@ -6183,6 +6208,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "fdi",
             "jaw",
             "measurement_source",
+            "withheld_reason",
             "site_position_source",
             "is_approximate_site",
             "height_mm",
@@ -6215,6 +6241,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     "fdi": item.get("fdi"),
                     "jaw": item.get("jaw", ""),
                     "measurement_source": src,
+                    "withheld_reason": item.get("withheld_reason") or "",
                     "site_position_source": item.get("site_position_source", "approximate_width_table"),
                     "is_approximate_site": bool(item.get("is_approximate_site", True)),
                     "height_mm": _num_cell(item.get("height_mm")),

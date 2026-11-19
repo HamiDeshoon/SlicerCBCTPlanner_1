@@ -88,6 +88,20 @@ def _apply_anatomical_contour_tint(rgb: np.ndarray, mask_cs: Optional[np.ndarray
     return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
 
+def measurement_footer_text(meas: Optional[Any]) -> str:
+    """Return the tile footer `H … / W0 …` caption, printing `--` for a withheld metric.
+
+    A withheld crest width must never render as a fabricated `W0 0.0 mm`.
+    """
+    if meas is None:
+        return "H --  W0 --"
+    height_mm = getattr(meas, "bone_height_mm", None)
+    crest_w = getattr(meas, "crest_width_mm", None)
+    h_txt = f"{float(height_mm):.1f} mm" if height_mm is not None else "--"
+    w_txt = f"{float(crest_w):.1f} mm" if crest_w is not None else "--"
+    return f"H {h_txt}  W0 {w_txt}"
+
+
 def render_cross_section(
     cs: Any,
     meas: Optional[Any],
@@ -202,11 +216,10 @@ def render_cross_section(
         draw.text((6, height - 16), "not measurable", fill=(255, 60, 60), font=font)
         labels.append((6.0, float(height - 16), "not measurable"))
     else:
-        height_mm = getattr(meas, "bone_height_mm", None)
-        crest_w = getattr(meas, "crest_width_mm", None)
-        text = "H --  W0 --" if height_mm is None else f"H {height_mm:.1f} mm  W0 {crest_w or 0:.1f} mm"
+        text = measurement_footer_text(meas)
         draw.rectangle([(0, max(0, height - 16)), (width, height)], fill=(10, 15, 28))
         draw.text((4, max(0, height - 14)), text, fill=(255, 255, 255), font=font)
+        labels.append((4.0, float(max(0, height - 14)), text))
 
     return CrossSectionRender(
         image=image,
@@ -283,6 +296,7 @@ def unavailable_tile(text: str, size: Tuple[int, int] = (640, 400), dark_film: b
 __all__ = [
     "CrossSectionRender",
     "hu_window_to_rgb",
+    "measurement_footer_text",
     "render_cross_section",
     "render_panoramic_strip",
     "unavailable_tile",

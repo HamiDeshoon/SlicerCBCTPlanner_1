@@ -43,6 +43,7 @@ except ImportError:
     ImageDraw = None
     ImageFont = None
 
+from .core.measurements import withheld_badge
 from .core_print_render import (
     hu_window_to_rgb,
     render_cross_section,
@@ -75,6 +76,8 @@ class CrossSectionSliceSpec:
     mean_hu: Optional[float] = None
     is_mandible: bool = True
     image_data_uri: str = ""
+    # Why a tile withholds H/W (empty when every metric was measured).
+    withheld_reason: Optional[str] = None
 
 
 def _image_to_data_uri(image: Any) -> str:
@@ -219,6 +222,11 @@ class PrintLayoutEngine:
                     mean_hu=meas.mean_density_hu if meas else None,
                     is_mandible=is_mandible,
                     image_data_uri=data_uri,
+                    withheld_reason=(
+                        meas.withheld_reason
+                        if meas is not None
+                        else getattr(cs, "withheld_reason", None)
+                    ),
                 )
                 specs.append(spec)
                 all_specs.append(spec)
@@ -497,6 +505,9 @@ class PrintLayoutEngine:
                 f"#{spec.fdi} S{spec.slice_index}/{spec.total_slices} "
                 f"{spec.offset_mm:+.1f}mm H {spec.height_mm if spec.height_mm is not None else '--'}"
             )
+            badge = withheld_badge(spec.withheld_reason)
+            if badge:
+                label += f" [{badge}]"
             draw.text((x + 2, y + frame_h - 16), label, fill=(0, 0, 0), font=font)
 
         vr = _data_uri_to_image(record["vr_b64"])
@@ -537,8 +548,8 @@ class PrintLayoutEngine:
         fdis: List[int],
         patient_name: str,
         patient_id: str,
-        page_number: int = 1,
-        total_pages: int = 1,
+        page_number: int,
+        total_pages: int,
     ) -> str:
         """Construct exact 8x10-inch standard print HTML/CSS page."""
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -551,11 +562,19 @@ class PrintLayoutEngine:
             w3_txt = f"{s.width_3mm:.1f}" if s.width_3mm is not None else "--"
             w5_txt = f"{s.width_5mm:.1f}" if s.width_5mm is not None else "--"
             misch_badge = f" | {s.misch_class}" if s.misch_class else ""
+            badge = withheld_badge(s.withheld_reason)
+            badge_html = (
+                f"<div class='cs-badge' title='{html.escape(str(s.withheld_reason))}'>"
+                f"{html.escape(badge)}</div>"
+                if badge
+                else ""
+            )
             cards_html.append(
                 f"<div class='cs-card'>"
                 f"<div class='cs-hdr'>#{s.fdi} S{s.slice_index} ({s.offset_mm:+.1f}mm){html.escape(misch_badge)}</div>"
                 f"<img src='{s.image_data_uri}' alt='Slice {s.slice_index}'/>"
                 f"<div class='cs-ftr'>H:{h_txt} W0:{w0_txt} W3:{w3_txt} W5:{w5_txt}</div>"
+                f"{badge_html}"
                 f"</div>"
             )
 
@@ -645,6 +664,7 @@ body {{
 }}
 .cs-hdr {{ font-size: 8px; color: #38bdf8; background: #020617; padding: 1px 2px; font-weight: 600; }}
 .cs-ftr {{ font-size: 7.5px; color: #e2e8f0; background: #020617; padding: 1px 2px; }}
+.cs-badge {{ font-size: 7.5px; color: #f59e0b; background: #451a03; padding: 1px 2px; font-weight: 600; }}
 .cs-card img {{ width: 100%; height: auto; display: block; }}
 .bottom-section {{
     display: flex;
