@@ -600,7 +600,6 @@ class MeasurementEngine:
         crest_w = widths.get(0.0)
         mid_w = widths.get(6.0) if widths.get(6.0) is not None else widths.get(3.0)
         apical_w = widths.get(9.0)
-
         mesiodistal_mm = self._compute_mesiodistal_space(fdi)
         mean_density_hu, nnt_summary = self._compute_site_bone_density_in_cs(
             u_coords, v_coords, mask_cs, img_cs, crest_v, is_mandible, bone_height_mm, jaw_id

@@ -3,8 +3,9 @@
 Pure numpy geometry with Pillow (and automatic Qt fallback in 3D Slicer). Every overlay
 is derived from measured millimetre coordinates:
   - Green vertical Bone Height line (`H`) from alveolar crest (`crest_v`) to basal/canal limit (`basal_v`)
-  - Yellow Crestal reference & `W0` Crestal Buccolingual Width line
-  - Cyan `W3` (3 mm depth) and Orange/Gold `W5` (5 mm depth) Buccolingual Width lines
+  - Cyan `W0` Crestal Buccolingual Width line
+  - Gold-orange `W3` (3 mm depth) and orange `W5` (5+ mm depth) Buccolingual Width lines
+    (legend colours in PrintLayoutEngine must match the RGB tuples below)
   - Red/Cyan Inferior Alveolar Nerve Canal circle + clearance indicator
   - Subtle anatomical contours for segmented teeth/roots and jawbone cortical plates
 """
