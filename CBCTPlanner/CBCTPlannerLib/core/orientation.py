@@ -10,7 +10,7 @@ RAS convention: +X = Patient Right, +Y = Anterior, +Z = Superior.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -286,6 +286,72 @@ def flip_axis(image_zyx: np.ndarray, affine: np.ndarray, axis: str) -> Tuple[np.
     new_affine[:3, ijk_axis] = -column
     new_affine[:3, 3] = matrix[:3, 3] + column * extent
     return out, new_affine
+
+
+def flip_array_only(
+    image_zyx: np.ndarray,
+    affine: np.ndarray,
+    axes: str | Sequence[str],
+) -> np.ndarray:
+    """Mirror voxel data along one or more anatomical axes while keeping ``affine`` fixed.
+
+    Because the IJK->RAS matrix is preserved, displayed anatomy in 3D Slicer's
+    Axial, Sagittal, and Coronal views visibly flips in RAS world space.
+    ``axes`` may be ``"LR"``, ``"AP"``, ``"SI"``, ``"ALL"``, or a sequence of axes.
+    """
+    if isinstance(axes, str):
+        key = axes.upper().strip()
+        axis_list: Tuple[str, ...] = ("LR", "AP", "SI") if key == "ALL" else (key,)
+    else:
+        axis_list = tuple(str(a).upper().strip() for a in axes)
+
+    out = np.asarray(image_zyx)
+    matrix = np.asarray(affine, dtype=np.float64)
+    for ax in axis_list:
+        out = flip_axis(out, matrix, ax)[0]
+    return np.ascontiguousarray(out)
+
+
+def inverted_axes_from_report(report: OrientationReport) -> Tuple[str, ...]:
+    """Return the anatomical axes explicitly detected as inverted in ``report``."""
+    axes: List[str] = []
+    if report.si_ok is False:
+        axes.append("SI")
+    if report.ap_ok is False:
+        axes.append("AP")
+    if report.lr_ok is False:
+        axes.append("LR")
+    return tuple(axes)
+
+
+def auto_fix_anatomical_orientation(
+    image_zyx: np.ndarray,
+    mask_zyx: np.ndarray,
+    affine: np.ndarray,
+    *,
+    is_5class: bool,
+) -> Tuple[np.ndarray, np.ndarray, Tuple[str, ...], OrientationReport]:
+    """Detect and correct inverted anatomical axes in voxel data while keeping ``affine`` fixed.
+
+    Unlike :func:`canonicalize_to_ras`, which preserves world RAS coordinates and therefore
+    leaves an anatomically inverted scan looking flipped in all three Slicer slice views,
+    this function mirrors the voxel arrays along every axis flagged as inverted by
+    :func:`verify_orientation` so Axial, Sagittal, and Coronal views display true RAS anatomy.
+    """
+    matrix = np.asarray(affine, dtype=np.float64)
+    initial_report = verify_orientation(mask_zyx, matrix, is_5class=is_5class)
+    inverted = inverted_axes_from_report(initial_report)
+    if not inverted:
+        return np.asarray(image_zyx), np.asarray(mask_zyx), (), initial_report
+
+    fixed_image = flip_array_only(image_zyx, matrix, inverted)
+    fixed_mask = flip_array_only(mask_zyx, matrix, inverted)
+    final_report = verify_orientation(fixed_mask, matrix, is_5class=is_5class)
+    final_report.notes.insert(
+        0,
+        f"Auto-corrected inverted anatomy along {', '.join(inverted)} (voxel data mirrored, RAS affine preserved).",
+    )
+    return fixed_image, fixed_mask, inverted, final_report
 
 
 def _world_centroid(voxel_indices_zyx: np.ndarray, affine: np.ndarray) -> Optional[np.ndarray]:

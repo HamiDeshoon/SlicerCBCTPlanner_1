@@ -5,11 +5,11 @@ Generates standard 8x10 inch printable film layouts (HTML, PDF & 300 DPI PNG) co
      the fitted arch curve if the user did not manually generate a PanoramicVolume first).
   2. 15 to 27 sequential cross-sectional slices with drawn clinical measurement lines
      (colours defined in core_print_render.render_cross_section; legends below must match):
-     - Bone height H (green vertical line with end-caps, RGB 34,197,94)
-     - Crestal buccolingual width W0 (cyan horizontal line, RGB 0,220,255)
-     - Width at 3 mm depth W3 (gold-orange horizontal line, RGB 255,180,0)
-     - Widths at >= 5 mm depth W5/W6/W9 (orange horizontal line, RGB 255,120,40)
-     - Mandibular canal / nerve safety margin (Red circular boundary)
+       - Bone height H (green vertical line with end-caps, RGB 34,197,94)
+       - Crestal buccolingual width W0 (cyan horizontal line, RGB 0,220,255)
+       - Width at 3 mm depth W3 (gold-orange horizontal line, RGB 255,180,0)
+       - Widths at >= 5 mm depth W5/W6/W9 (orange horizontal line, RGB 255,120,40)
+       - Mandibular canal / nerve safety margin (Red circular boundary)
   3. 3D Volume Rendering (VR) / Anatomical Quadrant Projection isolating the anatomical classes
      for the selected quadrant (jawbone, vivid teeth & roots, and inferior alveolar nerve canal).
 Multi-quadrant selections produce one page per quadrant, footered "Page N of M".
@@ -25,6 +25,7 @@ import io
 import logging
 import math
 from pathlib import Path
+import textwrap
 from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -47,6 +48,7 @@ except ImportError:
 
 from .core.measurements import withheld_badge
 from .core_print_render import (
+    _load_font,
     hu_window_to_rgb,
     render_cross_section,
     render_panoramic_strip,
@@ -55,9 +57,8 @@ from .core_print_render import (
 
 logger = logging.getLogger(__name__)
 
-
 CLINICAL_DISCLAIMER_TEXT = (
-    "FOR CLINICAL PLANNING & INVESTIGATIONAL USE ONLY — NOT AN AUTOMATED SURGICAL PRESCRIPTION. "
+    "FOR CLINICAL PLANNING & INVESTIGATIONAL USE ONLY - NOT AN AUTOMATED SURGICAL PRESCRIPTION. "
     "All bone measurements, canal clearances, and reformatted views must be verified by a licensed clinician "
     "prior to surgical or implant procedures."
 )
@@ -103,6 +104,31 @@ def _data_uri_to_image(uri: str) -> Optional[Any]:
     except Exception:
         logger.exception("Could not decode layout image")
         return None
+
+
+def _paste_contain(
+    canvas: Any,
+    img: Any,
+    box: Tuple[int, int, int, int],
+    *,
+    bg: Tuple[int, int, int] = (2, 6, 23),
+) -> None:
+    """Paste ``img`` centered inside ``box=(x, y, w, h)`` while preserving aspect ratio."""
+    if img is None or Image is None:
+        return
+    x, y, w, h = box
+    if w <= 0 or h <= 0 or img.width <= 0 or img.height <= 0:
+        return
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle([(x, y), (x + w, y + h)], fill=bg)
+    scale = min(w / float(img.width), h / float(img.height))
+    nw = max(1, int(round(img.width * scale)))
+    nh = max(1, int(round(img.height * scale)))
+    resampling = getattr(Image, "Resampling", Image)
+    resized = img.resize((nw, nh), getattr(resampling, "LANCZOS", Image.BILINEAR))
+    ox = x + (w - nw) // 2
+    oy = y + (h - nh) // 2
+    canvas.paste(resized, (ox, oy))
 
 
 class PrintLayoutEngine:
@@ -193,7 +219,7 @@ class PrintLayoutEngine:
                         "Cross-section measurement failed at %.2f mm (FDI %s)", arc_mm, target_fdi
                     )
                 if cs is not None:
-                    render = render_cross_section(cs, meas, scale=2)
+                    render = render_cross_section(cs, meas, scale=3)
                     data_uri = (
                         _image_to_data_uri(render.image)
                         if render.available and render.image is not None
@@ -227,7 +253,7 @@ class PrintLayoutEngine:
                     withheld_reason=(
                         meas.withheld_reason
                         if meas is not None
-                        else getattr(cs, "withheld_reason", None)
+                        else getattr(cs, "withheld_reason", None) or engine.last_withheld_reason
                     ),
                 )
                 specs.append(spec)
@@ -427,7 +453,6 @@ class PrintLayoutEngine:
                 if mask is not None and mask.shape == img_3d.shape:
                     m_proj = np.max(mask, axis=1)[::-1, :]
                     teeth_m = (m_proj == 3) | (m_proj == 4) | ((m_proj >= 11) & (m_proj <= 48))
-                    canal_m = (m_proj == 5) | (m_proj == 3) | (m_proj == 4)
                     rgb[teeth_m] = 0.35 * rgb[teeth_m] + 0.65 * np.array([255.0, 220.0, 120.0])
                     if np.any(m_proj == 5):
                         rgb[m_proj == 5] = np.array([255.0, 60.0, 50.0])
@@ -439,7 +464,7 @@ class PrintLayoutEngine:
                     (8, 6),
                     f"3D Vivid MIP Projection (Q{quadrant})",
                     fill=(56, 189, 248),
-                    font=ImageFont.load_default(),
+                    font=_load_font(13, bold=True),
                 )
                 return _image_to_data_uri(pil_img)
             except Exception:
@@ -463,86 +488,123 @@ class PrintLayoutEngine:
         if Image is None:
             return None
         page_w, page_h = 2400, 3000
-        page = Image.new("RGB", (page_w, page_h), (255, 255, 255))
+        page = Image.new("RGB", (page_w, page_h), (15, 23, 42))
         draw = ImageDraw.Draw(page)
-        font = ImageFont.load_default()
-        margin = 75
+        margin = 68
 
-        draw.text((margin, 40), "CBCT Dental Planner — 8x10 clinical film", fill=(20, 20, 20), font=font)
-        draw.text(
-            (margin, 70),
-            f"Quadrant {record['quadrant']} ({record['jaw_label']})  Teeth: "
+        font_title = _load_font(38, bold=True)
+        font_sub = _load_font(22, bold=False)
+        font_sec = _load_font(21, bold=True)
+        font_card_hdr = _load_font(18, bold=True)
+        font_card_ftr = _load_font(16, bold=False)
+        font_key = _load_font(20, bold=False)
+        font_key_b = _load_font(22, bold=True)
+        font_disc = _load_font(15, bold=False)
+
+        # Header band
+        draw.text((margin, 34), "CBCT Dental Planner  |  8x10\" Clinical Film", fill=(56, 189, 248), font=font_title)
+        meta_line = (
+            f"Quadrant {record['quadrant']} ({record['jaw_label']})   |   Teeth: "
             + ", ".join(f"#{fdi}" for fdi in record["fdis"])
-            + f"  Patient: {patient_name}",
-            fill=(60, 60, 60),
-            font=font,
+            + f"   |   Patient: {patient_name}"
         )
+        draw.text((margin, 84), meta_line, fill=(226, 232, 240), font=font_sub)
+        draw.line([(margin, 120), (page_w - margin, 120)], fill=(56, 189, 248), width=3)
 
+        # Panoramic reference strip (aspect-ratio preserved)
+        pano_top = 136
+        pano_h = 340
+        pano_w = page_w - 2 * margin
+        draw.rectangle([(margin, pano_top), (margin + pano_w, pano_top + pano_h)], fill=(2, 6, 23), outline=(51, 65, 85), width=2)
         pano = _data_uri_to_image(record["pano_b64"])
         if pano is not None:
-            pano_h = 360
-            pano_w = page_w - 2 * margin
-            page.paste(pano.resize((pano_w, pano_h), Image.BILINEAR), (margin, 105))
+            _paste_contain(page, pano, (margin + 4, pano_top + 4, pano_w - 8, pano_h - 8), bg=(2, 6, 23))
 
+        # Cross-section grid (aspect-ratio preserved so 10 mm scale bars stay true)
         specs: List[CrossSectionSliceSpec] = record["slices"]
         cols = 5 if len(specs) <= 15 else (7 if len(specs) <= 21 else 9)
         rows = int(math.ceil(len(specs) / cols))
         grid_top = 500
-        footer_top = 2700
-        key_h = 260
-        grid_bottom = footer_top - key_h - 20
-        gap = 10
+        footer_top = 2855
+        key_h = 280
+        key_top = footer_top - key_h - 18
+        grid_bottom = key_top - 20
+        gap = 12
         cell_w = (page_w - 2 * margin - (cols - 1) * gap) // cols
         cell_h = (grid_bottom - grid_top - (rows - 1) * gap) // max(1, rows)
-        frame_h = min(cell_h, int(cell_w * 1.25))
+
+        hdr_h = 30
+        ftr_h = 46
+        img_box_h = max(60, cell_h - hdr_h - ftr_h - 6)
 
         for idx, spec in enumerate(specs):
             row, col = divmod(idx, cols)
             x = margin + col * (cell_w + gap)
             y = grid_top + row * (cell_h + gap)
+            is_center = abs(float(spec.offset_mm)) < 0.05
+            border_col = (56, 189, 248) if is_center else (51, 65, 85)
+            border_w = 3 if is_center else 1
+            draw.rectangle([(x, y), (x + cell_w, y + cell_h)], fill=(2, 6, 23), outline=border_col, width=border_w)
+
+            # Card header
+            hdr_bg = (12, 74, 110) if is_center else (15, 23, 42)
+            draw.rectangle([(x + 1, y + 1), (x + cell_w - 1, y + hdr_h)], fill=hdr_bg)
+            hdr_txt = f"#{spec.fdi} S{spec.slice_index} ({spec.offset_mm:+.1f}mm)"
+            draw.text((x + 6, y + 5), hdr_txt, fill=(125, 211, 252) if not is_center else (255, 255, 255), font=font_card_hdr)
+
+            # Aspect-ratio-preserving cross-section image
             image = _data_uri_to_image(spec.image_data_uri)
             if image is not None:
-                thumb_h = frame_h - 18
-                page.paste(image.resize((cell_w, thumb_h), Image.BILINEAR), (x, y))
-            label = (
-                f"#{spec.fdi} S{spec.slice_index}/{spec.total_slices} "
-                f"{spec.offset_mm:+.1f}mm H {spec.height_mm if spec.height_mm is not None else '--'}"
-            )
+                _paste_contain(page, image, (x + 2, y + hdr_h + 2, cell_w - 4, img_box_h), bg=(2, 6, 23))
+
+            # Card footer (2 compact lines: H/W0 + W3/W5 or withheld badge)
+            fy = y + hdr_h + img_box_h + 4
+            h_txt = f"{spec.height_mm:.1f}" if spec.height_mm is not None else "--"
+            w0_txt = f"{spec.crest_width_mm:.1f}" if spec.crest_width_mm is not None else "--"
+            w3_txt = f"{spec.width_3mm:.1f}" if spec.width_3mm is not None else "--"
+            w5_txt = f"{spec.width_5mm:.1f}" if spec.width_5mm is not None else "--"
+            draw.text((x + 6, fy), f"H:{h_txt}  W0:{w0_txt}", fill=(248, 250, 252), font=font_card_ftr)
             badge = withheld_badge(spec.withheld_reason)
             if badge:
-                label += f" [{badge}]"
-            draw.text((x + 2, y + frame_h - 16), label, fill=(0, 0, 0), font=font)
+                draw.text((x + 6, fy + 20), f"W3:{w3_txt} [{badge}]", fill=(251, 191, 36), font=font_card_ftr)
+            else:
+                ian_part = f" IAN:{spec.nerve_dist_mm:.1f}" if spec.nerve_dist_mm is not None else f" W5:{w5_txt}"
+                draw.text((x + 6, fy + 20), f"W3:{w3_txt}{ian_part}", fill=(148, 163, 184), font=font_card_ftr)
 
+        # Bottom clinical key + 3D VR panel
+        vr_w = 780
+        key_w = page_w - 2 * margin - vr_w - 20
+        draw.rectangle([(margin, key_top), (margin + key_w, key_top + key_h)], fill=(2, 6, 23), outline=(51, 65, 85), width=2)
+        draw.text((margin + 18, key_top + 14), "Measurement Key & Overlay Legend", fill=(56, 189, 248), font=font_key_b)
+
+        legend_items = [
+            ((34, 197, 94), "H  Bone Height (mm): vertical green caliper from alveolar crest to canal / basal limit"),
+            ((0, 220, 255), "W0  Crestal Width (mm): cyan buccolingual caliper at alveolar crest"),
+            ((255, 180, 0), "W3  Width @ 3 mm depth (mm): gold-orange buccolingual caliper"),
+            ((255, 120, 40), "W5  Width @ 5 mm depth (mm): orange buccolingual caliper"),
+            ((255, 60, 60), "IAN  Inferior Alveolar Nerve canal ring / maxillary sinus clearance (red)"),
+        ]
+        ly = key_top + 54
+        for rgb_col, desc in legend_items:
+            draw.rectangle([(margin + 18, ly + 4), (margin + 36, ly + 22)], fill=rgb_col)
+            draw.text((margin + 48, ly), desc, fill=(226, 232, 240), font=font_key)
+            ly += 40
+
+        vr_x = margin + key_w + 20
+        draw.rectangle([(vr_x, key_top), (vr_x + vr_w, key_top + key_h)], fill=(2, 6, 23), outline=(51, 65, 85), width=2)
         vr = _data_uri_to_image(record["vr_b64"])
-        key_top = footer_top - key_h
         if vr is not None:
-            vr_w = 800
-            page.paste(vr.resize((vr_w, key_h), Image.BILINEAR), (page_w - margin - vr_w, key_top))
-        draw.text((margin, key_top + 10), "Measurement key", fill=(0, 0, 0), font=font)
-        draw.text((margin, key_top + 32), "H  bone height (mm) [Green vertical]", fill=(0, 120, 40), font=font)
-        # Colours must match core_print_render.render_cross_section: W0 cyan, W3 gold-orange.
+            _paste_contain(page, vr, (vr_x + 4, key_top + 4, vr_w - 8, key_h - 8), bg=(2, 6, 23))
+
+        # Footer disclaimer & page number
+        draw.line([(margin, footer_top), (page_w - margin, footer_top)], fill=(51, 65, 85), width=1)
+        for line_idx, line_txt in enumerate(textwrap.wrap(CLINICAL_DISCLAIMER_TEXT, width=130)[:2]):
+            draw.text((margin, footer_top + 14 + line_idx * 22), line_txt, fill=(148, 163, 184), font=font_disc)
         draw.text(
-            (margin, key_top + 54),
-            "W0 crest width [Cyan] / W3 (3mm) & W5 (5mm) depth widths [Gold-Orange]",
-            fill=(0, 0, 0),
-            font=font,
-        )
-        swatch_x = margin + 470
-        draw.rectangle([(swatch_x, key_top + 54), (swatch_x + 10, key_top + 64)], fill=(0, 220, 255))
-        draw.rectangle([(swatch_x + 16, key_top + 54), (swatch_x + 26, key_top + 64)], fill=(255, 180, 0))
-        draw.rectangle([(swatch_x + 32, key_top + 54), (swatch_x + 42, key_top + 64)], fill=(255, 120, 40))
-        draw.text(
-            (margin, key_top + 76),
-            "IAN Nerve clearance is shown when a canal/sinus is segmented [Red]",
-            fill=(160, 20, 20),
-            font=font,
-        )
-        draw.text((margin, footer_top + 20), CLINICAL_DISCLAIMER_TEXT, fill=(90, 90, 90), font=font)
-        draw.text(
-            (page_w - margin - 120, footer_top + 60),
-            f"Page {page_number}/{total_pages}",
-            fill=(90, 90, 90),
-            font=font,
+            (page_w - margin - 180, footer_top + 22),
+            f"Page {page_number} of {total_pages}",
+            fill=(148, 163, 184),
+            font=font_sec,
         )
         return page
 
@@ -569,6 +631,11 @@ class PrintLayoutEngine:
             w0_txt = f"{s.crest_width_mm:.1f}" if s.crest_width_mm is not None else "--"
             w3_txt = f"{s.width_3mm:.1f}" if s.width_3mm is not None else "--"
             w5_txt = f"{s.width_5mm:.1f}" if s.width_5mm is not None else "--"
+            ian_html = (
+                f" <span class='m-ian'>IAN:{s.nerve_dist_mm:.1f}</span>"
+                if s.nerve_dist_mm is not None
+                else ""
+            )
             misch_badge = f" | {s.misch_class}" if s.misch_class else ""
             badge = withheld_badge(s.withheld_reason)
             badge_html = (
@@ -577,11 +644,17 @@ class PrintLayoutEngine:
                 if badge
                 else ""
             )
+            center_cls = " is-center" if abs(float(s.offset_mm)) < 0.05 else ""
             cards_html.append(
-                f"<div class='cs-card'>"
+                f"<div class='cs-card{center_cls}'>"
                 f"<div class='cs-hdr'>#{s.fdi} S{s.slice_index} ({s.offset_mm:+.1f}mm){html.escape(misch_badge)}</div>"
                 f"<img src='{s.image_data_uri}' alt='Slice {s.slice_index}'/>"
-                f"<div class='cs-ftr'>H:{h_txt} W0:{w0_txt} W3:{w3_txt} W5:{w5_txt}</div>"
+                f"<div class='cs-ftr'>"
+                f"<span class='m-h'>H:{h_txt}</span> "
+                f"<span class='m-w0'>W0:{w0_txt}</span> "
+                f"<span class='m-w3'>W3:{w3_txt}</span> "
+                f"<span class='m-w5'>W5:{w5_txt}</span>{ian_html}"
+                f"</div>"
                 f"{badge_html}"
                 f"</div>"
             )
@@ -593,14 +666,18 @@ class PrintLayoutEngine:
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<title>8x10 Clinical Dental Film Layout — {html.escape(q_label)}</title>
+<title>8x10 Clinical Dental Film Layout - {html.escape(q_label)}</title>
 <style>
 @page {{
     size: 8in 10in;
     margin: 0.25in;
 }}
 @media print {{
-    body {{ width: 7.5in; height: 9.5in; margin: 0; padding: 0; background: #fff; }}
+    * {{
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }}
+    body {{ width: 7.5in; height: 9.5in; margin: 0; padding: 8px; background: #0f172a; color: #f8fafc; }}
     .no-print {{ display: none !important; }}
 }}
 * {{ box-sizing: border-box; }}
@@ -609,7 +686,7 @@ body {{
     background: #0f172a;
     color: #f8fafc;
     margin: 0;
-    padding: 16px;
+    padding: 14px;
     width: 8in;
     min-height: 10in;
 }}
@@ -642,7 +719,7 @@ body {{
     background: #020617;
     border-radius: 4px;
     overflow: hidden;
-    max-height: 130px;
+    max-height: 132px;
     display: flex;
     flex-direction: column;
 }}
@@ -653,13 +730,13 @@ body {{
     background: #1e293b;
     color: #94a3b8;
 }}
-.pano-img {{ width: 100%; max-height: 110px; object-fit: contain; }}
+.pano-img {{ width: 100%; max-height: 112px; object-fit: contain; background: #020617; }}
 .grid-section {{
     display: grid;
     grid-template-columns: repeat({cols}, 1fr);
-    gap: 4px;
+    gap: 5px;
     background: #020617;
-    padding: 4px;
+    padding: 5px;
     border: 1px solid #334155;
     border-radius: 4px;
 }}
@@ -669,15 +746,30 @@ body {{
     border-radius: 3px;
     overflow: hidden;
     text-align: center;
+    display: flex;
+    flex-direction: column;
 }}
-.cs-hdr {{ font-size: 8px; color: #38bdf8; background: #020617; padding: 1px 2px; font-weight: 600; }}
-.cs-ftr {{ font-size: 7.5px; color: #e2e8f0; background: #020617; padding: 1px 2px; }}
+.cs-card.is-center {{
+    border: 1.5px solid #38bdf8;
+    box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35);
+}}
+.cs-card.is-center .cs-hdr {{
+    background: #0c4a6e;
+    color: #ffffff;
+}}
+.cs-hdr {{ font-size: 8px; color: #38bdf8; background: #020617; padding: 2px 3px; font-weight: 600; }}
+.cs-ftr {{ font-size: 7.5px; color: #e2e8f0; background: #020617; padding: 2px 3px; line-height: 1.25; }}
+.m-h {{ color: #4ade80; font-weight: 600; }}
+.m-w0 {{ color: #22d3ee; font-weight: 600; }}
+.m-w3 {{ color: #fbbf24; }}
+.m-w5 {{ color: #fb923c; }}
+.m-ian {{ color: #f87171; font-weight: 600; }}
 .cs-badge {{ font-size: 7.5px; color: #f59e0b; background: #451a03; padding: 1px 2px; font-weight: 600; }}
-.cs-card img {{ width: 100%; height: auto; display: block; }}
+.cs-card img {{ width: 100%; height: auto; aspect-ratio: 3 / 5; object-fit: contain; background: #020617; display: block; }}
 .bottom-section {{
     display: flex;
     gap: 8px;
-    max-height: 140px;
+    max-height: 145px;
 }}
 .vr-card {{
     flex: 1.2;
@@ -688,7 +780,7 @@ body {{
     display: flex;
     flex-direction: column;
 }}
-.vr-img {{ width: 100%; height: 115px; object-fit: contain; }}
+.vr-img {{ width: 100%; height: 118px; object-fit: contain; }}
 .summary-card {{
     flex: 1.8;
     background: #020617;
@@ -698,7 +790,7 @@ body {{
     font-size: 10px;
     color: #cbd5e1;
 }}
-.legend-row {{ display: flex; gap: 10px; margin-top: 4px; font-size: 9px; }}
+.legend-row {{ display: flex; gap: 10px; margin-top: 4px; font-size: 9px; flex-wrap: wrap; }}
 .leg-item {{ display: flex; align-items: center; gap: 4px; }}
 .leg-box {{ width: 8px; height: 8px; border-radius: 2px; }}
 .footer-text {{
@@ -714,7 +806,7 @@ body {{
 <div class="page-container">
     <div class="header-bar">
         <div>
-            <div class="header-title">8×10″ CBCT Dental Reformat Layout</div>
+            <div class="header-title">8×10" CBCT Dental Reformat Layout</div>
             <div style="font-size: 11px; color: #e2e8f0; margin-top: 2px;">
                 <strong>Site Selection:</strong> {html.escape(q_label)} | Teeth: {html.escape(fdi_list_str)}
             </div>
