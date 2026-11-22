@@ -2026,7 +2026,28 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if report.all_ok:
                 slicer.util.showStatusMessage("Orientation check: " + summary, 5000)
             else:
-                slicer.util.warningDisplay("Orientation issues detected:\n" + summary)
+                from CBCTPlannerLib.core.orientation import inverted_axes_from_report
+
+                bad_axes = inverted_axes_from_report(report)
+                if bad_axes and slicer.util.confirmYesNoDisplay(
+                    "Orientation issues detected:\n"
+                    + summary
+                    + f"\n\nMirror voxel data along {', '.join(bad_axes)} now so Axial, "
+                    "Sagittal, and Coronal views display true RAS anatomy?",
+                    windowTitle="Auto-Fix Inverted Orientation",
+                ):
+                    if self.logic.flip_orientation_axis(volNode, segNode, bad_axes):
+                        updated_report = self.logic.detect_orientation_issues(volNode, segNode)
+                        updated_summary = self._formatOrientationReport(updated_report)
+                        self.step1HintLabel.setText("Orientation: " + updated_summary)
+                        self.globalStatusLabel.setText(f"Corrected {', '.join(bad_axes)} orientation")
+                        slicer.util.showStatusMessage(
+                            f"Corrected {', '.join(bad_axes)} orientation in all slice views", 5000
+                        )
+                    else:
+                        slicer.util.errorDisplay("Could not auto-correct orientation.")
+                else:
+                    slicer.util.warningDisplay("Orientation issues detected:\n" + summary)
 
     def onFlipOrientationClicked(self, axis: str) -> None:
         volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
@@ -2038,15 +2059,17 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if slicer and not slicer.util.confirmOkCancelDisplay(
             f"Mirror the volume and segmentation along {axis}?\n"
             "This mirrors the stored voxel data and keeps the IJK-to-RAS matrix, "
-            "so the displayed anatomy flips in the sagittal/coronal views.",
+            "so the displayed anatomy flips in Axial, Sagittal, and Coronal views.",
             windowTitle=f"Flip {axis}",
         ):
             return
         if self.logic.flip_orientation_axis(volNode, segNode, axis):
             self.globalStatusLabel.setText(f"Manual {axis} flip applied")
             self.step1HintLabel.setText(
-                f"Manual {axis} flip applied. Re-run Auto-detect or Standardize to RAS."
+                f"Manual {axis} flip applied and slice views refreshed."
             )
+            if slicer:
+                slicer.util.showStatusMessage(f"Applied {axis} flip to volume and slice views", 4000)
         else:
             logger.error("Manual %s flip failed", axis)
             if slicer:
@@ -3818,37 +3841,71 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         import base64
 
-        cols = 5
         shown = list(slices_items)[:15]
+        cols = 3 if len(shown) <= 9 else 5
+        thumb_w, thumb_h = (175, 230) if cols == 3 else (145, 195)
         for idx, item in enumerate(shown):
             r, c = divmod(idx, cols)
-            card = qt.QFrame()
-            card.setFrameShape(qt.QFrame.StyledPanel)
-            card.setStyleSheet("background-color: #020617; border: 1px solid #1e293b; border-radius: 4px;")
-            c_lay = qt.QVBoxLayout(card)
-            c_lay.setContentsMargins(3, 3, 3, 3)
-
             if isinstance(item, dict):
                 uri = item.get("image_data_uri", "")
                 off = float(item.get("offset_mm", 0.0))
-                h_txt = str(item.get("height_mm", "--"))
-                w0_txt = str(item.get("w_crest_mm", "--"))
-                w3_txt = str(item.get("w_3mm", "--"))
+                fdi_val = item.get("fdi")
+                h_txt = str(item.get("height_mm", "--")).replace("N/A", "--")
+                w0_txt = str(item.get("w_crest_mm", "--")).replace("N/A", "--")
+                w3_txt = str(item.get("w_3mm", "--")).replace("N/A", "--")
+                w5_txt = str(item.get("w_5mm", "--")).replace("N/A", "--")
+                ian_v = item.get("nerve_dist_mm")
+                ian_txt = f"{float(ian_v):.1f}" if ian_v is not None else None
+                misch = item.get("misch_class")
                 reason = item.get("withheld_reason")
             else:
                 uri = getattr(item, "image_data_uri", "")
                 off = float(getattr(item, "offset_mm", 0.0))
+                fdi_val = getattr(item, "fdi", None)
                 h_v = getattr(item, "height_mm", None)
                 w0_v = getattr(item, "crest_width_mm", None)
                 w3_v = getattr(item, "width_3mm", None)
+                w5_v = getattr(item, "width_5mm", None)
+                ian_v = getattr(item, "nerve_dist_mm", None)
                 h_txt = f"{h_v:.1f}" if h_v is not None else "--"
                 w0_txt = f"{w0_v:.1f}" if w0_v is not None else "--"
                 w3_txt = f"{w3_v:.1f}" if w3_v is not None else "--"
+                w5_txt = f"{w5_v:.1f}" if w5_v is not None else "--"
+                ian_txt = f"{ian_v:.1f}" if ian_v is not None else None
+                misch = getattr(item, "misch_class", None)
                 reason = getattr(item, "withheld_reason", None)
 
-            hdr = qt.QLabel(f"<b>S{idx + 1}</b> ({off:+.1f} mm)")
+            is_center = abs(off) < 0.05
+            card = qt.QFrame()
+            card.setFrameShape(qt.QFrame.StyledPanel)
+            border_css = "2px solid #38bdf8" if is_center else "1px solid #1e293b"
+            card.setStyleSheet(
+                f"background-color: #020617; border: {border_css}; border-radius: 5px;"
+            )
+            tip_parts = [f"Slice {idx + 1} ({off:+.1f} mm)"]
+            if fdi_val is not None:
+                tip_parts[0] = f"FDI #{fdi_val} - " + tip_parts[0]
+            tip_parts.append(f"H: {h_txt} mm | W0: {w0_txt} mm | W3: {w3_txt} mm | W5: {w5_txt} mm")
+            if ian_txt is not None:
+                tip_parts.append(f"IAN / Sinus clearance: {ian_txt} mm")
+            if misch:
+                tip_parts.append(f"Density (approx): {misch}")
+            if reason:
+                tip_parts.append(f"Note: {reason}")
+            card.setToolTip("\n".join(tip_parts))
+
+            c_lay = qt.QVBoxLayout(card)
+            c_lay.setContentsMargins(4, 4, 4, 4)
+            c_lay.setSpacing(2)
+
+            fdi_prefix = f"#{fdi_val} " if fdi_val is not None else ""
+            hdr = qt.QLabel(f"<b>{fdi_prefix}S{idx + 1}</b> ({off:+.1f} mm)")
             hdr.setAlignment(qt.Qt.AlignCenter)
-            hdr.setStyleSheet("color: #38bdf8; font-size: 10px;")
+            hdr.setStyleSheet(
+                "color: #ffffff; background-color: #0c4a6e; border-radius: 3px; padding: 1px 3px; font-size: 10px;"
+                if is_center
+                else "color: #38bdf8; font-size: 10px;"
+            )
             c_lay.addWidget(hdr)
 
             img_lbl = qt.QLabel()
@@ -3856,14 +3913,20 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 pixmap = qt.QPixmap()
                 if pixmap.loadFromData(base64.b64decode(uri.split(",", 1)[1])):
                     img_lbl.setPixmap(
-                        pixmap.scaled(125, 135, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+                        pixmap.scaled(thumb_w, thumb_h, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
                     )
             else:
                 img_lbl.setText("No slice")
             img_lbl.setAlignment(qt.Qt.AlignCenter)
             c_lay.addWidget(img_lbl)
 
-            ftr = qt.QLabel(f"H:{h_txt} | W0:{w0_txt} | W3:{w3_txt}")
+            ian_part = f" | <span style='color:#f87171'>IAN:{ian_txt}</span>" if ian_txt is not None else ""
+            ftr = qt.QLabel(
+                f"<span style='color:#4ade80'><b>H:{h_txt}</b></span> | "
+                f"<span style='color:#22d3ee'><b>W0:{w0_txt}</b></span><br/>"
+                f"<span style='color:#fbbf24'>W3:{w3_txt}</span> | "
+                f"<span style='color:#fb923c'>W5:{w5_txt}</span>{ian_part}"
+            )
             ftr.setAlignment(qt.Qt.AlignCenter)
             ftr.setStyleSheet("color: #e2e8f0; font-size: 9.5px;")
             c_lay.addWidget(ftr)
@@ -4492,8 +4555,12 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     def _write_volume_array_and_affine(volumeNode: Any, arr: np.ndarray, affine: np.ndarray) -> None:
         if slicer is None or volumeNode is None:
             return
-        slicer.util.updateVolumeFromArray(volumeNode, arr)
+        slicer.util.updateVolumeFromArray(volumeNode, np.ascontiguousarray(arr))
         volumeNode.SetIJKToRASMatrix(slicer.util.vtkMatrixFromArray(np.asarray(affine, dtype=np.float64)))
+        if hasattr(slicer.util, "arrayFromVolumeModified"):
+            slicer.util.arrayFromVolumeModified(volumeNode)
+        if hasattr(volumeNode, "Modified"):
+            volumeNode.Modified()
 
     def _apply_segment_ops(
         self,
@@ -4548,18 +4615,23 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         *,
         mode: str = "clone",
         allow_resample: bool = True,
+        auto_fix_anatomy: bool = True,
     ) -> Tuple[Optional[Any], Any]:
         """Convert a volume (and optionally its segmentation) to RAS.
 
         Returns `(new_or_updated_volume_node, OrientationReport)`. Permuted/flipped
         data is lossless; oblique data is linearly resampled and flagged in the report
-        as interpolation that must not be treated as an exact voxel copy.
+        as interpolation that must not be treated as an exact voxel copy. When a
+        segmentation is provided and `auto_fix_anatomy=True`, any detected anatomical
+        inversions (S-I, A-P, L-R) are also mirrored in voxel space while keeping the
+        RAS affine so Axial, Sagittal, and Coronal views display right-way-up anatomy.
         """
         from CBCTPlannerLib.core.orientation import (
             OrientationReport,
             _obliquity_deg,
             axcodes_from_affine,
             canonicalize_to_ras,
+            inverted_axes_from_report,
             resample_mask_to_grid,
             resample_to_ras,
             verify_orientation,
@@ -4621,8 +4693,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         if mode == "clone":
             name = f"{volumeNode.GetName()}_RAS"
             target_volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", name)
-            slicer.util.updateVolumeFromArray(target_volume, result.image_zyx)
-            target_volume.SetIJKToRASMatrix(slicer.util.vtkMatrixFromArray(result.affine))
+            self._write_volume_array_and_affine(target_volume, result.image_zyx, result.affine)
             if volumeNode.GetDisplayNode() is not None:
                 target_volume.CreateDefaultDisplayNodes()
                 target_volume.GetDisplayNode().CopyContent(volumeNode.GetDisplayNode())
@@ -4668,6 +4739,16 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             mask, is_5class = self._extract_combined_label_mask(target_volume, segmentationNode)
             if mask is not None:
                 report = verify_orientation(mask, result.affine, is_5class=is_5class)
+                bad_axes = inverted_axes_from_report(report)
+                if auto_fix_anatomy and bad_axes:
+                    self.flip_orientation_axis(target_volume, segmentationNode, bad_axes)
+                    mask_fixed, is_5class_fixed = self._extract_combined_label_mask(target_volume, segmentationNode)
+                    if mask_fixed is not None:
+                        report = verify_orientation(mask_fixed, result.affine, is_5class=is_5class_fixed)
+                    report.notes.insert(
+                        0,
+                        f"Auto-corrected inverted anatomy along {', '.join(bad_axes)} (visible in Axial/Sagittal/Coronal).",
+                    )
                 report.notes.insert(
                     0,
                     f"{'Resampled' if resampled else 'Canonicalized'} "
@@ -4683,6 +4764,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 "Oblique input was linearly interpolated onto the RAS grid; "
                 "re-check fine measurements against the source resolution."
             )
+        self.reset_slice_views(target_volume)
         return target_volume, report
 
     def detect_orientation_issues(self, volumeNode: Any, segmentationNode: Any = None) -> Any:
@@ -4701,36 +4783,67 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             return OrientationReport(notes=["Could not build a label mask from the segmentation."])
         return verify_orientation(mask, affine, is_5class=is_5class)
 
-    def flip_orientation_axis(self, volumeNode: Any, segmentationNode: Any, axis: str) -> bool:
-        """Mirror a volume and segmentation along LR/AP/SI so the displayed anatomy flips.
+    def flip_orientation_axis(
+        self, volumeNode: Any, segmentationNode: Any, axis: str | Sequence[str]
+    ) -> bool:
+        """Mirror a volume and segmentation along LR/AP/SI/ALL so the displayed anatomy flips.
 
         The IJK-to-RAS matrix is intentionally kept: flipping the voxels *and* the matrix
         only reorders data and leaves every viewer looking unchanged.
         """
-        from CBCTPlannerLib.core.orientation import flip_axis
+        from CBCTPlannerLib.core.orientation import flip_array_only
 
         if slicer is None or volumeNode is None:
             return False
         arr, affine = self._volume_array_and_affine(volumeNode)
         if arr is None or affine is None:
             return False
-        flipped = flip_axis(arr, affine, axis)[0]
+
+        # Snapshot segment labelmaps BEFORE modifying volumeNode so every segment is read cleanly.
+        preloaded_arrays: Optional[dict[str, np.ndarray]] = None
+        if segmentationNode is not None:
+            preloaded_arrays = {}
+            segmentation = segmentationNode.GetSegmentation()
+            if segmentation is not None and hasattr(slicer.util, "arrayFromSegmentBinaryLabelmap"):
+                for index in range(segmentation.GetNumberOfSegments()):
+                    segment_id = segmentation.GetNthSegmentID(index)
+                    seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(
+                        segmentationNode, segment_id, volumeNode
+                    )
+                    if seg_arr is not None:
+                        preloaded_arrays[segment_id] = np.asarray(seg_arr).copy()
+
+        flipped = flip_array_only(arr, affine, axis)
         self._write_volume_array_and_affine(volumeNode, flipped, affine)
         if segmentationNode is not None:
             self._apply_segment_ops(
                 segmentationNode,
                 volumeNode,
                 volumeNode,
-                lambda seg_arr: flip_axis(np.asarray(seg_arr), affine, axis)[0],
+                lambda seg_arr: flip_array_only(np.asarray(seg_arr), affine, axis),
+                preloaded_arrays=preloaded_arrays,
             )
             if hasattr(segmentationNode, "SetReferenceImageGeometryParameterFromVolumeNode"):
                 segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+            if hasattr(segmentationNode, "Modified"):
+                segmentationNode.Modified()
+            try:
+                seg = segmentationNode.GetSegmentation()
+                if seg is not None and seg.ContainsRepresentation("Closed surface"):
+                    segmentationNode.CreateClosedSurfaceRepresentation()
+            except Exception:
+                logger.debug("Could not refresh closed surface after flip", exc_info=True)
+
+        axis_tag = axis if isinstance(axis, str) else "_".join(str(a) for a in axis)
         if hasattr(volumeNode, "SetAttribute"):
-            volumeNode.SetAttribute("CBCTPlanner.Orientation", f"manual_flip_{axis}")
+            volumeNode.SetAttribute("CBCTPlanner.Orientation", f"manual_flip_{axis_tag}")
+        if hasattr(self, "_measurement_engine"):
+            self._measurement_engine = None
+        self.reset_slice_views(volumeNode)
         return True
 
     def reset_slice_views(self, volumeNode: Any) -> None:
-        """Reset Axial (Red) and Cross-Section (Yellow/YellowMinus/YellowPlus) views without clobbering Panoramic."""
+        """Reset Axial (Red), Sagittal/Cross-Section (Yellow*), and Coronal (Green) views without clobbering Panoramic."""
         if slicer is None or not volumeNode:
             return
         layoutManager = slicer.app.layoutManager() if getattr(slicer, "app", None) else None
@@ -4754,7 +4867,13 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     comp.SetBackgroundVolumeID(volumeNode.GetID())
                 sNode = sw.sliceLogic().GetSliceNode()
                 getattr(sNode, f"SetOrientationTo{orient}")()
+                if hasattr(sNode, "UpdateMatrices"):
+                    sNode.UpdateMatrices()
                 sw.sliceLogic().FitSliceToAll()
+                try:
+                    sw.sliceView().forceRender()
+                except Exception:
+                    pass
 
     def standardize_to_lpi(self, volumeNode: Any) -> None:
         """Deprecated alias for `reset_slice_views` (the old name was misleading)."""
@@ -5850,31 +5969,34 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         t_center, _ = arch.find_closest_parameter(center)
         center_arc = float(t_center) * float(arch.total_arc_length)
 
-        if len(tooth_list) >= 4:
-            arcs = []
-            for tooth in tooth_list:
-                tooth_center = engine.get_site_center_ras(str(tooth))
-                if tooth_center is None:
-                    continue
-                tooth_t, _ = arch.find_closest_parameter(tooth_center)
-                arcs.append(float(tooth_t) * float(arch.total_arc_length))
-            if arcs:
-                arc_values = np.linspace(min(arcs) - 2.0, max(arcs) + 2.0, num_slices)
-            else:
-                arc_values = center_arc + (np.arange(num_slices) - (num_slices - 1) / 2.0) * step_mm
+        tooth_arcs: Dict[int, float] = {}
+        for tooth in tooth_list:
+            tooth_center = engine.get_site_center_ras(str(tooth))
+            if tooth_center is None:
+                continue
+            tooth_t, _ = arch.find_closest_parameter(tooth_center)
+            tooth_arcs[int(tooth)] = float(tooth_t) * float(arch.total_arc_length)
+
+        if len(tooth_list) >= 4 and tooth_arcs:
+            arc_values = np.linspace(min(tooth_arcs.values()) - 2.0, max(tooth_arcs.values()) + 2.0, num_slices)
         else:
             arc_values = center_arc + (np.arange(num_slices) - (num_slices - 1) / 2.0) * step_mm
 
         for index, arc_mm in enumerate(arc_values):
+            target_fdi = (
+                min(tooth_arcs, key=lambda t: abs(tooth_arcs[t] - float(arc_mm)))
+                if tooth_arcs
+                else int(fdi)
+            )
             meas = None
             cs = None
             try:
-                meas, cs = engine.measure_at_arc_mm(jaw_label, float(arc_mm), fdi_hint=str(fdi))
+                meas, cs = engine.measure_at_arc_mm(jaw_label, float(arc_mm), fdi_hint=str(target_fdi))
             except Exception:
                 logger.exception("Cross-section measurement failed at %.2f mm", arc_mm)
             data_uri = ""
             if cs is not None:
-                render = render_cross_section(cs, meas, scale=2)
+                render = render_cross_section(cs, meas, scale=3)
                 if render.available and render.image is not None:
                     import base64 as _b64
                     import io as _io
@@ -5882,20 +6004,31 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     buffer = _io.BytesIO()
                     render.image.save(buffer, format="PNG")
                     data_uri = "data:image/png;base64," + _b64.b64encode(buffer.getvalue()).decode("ascii")
-            h_str = f"{meas.bone_height_mm:.1f}" if (meas and meas.bone_height_mm is not None) else "N/A"
-            w0_str = f"{meas.crest_width_mm:.1f}" if (meas and meas.crest_width_mm is not None) else "N/A"
+            h_str = f"{meas.bone_height_mm:.1f}" if (meas and meas.bone_height_mm is not None) else "--"
+            w0_str = f"{meas.crest_width_mm:.1f}" if (meas and meas.crest_width_mm is not None) else "--"
             w3 = meas.bone_width_at_depths_mm.get(3.0) if (meas and meas.bone_width_at_depths_mm) else None
             w5 = meas.bone_width_at_depths_mm.get(5.0) if (meas and meas.bone_width_at_depths_mm) else None
+            misch_short = (
+                str(meas.misch_density_class).split()[0]
+                if (meas and getattr(meas, "misch_density_class", None))
+                else None
+            )
             withheld_reason = (
                 meas.withheld_reason if meas is not None else getattr(cs, "withheld_reason", None)
             )
             results.append(
                 {
+                    "slice_index": index + 1,
+                    "total_slices": len(arc_values),
+                    "fdi": target_fdi,
+                    "arc_mm": float(arc_mm),
                     "offset_mm": float(arc_mm - center_arc),
                     "height_mm": h_str,
                     "w_crest_mm": w0_str,
-                    "w_3mm": f"{w3:.1f}" if w3 is not None else "N/A",
-                    "w_5mm": f"{w5:.1f}" if w5 is not None else "N/A",
+                    "w_3mm": f"{w3:.1f}" if w3 is not None else "--",
+                    "w_5mm": f"{w5:.1f}" if w5 is not None else "--",
+                    "nerve_dist_mm": meas.distance_to_vital_structure_mm if meas else None,
+                    "misch_class": misch_short,
                     "image_data_uri": data_uri,
                     "pixmap": None,
                     "measurable": meas is not None,
