@@ -15,6 +15,7 @@ from .labels import (
     ANATOMICAL_MESIODISTAL_WIDTHS_MM,
     LOWER_JAW_ID,
     UPPER_JAW_ID,
+    jaw_key_from_text,
 )
 from .mask_centerline import CenterlineCurve
 
@@ -627,7 +628,7 @@ def compute_fdi_arc_positions_mm(
     tooth_bearing_span_mm: Optional[Tuple[float, float]] = None,
 ) -> Dict[str, ToothArcSite]:
     """B2: Map every FDI tooth in `jaw_type` to its arc-length position along the curve."""
-    jaw_key = "lower" if jaw_type.lower().startswith("low") else "upper"
+    jaw_key = jaw_key_from_text(jaw_type) or "upper"
     order = JAW_TOOTH_ORDER[jaw_key]
     L = max(1.0, float(total_arc_length_mm))
 
@@ -944,9 +945,7 @@ def fit_arch_from_label_mask(
     if mask.ndim != 3 or matrix.shape != (4, 4):
         raise ValueError("mask_zyx must be 3D and affine must be 4x4")
 
-    jaw_key = (
-        "lower" if jaw.lower().startswith("low") else ("upper" if jaw.lower().startswith("up") else "shared")
-    )
+    jaw_key = jaw_key_from_text(jaw) or "shared"
     if is_5class:
         if jaw_key == "lower":
             labels = (4,)

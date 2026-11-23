@@ -32,6 +32,7 @@ from .labels import (
     get_tooth_group_label_id,
     get_tooth_label,
     is_mandibular_fdi,
+    jaw_key_from_text,
     resolve_fdi_number,
 )
 from .tooth_localizer import ToothInfo, ToothLocalizer
@@ -83,6 +84,8 @@ WITHHELD_WIDTH_BORDER = "widths withheld: jaw mask touches cross-section border"
 WITHHELD_WIDTH_SPAN = "widths withheld: jaw mask spans the cross-section field"
 WITHHELD_HEIGHT_SPAN = "height withheld: jaw mask exceeds cross-section height"
 WITHHELD_NO_CREST = "crest not resolved in cross-section"
+WITHHELD_NO_ARCH = "no fitted dental arch for this jaw; fit or draw the arch first"
+WITHHELD_NO_SITE = "no tooth segmentation and no fitted arch at this planning site"
 WITHHELD_METRIC_FAILED = "metric computation failed"
 
 _WITHHELD_BADGES = (
@@ -734,6 +737,8 @@ class MeasurementEngine:
 
         resolved = self._site_center_with_provenance(fdi_str, offset_mm=offset_mm)
         if resolved is None:
+            # Never fail silently: the GUI/print/gallery show this reason instead of a bare "not measured".
+            self.last_withheld_reason = WITHHELD_NO_SITE
             return None
         site_center_mm, site_source, is_approx_site = resolved
 
@@ -1733,8 +1738,12 @@ class MeasurementEngine:
         self, jaw: str, arc_mm: float, fdi_hint: Optional[str] = None
     ) -> Tuple[Optional[ImplantSiteMeasurement], Optional[CrossSectionData]]:
         """Measure a single cross-section at `arc_mm` along the arch with one resample."""
-        jaw_key = "lower" if jaw.lower().startswith("low") else "upper"
         norm_hint = resolve_fdi_number(fdi_hint) if fdi_hint is not None else None
+        # Accept display names ("Mandible"/"Maxilla") as well as arch keys ("lower"/"upper"):
+        # reading "Mandible" as the maxilla made every mandibular cross-section withhold its bone.
+        jaw_key = jaw_key_from_text(jaw)
+        if jaw_key is None:
+            jaw_key = "lower" if is_mandibular_fdi(norm_hint) else "upper"
         cache_key = (jaw_key, round(float(arc_mm), 4), norm_hint)
         if cache_key in self._arc_cache:
             cached_meas, cached_cs = self._arc_cache[cache_key]
@@ -1747,12 +1756,14 @@ class MeasurementEngine:
 
         arch = self.arches.get(jaw_key) or self.arch
         if arch is None:
+            self.last_withheld_reason = WITHHELD_NO_ARCH
             return None, None
         frame = arch.get_frame_at_mm(float(arc_mm))
         cs = self._resample_frame_data(
             (frame.point, frame.tangent, frame.normal, frame.binormal)
         )
         is_mandible = jaw_key == "lower"
+        cs.is_mandible = is_mandible
 
         fdi = norm_hint or ""
         if not fdi:

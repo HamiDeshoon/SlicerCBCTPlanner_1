@@ -569,6 +569,25 @@ def get_jaw_label_id(is_mandible: bool, is_5class: bool = False) -> int:
     return LOWER_JAW_ID if is_mandible else UPPER_JAW_ID
 
 
+def jaw_key_from_text(jaw: Any) -> Optional[str]:
+    """Normalize any jaw identifier to the canonical ``"lower"`` / ``"upper"`` arch key.
+
+    Accepts the engine/arch keys (``"lower"``, ``"upper"``), clinical display names
+    (``"Mandible"``, ``"Maxilla"``, ``"Lower jaw"``, ``"Maxilla & Upper Skull"``) and
+    case variants. Returns ``None`` when the text does not name a single jaw (for example
+    ``"Shared"`` or an empty string) so callers fall back to the selected tooth instead of
+    silently measuring the wrong jaw.
+    """
+    text = str(jaw or "").strip().lower()
+    if not text:
+        return None
+    if text.startswith("low") or "mandib" in text:
+        return "lower"
+    if text.startswith("up") or "maxill" in text:
+        return "upper"
+    return None
+
+
 def get_tooth_group_label_id(is_mandible: bool, is_5class: bool = True) -> int:
     """Return the grouped teeth label ID for 5-class DentalSegmentator masks."""
     if not is_5class:

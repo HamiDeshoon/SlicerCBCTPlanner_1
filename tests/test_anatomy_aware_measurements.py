@@ -55,14 +55,17 @@ from CBCTPlannerLib.core.labels import (
     get_ipsilateral_canal_ids,
     get_ipsilateral_sinus_ids,
     is_mandibular_fdi,
+    jaw_key_from_text,
     resolve_fdi_number,
 )
 from CBCTPlannerLib.core.measurements import (
     IMPLANT_APICAL_SAFETY_MARGIN_MM,
     MeasurementEngine,
     PROVENANCE_LABEL_DERIVED,
+    WITHHELD_NO_ARCH,
     WITHHELD_NO_CANAL_SEG,
     WITHHELD_NO_MANDIBLE_SEG,
+    WITHHELD_NO_SITE,
     suggest_implant_dimensions,
 )
 from CBCTPlannerLib.core.volume_loader import CBCTVolume
@@ -84,6 +87,90 @@ def _make_curved_arch(jaw: str = "lower", z_mm: float = 25.0) -> DentalArch:
         [cx + radius * np.cos(angles), cy + radius * np.sin(angles), np.full_like(angles, z_mm)]
     )
     return DentalArch(pts, jaw_type=jaw, smoothing=0.0, ras_convention=True)
+
+
+def _make_ring_arch(radius_mm: float, cx: float, cy: float, z_mm: float, jaw: str = "lower") -> DentalArch:
+    angles = np.linspace(math.radians(-75.0), math.radians(75.0), 15)
+    pts = np.column_stack(
+        [
+            cx + radius_mm * np.cos(angles),
+            cy + radius_mm * np.sin(angles),
+            np.full_like(angles, z_mm),
+        ]
+    )
+    return DentalArch(pts, jaw_type=jaw, ras_convention=True)
+
+
+def _make_mandible_ring_phantom(
+    *,
+    spacing_mm: float = 0.5,
+    n: int = 100,
+    ridge_width_mm: float = 12.0,
+    crest_z_mm: float = 33.0,
+    base_z_mm: float = 8.0,
+    canal_z_mm: float = 14.0,
+) -> tuple[np.ndarray, np.ndarray, DentalArch]:
+    """Curved mandibular ridge + tooth #46 + ipsilateral IAN in a realistic 50 mm field."""
+    shape = (n, n, n)
+    cx = cy = 25.0
+    radius = 15.0
+    zz, yy, xx = np.indices(shape, dtype=np.float64)
+    xw, yw, zw = xx * spacing_mm, yy * spacing_mm, zz * spacing_mm
+    radial = np.sqrt((xw - cx) ** 2 + (yw - cy) ** 2)
+    angle = math.radians(55.0)  # FDI #46 quadrant 4 (patient right)
+    tx, ty = cx + radius * math.cos(angle), cy + radius * math.sin(angle)
+
+    mask = np.zeros(shape, dtype=np.int32)
+    ridge = (np.abs(radial - radius) <= ridge_width_mm / 2.0) & (zw >= base_z_mm) & (zw <= crest_z_mm)
+    mask[ridge] = LOWER_JAW_ID
+    canal = (np.abs(radial - radius) <= 2.0) & (np.abs(zw - canal_z_mm) <= 1.5)
+    canal &= np.abs(np.arctan2(yw - cy, xw - cx) - angle) < math.radians(40.0)
+    mask[canal] = RIGHT_IAN_ID
+    tooth = (
+        (np.abs(xw - tx) <= 3.0)
+        & (np.abs(yw - ty) <= 3.0)
+        & (zw >= crest_z_mm - 9.0)
+        & (zw <= crest_z_mm + 5.0)
+    )
+    mask[tooth] = 46
+    img = np.where(mask > 0, 900.0, -500.0).astype(np.float32)
+    return mask, img, _make_ring_arch(radius, cx, cy, crest_z_mm + 2.0)
+
+
+def _make_maxilla_ring_phantom(
+    *,
+    spacing_mm: float = 0.5,
+    n: int = 100,
+    ridge_width_mm: float = 12.0,
+    crest_z_mm: float = 17.0,
+    base_z_mm: float = 42.0,
+    sinus_z_mm: float = 36.0,
+) -> tuple[np.ndarray, np.ndarray, DentalArch]:
+    """Curved maxillary ridge + tooth #16 + ipsilateral sinus (z-mirror of the mandible phantom)."""
+    shape = (n, n, n)
+    cx = cy = 25.0
+    radius = 15.0
+    zz, yy, xx = np.indices(shape, dtype=np.float64)
+    xw, yw, zw = xx * spacing_mm, yy * spacing_mm, zz * spacing_mm
+    radial = np.sqrt((xw - cx) ** 2 + (yw - cy) ** 2)
+    angle = math.radians(55.0)  # FDI #16 quadrant 1 (patient right)
+    tx, ty = cx + radius * math.cos(angle), cy + radius * math.sin(angle)
+
+    mask = np.zeros(shape, dtype=np.int32)
+    ridge = (np.abs(radial - radius) <= ridge_width_mm / 2.0) & (zw >= crest_z_mm) & (zw <= base_z_mm)
+    mask[ridge] = UPPER_JAW_ID
+    sinus = (np.abs(radial - radius) <= 2.0) & (np.abs(zw - sinus_z_mm) <= 1.5)
+    sinus &= np.abs(np.arctan2(yw - cy, xw - cx) - angle) < math.radians(40.0)
+    mask[sinus] = RIGHT_SINUS_ID
+    tooth = (
+        (np.abs(xw - tx) <= 3.0)
+        & (np.abs(yw - ty) <= 3.0)
+        & (zw >= crest_z_mm - 5.0)
+        & (zw <= crest_z_mm + 9.0)
+    )
+    mask[tooth] = 16
+    img = np.where(mask > 0, 900.0, -500.0).astype(np.float32)
+    return mask, img, _make_ring_arch(radius, cx, cy, crest_z_mm - 2.0, jaw="upper")
 
 
 def _verify_rendered_measurement_sync(
@@ -564,6 +651,182 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
         m2, _ = eng.measure_at_arc_mm("lower", 15.0, fdi_hint="46")
         assert m2 is not None
         self.assertGreater(m2.bone_height_mm or 0.0, (m1.bone_height_mm or 0.0) + 3.0)
+
+
+class TestCrossSectionEntryPoints(unittest.TestCase):
+    """Regression tests for the jaw-name bug that blanked the gallery, print and film overlays."""
+
+    def _engine(self, jaw: str = "lower"):
+        mask, img, arch = (
+            _make_mandible_ring_phantom() if jaw == "lower" else _make_maxilla_ring_phantom()
+        )
+        spacing = 0.5
+        affine = np.diag([spacing, spacing, spacing, 1.0])
+        vol = CBCTVolume(img, (spacing, spacing, spacing), (0.0, 0.0, 0.0), np.eye(3), affine)
+        return (
+            MeasurementEngine(
+                vol,
+                mask,
+                arch=arch,
+                arches={jaw: arch},
+                is_dental_segmentator_5class=False,
+                extract_teeth_eagerly=False,
+            ),
+            arch,
+        )
+
+    def test_jaw_name_normalization(self) -> None:
+        self.assertEqual(jaw_key_from_text("Mandible"), "lower")
+        self.assertEqual(jaw_key_from_text("mandible"), "lower")
+        self.assertEqual(jaw_key_from_text("lower jaw"), "lower")
+        self.assertEqual(jaw_key_from_text("Lower"), "lower")
+        self.assertEqual(jaw_key_from_text("Maxilla"), "upper")
+        self.assertEqual(jaw_key_from_text("Maxilla & Upper Skull"), "upper")
+        self.assertEqual(jaw_key_from_text("upper"), "upper")
+        self.assertIsNone(jaw_key_from_text("Shared"))
+        self.assertIsNone(jaw_key_from_text(""))
+
+    def test_mandible_display_name_measures_and_draws_the_mandible(self) -> None:
+        eng, arch = self._engine()
+        center = eng.get_site_center_ras("46")
+        assert center is not None
+        t_param, _ = arch.find_closest_parameter(center)
+        arc_mm = t_param * arch.total_arc_length
+
+        baseline, baseline_cs = eng.measure_at_arc_mm("lower", arc_mm, fdi_hint="46")
+        self.assertIsNotNone(baseline)
+        assert baseline is not None and baseline_cs is not None
+        self.assertIsNotNone(baseline.bone_height_mm)
+
+        for jaw_name in ("Lower", "Mandible", "mandible", "LOWER JAW"):
+            meas, cs = eng.measure_at_arc_mm(jaw_name, arc_mm, fdi_hint="46")
+            self.assertIsNotNone(meas, f"jaw name '{jaw_name}' must resolve to the mandible")
+            assert meas is not None and cs is not None
+            self.assertTrue(cs.is_mandible)
+            self.assertAlmostEqual(
+                float(meas.bone_height_mm or 0.0), float(baseline.bone_height_mm or 0.0), places=6
+            )
+            self.assertTrue(cs.measurements["available_bone_height"].is_available)
+            _verify_rendered_measurement_sync(self, cs, meas)
+
+        # A jaw that does not match the label mask withholds the measurement — never fabricates it.
+        wrong_meas, wrong_cs = eng.measure_at_arc_mm("Maxilla", arc_mm, fdi_hint="46")
+        self.assertIsNone(wrong_meas)
+        assert wrong_cs is not None
+        self.assertIn("maxillary", str(wrong_cs.withheld_reason).lower())
+        self.assertEqual(render_cross_section(wrong_cs, None, scale=2).overlay_px, [])
+
+    def test_maxilla_display_name_measures_and_draws_the_maxilla(self) -> None:
+        eng, arch = self._engine("upper")
+        center = eng.get_site_center_ras("16")
+        assert center is not None
+        t_param, _ = arch.find_closest_parameter(center)
+        arc_mm = t_param * arch.total_arc_length
+
+        baseline, baseline_cs = eng.measure_at_arc_mm("upper", arc_mm, fdi_hint="16")
+        self.assertIsNotNone(baseline)
+        assert baseline is not None and baseline_cs is not None
+        self.assertIsNotNone(baseline.bone_height_mm)
+
+        for jaw_name in ("Upper", "Maxilla", "maxilla", "UPPER JAW", "Maxilla & Upper Skull"):
+            meas, cs = eng.measure_at_arc_mm(jaw_name, arc_mm, fdi_hint="16")
+            self.assertIsNotNone(meas, f"jaw name '{jaw_name}' must resolve to the maxilla")
+            assert meas is not None and cs is not None
+            self.assertFalse(cs.is_mandible)
+            self.assertAlmostEqual(
+                float(meas.bone_height_mm or 0.0), float(baseline.bone_height_mm or 0.0), places=6
+            )
+            self.assertTrue(cs.measurements["available_bone_height"].is_available)
+            _verify_rendered_measurement_sync(self, cs, meas)
+
+        # A mandibular jaw argument against a maxillary mask withholds — never fabricates.
+        wrong_meas, wrong_cs = eng.measure_at_arc_mm("Mandible", arc_mm, fdi_hint="16")
+        self.assertIsNone(wrong_meas)
+        assert wrong_cs is not None
+        self.assertIn("mandibular jaw segmentation", str(wrong_cs.withheld_reason).lower())
+        self.assertEqual(render_cross_section(wrong_cs, None, scale=2).overlay_px, [])
+
+    def _assert_gallery_and_print(self, jaw: str, fdi: int) -> None:
+        from CBCTPlanner import CBCTPlannerLogic
+        from CBCTPlannerLib.PrintLayoutEngine import PrintLayoutEngine
+
+        eng, _arch = self._engine(jaw)
+        logic = object.__new__(CBCTPlannerLogic)
+        logic._get_or_build_measurement_engine = lambda _v, _s: eng  # type: ignore[method-assign]
+
+        series = logic.generate_cross_section_slice_series(
+            fdi, volumeNode=object(), segmentationNode=None, num_slices=1, step_mm=1.0, fdis=[fdi]
+        )
+        self.assertEqual(len(series), 1, "a single active cross-section must not expand to a gallery")
+        item = series[0]
+        self.assertTrue(item["measurable"])
+        self.assertNotEqual(item["height_mm"], "--")
+        self.assertNotEqual(item["w_crest_mm"], "--")
+        self.assertIsNone(item["withheld_reason"])
+        self.assertTrue(item["image_data_uri"].startswith("data:image/png;base64,"))
+
+        with tempfile.TemporaryDirectory() as td:
+            html_file, pdf_file, specs = PrintLayoutEngine(logic=logic).generate_8x10_layout(
+                volumeNode=object(), segmentationNode=None, selected_fdis=[fdi], out_dir=Path(td)
+            )
+            self.assertTrue(Path(html_file).exists())
+            self.assertTrue(Path(pdf_file).exists())
+            self.assertTrue(
+                any(spec.height_mm is not None for spec in specs),
+                "print layout must contain measured cross-sections",
+            )
+            self.assertTrue(all(spec.is_mandible is (jaw == "lower") for spec in specs))
+
+    def test_slice_series_and_print_layout_carry_real_measurements(self) -> None:
+        self._assert_gallery_and_print("lower", 46)
+
+    def test_slice_series_and_print_layout_carry_maxillary_measurements(self) -> None:
+        self._assert_gallery_and_print("upper", 16)
+
+    def test_arch_helpers_read_display_names_as_one_canonical_jaw(self) -> None:
+        from CBCTPlannerLib.core.arch_detector import (
+            compute_fdi_arc_positions_mm,
+            fit_arch_from_label_mask,
+        )
+
+        lower_keys = set(compute_fdi_arc_positions_mm(100.0, jaw_type="Mandible"))
+        upper_keys = set(compute_fdi_arc_positions_mm(100.0, jaw_type="Maxilla"))
+        self.assertTrue(lower_keys and all(k[0] in "34" for k in lower_keys))
+        self.assertTrue(upper_keys and all(k[0] in "12" for k in upper_keys))
+
+        # Mandibular teeth only: a maxilla fit must not fall back to a both-jaw ("shared") fit.
+        mask = np.zeros((20, 60, 60), dtype=np.int32)
+        for i, fdi in enumerate((46, 45, 44, 43, 42, 41, 31, 32)):
+            ang = math.radians(150.0 - i * 20.0)
+            cx, cy = int(30 + 18 * math.cos(ang)), int(20 + 12 * math.sin(ang))
+            mask[8:13, cy - 2 : cy + 3, cx - 2 : cx + 3] = fdi
+        affine = np.eye(4, dtype=np.float64)
+        self.assertIsNone(fit_arch_from_label_mask(mask, affine, jaw="Maxilla", is_5class=False))
+        self.assertIsNotNone(fit_arch_from_label_mask(mask, affine, jaw="Mandible", is_5class=False))
+
+    def test_missing_arch_and_site_report_actionable_reason(self) -> None:
+        shape = (20, 20, 20)
+        vol = CBCTVolume(
+            np.zeros(shape, dtype=np.float32),
+            (1.0, 1.0, 1.0),
+            (0.0, 0.0, 0.0),
+            np.eye(3),
+            np.eye(4),
+        )
+        eng = MeasurementEngine(
+            vol,
+            np.zeros(shape, dtype=np.int32),
+            arch=None,
+            arches={},
+            is_dental_segmentator_5class=False,
+            extract_teeth_eagerly=False,
+        )
+        self.assertIsNone(eng.measure_implant_site("46"))
+        self.assertEqual(eng.last_withheld_reason, WITHHELD_NO_SITE)
+        meas, cs = eng.measure_at_arc_mm("lower", 10.0, fdi_hint="46")
+        self.assertIsNone(meas)
+        self.assertIsNone(cs)
+        self.assertEqual(eng.last_withheld_reason, WITHHELD_NO_ARCH)
 
 
 class TestWorkflowUIHelpers(unittest.TestCase):

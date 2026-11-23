@@ -5580,6 +5580,18 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     write_mask = (seg_arr > 0) & (prec >= precedence_buf)
                     combined[write_mask] = label_val
                     precedence_buf[write_mask] = prec
+                elif seg_arr is not None:
+                    # A geometry mismatch used to drop the segment silently, which surfaced later as
+                    # "not measured". Name the segment and the geometry so the cause is actionable.
+                    seg_obj = segmentation.GetSegment(sid)
+                    logger.warning(
+                        "Segment '%s' (%s) skipped: labelmap shape %s does not match volume %s; "
+                        "re-export the segmentation in the selected volume's geometry.",
+                        (seg_obj.GetName() if seg_obj else ""),
+                        sid,
+                        tuple(getattr(seg_arr, "shape", ())),
+                        tuple(combined.shape),
+                    )
             except Exception:
                 logger.debug(
                     "Best-effort operation failed", exc_info=True
@@ -6135,7 +6147,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             return results
 
         tooth_list = [int(f) for f in (fdis or [fdi])]
-        if hasattr(engine, "expand_missing_edentulous_span"):
+        # A single active cross-section must stay a single render; only a multi-slice gallery is
+        # widened to cover a contiguous edentulous span (previously even 1 slice became 15 images).
+        if int(num_slices) > 1 and hasattr(engine, "expand_missing_edentulous_span"):
             try:
                 expanded_list, _missing_list = engine.expand_missing_edentulous_span(tooth_list)
                 if expanded_list:
@@ -6147,8 +6161,11 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             except Exception:
                 logger.debug("Missing-tooth span expansion skipped in slice series", exc_info=True)
 
-        is_mandible = int(str(tooth_list[0])[0]) in (3, 4)
+        is_mandible = is_mandibular_fdi(tooth_list[0])
         jaw_label = "Mandible" if is_mandible else "Maxilla"
+        # The measurement engine takes arch keys, not display names: "Mandible" was read as the
+        # maxilla, so every mandibular cross-section lost its bone and rendered no lines.
+        jaw_key = "lower" if is_mandible else "upper"
         arch = engine._arch_for_jaw(is_mandible)
         if arch is None:
             logger.error("Slice series needs a fitted arch for the %s", jaw_label)
@@ -6164,7 +6181,6 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
 
         # Ensure full quadrant or multi-tooth span never collapses onto a single tooth
         if len(tooth_list) >= 2 and (not tooth_arcs or (max(tooth_arcs.values()) - min(tooth_arcs.values())) < 2.0):
-            jaw_key = "lower" if is_mandible else "upper"
             site_map = compute_fdi_arc_positions_mm(
                 total_arc_length_mm=float(arch.total_arc_length),
                 jaw_type=jaw_key,
@@ -6199,7 +6215,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             meas = None
             cs = None
             try:
-                meas, cs = engine.measure_at_arc_mm(jaw_label, float(arc_mm), fdi_hint=str(target_fdi))
+                meas, cs = engine.measure_at_arc_mm(jaw_key, float(arc_mm), fdi_hint=str(target_fdi))
             except Exception:
                 logger.exception("Cross-section measurement failed at %.2f mm", arc_mm)
             data_uri = ""

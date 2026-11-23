@@ -214,6 +214,8 @@ class PrintLayoutEngine:
         for q, q_fdis in groups:
             is_mandible = q in (3, 4)
             jaw_label = "Mandible" if is_mandible else "Maxilla"
+            # Canonical arch key for the engine; `jaw_label` is only the printable display name.
+            jaw_key = "lower" if is_mandible else "upper"
             n_slices, step_mm = slice_count_for_selection(len(q_fdis))
             arcs = self._tooth_arcs(engine, q_fdis)
             if not arcs:
@@ -247,7 +249,7 @@ class PrintLayoutEngine:
                 meas = None
                 cs = None
                 try:
-                    meas, cs = engine.measure_at_arc_mm(jaw_label, float(arc_mm), fdi_hint=str(target_fdi))
+                    meas, cs = engine.measure_at_arc_mm(jaw_key, float(arc_mm), fdi_hint=str(target_fdi))
                 except Exception:
                     logger.exception(
                         "Cross-section measurement failed at %.2f mm (FDI %s)", arc_mm, target_fdi
