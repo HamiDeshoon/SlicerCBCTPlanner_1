@@ -94,10 +94,7 @@ class TestV3Upgrades(unittest.TestCase):
         )
 
         # 1. Default checkpoint path matches user specification
-        self.assertEqual(
-            DEFAULT_RISEMAR_WEIGHTS_PATH,
-            r"C:\Users\hamid\Downloads\risemar_dental_preview.pkl",
-        )
+        self.assertEqual(DEFAULT_RISEMAR_WEIGHTS_PATH, "")
         cfg = RiseMarConfig()
         self.assertEqual(cfg.weights_path, DEFAULT_RISEMAR_WEIGHTS_PATH)
 

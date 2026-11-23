@@ -4,8 +4,7 @@ Integrates https://github.com/Masaaki-75/rise-mar (Ma et al., IEEE TMI 2025, arX
 into SlicerCBCTPlanner for dental CBCT Metal Artifact Reduction (MAR) whenever needed.
 
 Key Capabilities:
-  - Default checkpoint path configured to `C:\Users\hamid\Downloads\risemar_dental_preview.pkl`
-    (with full user override in UI, ParameterNode, and QSettings).
+  - User-configurable checkpoint path persisted via 3D Slicer QSettings and validated before inference.
   - Pre-MAR tissue & metal categorization (`categorize_volume_pre_mar`) executed strictly on
     the unmodified input volume so downstream bone/tissue classification and metal detection
     are never degraded by post-MAR intensity shifts.
@@ -40,10 +39,26 @@ from .CheckpointInference import load_state_dict_shape_safe, normalize_state_dic
 
 logger = logging.getLogger("CBCTPlanner.RiseMarEngine")
 
-DEFAULT_RISEMAR_WEIGHTS_PATH: str = r"C:\Users\hamid\Downloads\risemar_dental_preview.pkl"
+DEFAULT_RISEMAR_WEIGHTS_PATH: str = ""
 RISEMAR_HU_MIN: float = -1024.0
 RISEMAR_HU_MAX: float = 3072.0
 DEFAULT_METAL_THRESHOLD_HU: float = 2200.0
+
+def validate_risemar_weights_path(weights_path: Optional[str]) -> Tuple[bool, str]:
+    """Validate a user-selected RISE-MAR weights file before enabling neural inference."""
+    raw = str(weights_path or "").strip()
+    if not raw:
+        return False, "No RISE-MAR weights selected — browse to a .pkl / .pth checkpoint to enable."
+    path = Path(raw)
+    if not path.exists():
+        return False, f"RISE-MAR weights file not found: {path.name}"
+    if not path.is_file():
+        return False, f"Selected RISE-MAR path is not a file: {path.name}"
+    if path.suffix.lower() not in (".pkl", ".pth", ".pt", ".ckpt"):
+        return False, f"Unsupported RISE-MAR weights extension '{path.suffix}' (expected .pkl, .pth, or .pt)."
+    if path.stat().st_size <= 0:
+        return False, f"RISE-MAR weights file is empty: {path.name}"
+    return True, f"Weights ready: {path.name}"
 
 
 @dataclass
@@ -554,7 +569,7 @@ def build_risemar_cbam_unet_2d(
 
 
 class RiseMarEngine:
-    """Orchestrates loading `risemar_dental_preview.pkl` and running RISE-MAR on 3D CBCT volumes."""
+    """Orchestrates loading RISE-MAR model weights (`.pkl` / `.pth`) and running RISE-MAR on 3D CBCT volumes."""
 
     def __init__(self, default_weights_path: str = DEFAULT_RISEMAR_WEIGHTS_PATH) -> None:
         self.default_weights_path = default_weights_path
@@ -578,7 +593,7 @@ class RiseMarEngine:
         weights_path: Union[str, Path],
         device: str = "auto",
     ) -> Tuple[Optional[Any], str, int, int, str]:
-        """Attempt to load `risemar_dental_preview.pkl` (or `.pth`/`.pt`).
+        """Attempt to load RISE-MAR model weights (`.pkl` / `.pth`) (or `.pth`/`.pt`).
 
         Returns `(callable_model_or_none, mode_str, loaded_tensors, total_tensors, device_used)`.
         """
@@ -916,6 +931,7 @@ class RiseMarEngine:
 __all__ = [
     "DEFAULT_METAL_THRESHOLD_HU",
     "DEFAULT_RISEMAR_WEIGHTS_PATH",
+    "validate_risemar_weights_path",
     "RISEMAR_HU_MAX",
     "RISEMAR_HU_MIN",
     "RiseMarConfig",

@@ -8,6 +8,7 @@ import unittest
 
 import numpy as np
 
+from CBCTPlannerLib.core.labels import LOWER_JAW_ID, UPPER_JAW_ID
 from CBCTPlannerLib.core.orientation import (
     auto_fix_anatomical_orientation,
     flip_array_only,
@@ -36,9 +37,9 @@ def _build_dental_phantom() -> Tuple[np.ndarray, np.ndarray]:
     img = np.full(shape, -1000.0, dtype=np.float32)
     mask = np.zeros(shape, dtype=np.int32)
 
-    # Upper jaw (1) superior (high z), lower jaw (2) inferior (low z)
-    mask[24:34, 16:36, 10:38] = 1
-    mask[6:16, 16:36, 10:38] = 2
+    # Canonical ToothFairy3 IDs: UPPER_JAW_ID (2) superior (high z), LOWER_JAW_ID (1) inferior (low z)
+    mask[24:34, 16:36, 10:38] = UPPER_JAW_ID
+    mask[6:16, 16:36, 10:38] = LOWER_JAW_ID
     img[mask > 0] = 800.0
 
     # Parabolic dental arch convex toward +Y (anterior at high y, molars at lower y)

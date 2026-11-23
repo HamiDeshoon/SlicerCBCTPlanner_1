@@ -26,6 +26,7 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
+from .core.labels import is_mandibular_fdi
 
 try:
     import slicer  # type: ignore
@@ -427,7 +428,7 @@ class ProstheticPlanner:
         # Compute angulation between implant coronal axis (-axis_apical) and occlusal normal
         u_apical = np.asarray(implant.axis_apical_ras, dtype=np.float64)
         u_apical /= max(1e-8, float(np.linalg.norm(u_apical)))
-        is_mandible = int(implant.fdi) >= 31
+        is_mandible = is_mandibular_fdi(implant.fdi)
         coronal_vec = -u_apical
         occ = np.asarray(occlusal_normal, dtype=np.float64)
         occ /= max(1e-8, float(np.linalg.norm(occ)))

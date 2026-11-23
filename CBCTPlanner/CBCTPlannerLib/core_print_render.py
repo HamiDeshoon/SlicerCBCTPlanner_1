@@ -1,29 +1,29 @@
 """Clinical renderers for cross-sections and the panoramic strip.
 
-Pure numpy geometry with Pillow (and automatic Qt fallback in 3D Slicer). Every overlay
-is derived from measured millimetre coordinates:
-  - Clean, mask-free CBCT anatomy by default (`show_masks=False`) so cortical plates,
-    trabecular bone, roots, and nerve canals remain unobstructed.
-  - Green vertical Height line (`H` in mm) from crestal entry point to root apex or
-    basal/canal/sinus anatomical limit, drawn on EVERY cross-section slice.
-  - Cyan horizontal Entry-Point / Crestal Width line (`W0` in mm) + yellow/cyan entry
-    crosshair target drawn on EVERY cross-section slice.
-  - Gold-orange `W3` (3 mm depth) and orange `W5` (5 mm depth) Buccolingual Width lines
-    in large, bold, high-contrast millimetre typography.
-  - Implant deployment visual aids: 2.0 mm safety-margin line above IAN canal / basal limit,
-    suggested safe implant cylinder envelope & axis, and Misch D1-D4 bone-density cue.
-  - Large, upright panoramic strip (`flip_vertical=True`, default height 340 px) with
-    full-height cross-section cut lines and clear slice/tooth labels.
+Pure numpy geometry with Pillow (and automatic Qt fallback in 3D Slicer).
+Core design principle: the measurement engine determines all endpoints and values;
+this renderer ONLY transforms engine-supplied coordinates into display pixels and
+visualizes them. It never independently detects anatomy, modifies endpoints, or
+recalculates measurements or implant dimensions.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import lru_cache
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+from .core.labels import jaw_mask_from_labels, tooth_mask_from_labels
+from .core.measurements import (
+    IMPLANT_APICAL_SAFETY_MARGIN_MM,
+    PROVENANCE_ESTIMATED,
+    PROVENANCE_INTERPOLATED,
+    PROVENANCE_UNAVAILABLE,
+)
 
 try:  # Pillow is optional in Slicer; callers render an "unavailable" tile when missing.
     from PIL import Image, ImageDraw, ImageFont
@@ -35,10 +35,20 @@ except Exception:  # pragma: no cover - exercised only without Pillow
 
 MM_PER_ROW = 0.25
 MM_PER_COL = 0.25
-SAFETY_MARGIN_MM = 2.0
+SAFETY_MARGIN_MM = IMPLANT_APICAL_SAFETY_MARGIN_MM
 
-_STANDARD_IMPLANT_DIAMETERS = (3.3, 3.5, 4.0, 4.5, 5.0)
-_STANDARD_IMPLANT_LENGTHS = (8.0, 10.0, 11.5, 13.0)
+# Consistent clinical color system (Part 4.3)
+COLOR_BONE_HEIGHT = (34, 222, 94)         # Vivid green: available bone height
+COLOR_BONE_HEIGHT_TEXT = (74, 232, 128)
+COLOR_ROOT_EXTENT = (192, 132, 252)       # Violet: tooth root extent (distinct from bone height)
+COLOR_WIDTH_W0 = (0, 220, 255)            # Cyan: crestal width W0
+COLOR_WIDTH_W3 = (255, 180, 0)            # Gold: width at 3 mm
+COLOR_WIDTH_DEEP = (255, 120, 40)         # Orange: width at >= 5 mm
+COLOR_CREST_MARKER = (250, 204, 21)       # Amber-yellow: alveolar crest marker
+COLOR_VITAL_CANAL = (255, 64, 64)         # Red: IAN canal & safety margin
+COLOR_VITAL_SINUS = (244, 114, 182)       # Pink: maxillary sinus floor
+COLOR_IMPLANT = (56, 189, 248)            # Sky blue: suggested implant (planning aid)
+COLOR_UNAVAILABLE = (148, 163, 184)       # Muted slate: unavailable/withheld
 
 _FONT_CANDIDATES_REGULAR = (
     "C:/Windows/Fonts/segoeui.ttf",
@@ -128,6 +138,54 @@ def _draw_pill_label(
     return rect
 
 
+def _draw_dashed_segment(
+    draw: Any,
+    p0: Tuple[float, float],
+    p1: Tuple[float, float],
+    *,
+    fill: Tuple[int, int, int],
+    dash: int = 6,
+    gap: int = 4,
+    width: int = 1,
+) -> None:
+    """Draw a dashed line between arbitrary 2D points ``p0`` and ``p1``."""
+    x0, y0 = float(p0[0]), float(p0[1])
+    x1, y1 = float(p1[0]), float(p1[1])
+    dist = math.hypot(x1 - x0, y1 - y0)
+    if dist < 1e-3:
+        return
+    ux = (x1 - x0) / dist
+    uy = (y1 - y0) / dist
+    cur = 0.0
+    while cur < dist:
+        seg_end = min(dist, cur + dash)
+        draw.line(
+            [(x0 + cur * ux, y0 + cur * uy), (x0 + seg_end * ux, y0 + seg_end * uy)],
+            fill=fill,
+            width=width,
+        )
+        cur += dash + gap
+
+
+def _draw_endcap(
+    draw: Any,
+    pt: Tuple[float, float],
+    perp_unit: Tuple[float, float],
+    cap_r: float,
+    *,
+    fill: Tuple[int, int, int],
+    width: int = 2,
+) -> None:
+    """Draw a perpendicular caliper end-cap at ``pt``."""
+    px, py = float(pt[0]), float(pt[1])
+    nx, ny = float(perp_unit[0]), float(perp_unit[1])
+    draw.line(
+        [(px - cap_r * nx, py - cap_r * ny), (px + cap_r * nx, py + cap_r * ny)],
+        fill=fill,
+        width=width,
+    )
+
+
 def _draw_dashed_hline(
     draw: Any,
     x0: float,
@@ -139,12 +197,7 @@ def _draw_dashed_hline(
     gap: int = 4,
     width: int = 1,
 ) -> None:
-    lo, hi = (min(x0, x1), max(x0, x1))
-    cur = lo
-    while cur < hi:
-        seg_end = min(hi, cur + dash)
-        draw.line([(cur, y), (seg_end, y)], fill=fill, width=width)
-        cur += dash + gap
+    _draw_dashed_segment(draw, (min(x0, x1), y), (max(x0, x1), y), fill=fill, dash=dash, gap=gap, width=width)
 
 
 def _draw_dashed_vline(
@@ -158,12 +211,7 @@ def _draw_dashed_vline(
     gap: int = 4,
     width: int = 1,
 ) -> None:
-    lo, hi = (min(y0, y1), max(y0, y1))
-    cur = lo
-    while cur < hi:
-        seg_end = min(hi, cur + dash)
-        draw.line([(x, cur), (x, seg_end)], fill=fill, width=width)
-        cur += dash + gap
+    _draw_dashed_segment(draw, (x, min(y0, y1)), (x, max(y0, y1)), fill=fill, dash=dash, gap=gap, width=width)
 
 
 @dataclass
@@ -177,7 +225,7 @@ class CrossSectionRender:
 
 
 def hu_window_to_rgb(img_cs: np.ndarray, window: float = 4000.0, level: float = 1000.0) -> np.ndarray:
-    """Map HU values to 8-bit grayscale using a window/level (with adaptive fallback for non-HU arrays)."""
+    """Map CBCT intensity values to 8-bit grayscale using a window/level (with adaptive fallback)."""
     arr = np.asarray(img_cs, dtype=np.float32)
     if arr.size == 0:
         return np.zeros((1, 1), dtype=np.uint8)
@@ -186,7 +234,6 @@ def hu_window_to_rgb(img_cs: np.ndarray, window: float = 4000.0, level: float = 
     if high <= low:
         high = low + 1.0
     scaled = np.clip((arr - low) / (high - low), 0.0, 1.0)
-    # If standard HU window leaves image flat (e.g. non-HU gray values), adapt to [p2, p99]
     if float(np.std(scaled)) < 0.01 and float(np.max(arr) - np.min(arr)) > 1.0:
         p2, p99 = np.percentile(arr, [2.0, 99.0])
         denom = max(1.0, float(p99 - p2))
@@ -195,7 +242,7 @@ def hu_window_to_rgb(img_cs: np.ndarray, window: float = 4000.0, level: float = 
 
 
 def _enhance_bone_clarity(gray_u8: np.ndarray, strength: float = 0.35) -> np.ndarray:
-    """Fast pure-numpy 3x3 unsharp mask to sharpen cortical plates, roots, and canal walls on X-ray film."""
+    """Fast pure-numpy 3x3 unsharp mask to sharpen cortical plates, roots, and canal walls."""
     arr = np.asarray(gray_u8, dtype=np.float32)
     if arr.ndim != 2 or arr.shape[0] < 3 or arr.shape[1] < 3 or strength <= 0.0:
         return np.asarray(gray_u8, dtype=np.uint8)
@@ -210,15 +257,18 @@ def _enhance_bone_clarity(gray_u8: np.ndarray, strength: float = 0.35) -> np.nda
 
 
 def _px(u: float, v: float, u_coords: np.ndarray, v_coords: np.ndarray, scale: int) -> Tuple[float, float]:
-    col = (float(u) - float(u_coords[0])) / max(1e-6, float(u_coords[-1]) - float(u_coords[0]))
-    row = (float(v_coords[-1]) - float(v)) / max(1e-6, float(v_coords[-1]) - float(v_coords[0]))
+    """Map physical cross-section `(u, v)` mm coordinates to display pixel `(x, y)` coordinates."""
+    u_lo, u_hi = float(u_coords[0]), float(u_coords[-1])
+    v_lo, v_hi = float(min(v_coords[0], v_coords[-1])), float(max(v_coords[0], v_coords[-1]))
+    col = (float(u) - u_lo) / max(1e-6, u_hi - u_lo)
+    row = (v_hi - float(v)) / max(1e-6, v_hi - v_lo)
     width = (len(u_coords) - 1) * scale
     height = (len(v_coords) - 1) * scale
     return col * width, row * height
 
 
 def _apply_anatomical_contour_tint(rgb: np.ndarray, mask_cs: Optional[np.ndarray]) -> np.ndarray:
-    """Blend subtle vivid SlicerDentalSegmentator boundary contours when explicitly enabled."""
+    """Blend subtle anatomical boundary contours using the canonical label registry."""
     if mask_cs is None or mask_cs.shape != rgb.shape[:2]:
         return rgb
     out = rgb.astype(np.float32)
@@ -227,197 +277,19 @@ def _apply_anatomical_contour_tint(rgb: np.ndarray, mask_cs: Optional[np.ndarray
     edge[:-1, :] |= m[:-1, :] != m[1:, :]
     edge[:, :-1] |= m[:, :-1] != m[:, 1:]
 
-    tooth_edge = edge & ((m == 3) | (m == 4) | ((m >= 11) & (m <= 48)))
+    tooth_edge = edge & tooth_mask_from_labels(m)
     if np.any(tooth_edge):
         out[tooth_edge] = 0.35 * out[tooth_edge] + 0.65 * np.array([255.0, 215.0, 90.0], dtype=np.float32)
 
-    jaw_edge = edge & ((m == 1) | (m == 2)) & (~tooth_edge)
+    jaw_edge = edge & jaw_mask_from_labels(m) & (~tooth_edge)
     if np.any(jaw_edge):
         out[jaw_edge] = 0.55 * out[jaw_edge] + 0.45 * np.array([80.0, 220.0, 180.0], dtype=np.float32)
 
     return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
 
-def _classify_misch_bone_density(
-    img_raw: np.ndarray,
-    u_coords: np.ndarray,
-    v_coords: np.ndarray,
-    h_u: float,
-    crest_v: float,
-    basal_v: float,
-) -> Optional[str]:
-    """Estimate Misch D1-D4 bone density along the planned osteotomy corridor (HU-calibrated volumes)."""
-    arr = np.asarray(img_raw, dtype=np.float32)
-    if arr.size == 0 or float(np.min(arr)) > -150.0:
-        return None
-    v_lo, v_hi = sorted((float(crest_v), float(basal_v)))
-    u_mask = np.abs(u_coords - float(h_u)) <= 1.5
-    v_mask = (v_coords >= v_lo) & (v_coords <= v_hi)
-    if not (np.any(u_mask) and np.any(v_mask)):
-        return None
-    patch = arr[np.ix_(v_mask, u_mask)]
-    bone_vals = patch[patch > 100.0]
-    if bone_vals.size < 8:
-        return None
-    mean_hu = float(np.mean(bone_vals))
-    if mean_hu >= 1250.0:
-        return "D1"
-    if mean_hu >= 850.0:
-        return "D2"
-    if mean_hu >= 350.0:
-        return "D3"
-    return "D4"
-
-
-def _suggest_implant_size(
-    height_mm: Optional[float],
-    w0_mm: Optional[float],
-    w3_mm: Optional[float] = None,
-) -> Optional[Tuple[float, float]]:
-    """Suggest a conservative implant (diameter_mm, length_mm) respecting 2 mm safety clearances."""
-    if height_mm is None or float(height_mm) < 8.5:
-        return None
-    avail_len = float(height_mm) - SAFETY_MARGIN_MM
-    valid_lens = [L for L in _STANDARD_IMPLANT_LENGTHS if L <= avail_len]
-    if not valid_lens:
-        return None
-    width_candidates = [w for w in (w0_mm, w3_mm) if w is not None and float(w) > 0.0]
-    if not width_candidates:
-        return None
-    min_w = min(float(w) for w in width_candidates)
-    avail_diam = min_w - 2.0  # >= 1 mm buccal + >= 1 mm lingual bone plate
-    valid_diams = [D for D in _STANDARD_IMPLANT_DIAMETERS if D <= avail_diam]
-    if not valid_diams:
-        return None
-    return max(valid_diams), max(valid_lens)
-
-
-def _infer_cross_section_geometry(
-    cs: Any,
-    meas: Optional[Any],
-    u_coords: np.ndarray,
-    v_coords: np.ndarray,
-) -> Dict[str, Any]:
-    """Resolve crest/entry point, vertical limit (root apex or basal/canal), and width segments.
-
-    Guarantees that every cross-section tile has a valid vertical line and horizontal
-    entry-point line even when upstream `meas` or `crest_v` is partially populated.
-    """
-    is_mand = bool(getattr(cs, "is_mandible", True))
-    img_raw = np.asarray(cs.img_cs, dtype=np.float32)
-    mask_raw = getattr(cs, "mask_cs", None)
-    segments: Dict[float, Tuple[float, float]] = dict(getattr(cs, "width_segments", {}) or {})
-    crest_v = getattr(cs, "crest_v", None)
-    basal_v = getattr(cs, "basal_v", None)
-    root_apex_v = getattr(cs, "root_apex_v", None)
-    h_u = getattr(cs, "height_u", None)
-    canal = getattr(cs, "canal_centroid_uv", None)
-
-    # Identify bone/tooth foreground mask directly from HU or intensity if needed
-    if img_raw.size > 0:
-        if float(np.min(img_raw)) < -150.0:
-            fg = img_raw >= 250.0
-        else:
-            p70 = float(np.percentile(img_raw, 70.0))
-            fg = img_raw >= max(p70, float(np.mean(img_raw) + 0.5 * np.std(img_raw)))
-    else:
-        fg = np.zeros((len(v_coords), len(u_coords)), dtype=bool)
-
-    # 1. Resolve horizontal axis center (`h_u`)
-    if h_u is None:
-        if 0.0 in segments:
-            h_u = 0.5 * (float(segments[0.0][0]) + float(segments[0.0][1]))
-        elif np.any(fg):
-            u_idx = int(round(float(np.mean(np.where(fg)[1]))))
-            u_idx = min(max(0, u_idx), len(u_coords) - 1)
-            h_u = float(u_coords[u_idx])
-        else:
-            h_u = float(0.5 * (u_coords[0] + u_coords[-1]))
-    else:
-        h_u = float(h_u)
-
-    # 2. Resolve crest / entry point (`crest_v`)
-    if crest_v is None and np.any(fg):
-        center_cols = np.abs(u_coords - h_u) <= 3.0
-        col_fg = fg[:, center_cols] if np.any(center_cols) else fg
-        v_hits = np.where(np.any(col_fg, axis=1))[0]
-        if v_hits.size > 0:
-            crest_idx = int(v_hits[-1]) if is_mand else int(v_hits[0])
-            crest_v = float(v_coords[crest_idx])
-
-    # 3. Resolve root apex from tooth mask if present and not already supplied
-    has_tooth_root = False
-    if root_apex_v is not None:
-        root_apex_v = float(root_apex_v)
-        has_tooth_root = True
-    elif mask_raw is not None and np.asarray(mask_raw).shape == img_raw.shape:
-        m = np.asarray(mask_raw)
-        tooth_mask = (m == 3) | (m == 4) | ((m >= 11) & (m <= 48))
-        center_cols = np.abs(u_coords - h_u) <= 3.5
-        t_col = tooth_mask[:, center_cols] if np.any(center_cols) else tooth_mask
-        t_rows = np.where(np.any(t_col, axis=1))[0]
-        if t_rows.size >= 3:
-            # Mandibular tooth root apex is inferior-most (lowest v); maxillary is superior-most
-            apex_idx = int(t_rows[0]) if is_mand else int(t_rows[-1])
-            root_apex_v = float(v_coords[apex_idx])
-            has_tooth_root = True
-
-    # 4. Resolve basal/anatomical limit (`basal_v`) and vertical height (`height_mm`)
-    height_mm = getattr(meas, "bone_height_mm", None) if meas is not None else None
-    if height_mm is not None:
-        height_mm = float(height_mm)
-
-    if crest_v is not None:
-        crest_v = float(crest_v)
-        if basal_v is None:
-            if has_tooth_root and root_apex_v is not None and abs(crest_v - root_apex_v) >= 2.0:
-                basal_v = float(root_apex_v)
-            elif height_mm is not None and height_mm > 0.0:
-                basal_v = crest_v - height_mm if is_mand else crest_v + height_mm
-            elif canal is not None:
-                basal_v = float(canal[1]) + (1.5 if is_mand else -1.5)
-            elif np.any(fg):
-                center_cols = np.abs(u_coords - h_u) <= 3.0
-                col_fg = fg[:, center_cols] if np.any(center_cols) else fg
-                v_hits = np.where(np.any(col_fg, axis=1))[0]
-                if v_hits.size >= 2:
-                    basal_idx = int(v_hits[0]) if is_mand else int(v_hits[-1])
-                    basal_v = float(v_coords[basal_idx])
-        else:
-            basal_v = float(basal_v)
-
-        if (height_mm is None or height_mm <= 0.0) and basal_v is not None:
-            height_mm = abs(crest_v - float(basal_v))
-
-        # 5. Guarantee horizontal entry-point width segment (`0.0` mm depth) on every slice
-        if 0.0 not in segments and np.any(fg):
-            v_idx = int(np.argmin(np.abs(v_coords - crest_v)))
-            # Sample a 3-row band at the crestal entry point for robust width detection
-            r0 = max(0, v_idx - 1)
-            r1 = min(fg.shape[0], v_idx + 2)
-            row_fg = np.any(fg[r0:r1, :], axis=0)
-            u_hits = np.where(row_fg)[0]
-            if u_hits.size >= 2:
-                segments[0.0] = (float(u_coords[int(u_hits[0])]), float(u_coords[int(u_hits[-1])]))
-
-    return {
-        "is_mand": is_mand,
-        "crest_v": crest_v,
-        "basal_v": basal_v,
-        "root_apex_v": root_apex_v,
-        "has_tooth_root": has_tooth_root,
-        "h_u": h_u,
-        "height_mm": height_mm,
-        "segments": segments,
-        "canal": canal,
-    }
-
-
 def measurement_footer_text(meas: Optional[Any], bone_density: Optional[str] = None) -> str:
-    """Return the tile footer `H ... / W0 ...` caption, printing `--` for a withheld metric.
-
-    A withheld crest width must never render as a fabricated `W0 0.0 mm`.
-    """
+    """Return the tile footer `H ... / W0 ...` caption, printing `--` for a withheld metric."""
     if meas is None:
         base = "H --  W0 --"
     else:
@@ -427,6 +299,100 @@ def measurement_footer_text(meas: Optional[Any], bone_density: Optional[str] = N
         w_txt = f"{float(crest_w):.1f} mm" if crest_w is not None else "--"
         base = f"H {h_txt}  W0 {w_txt}"
     return f"{base}  {bone_density}" if bone_density else base
+
+
+def _resolve_engine_overlay_data(cs: Any, meas: Optional[Any]) -> Dict[str, Any]:
+    """Read ONLY pre-computed geometry and values from `cs` and `meas` without inferring anatomy."""
+    is_mand = bool(getattr(cs, "is_mandible", True))
+    records = dict(getattr(cs, "measurements", None) or {})
+    if not records and meas is not None:
+        records = dict(getattr(meas, "measurements", None) or {})
+
+    # 1. Available bone height (exclusively from engine record or explicit cs crest/basal)
+    h_rec = records.get("available_bone_height")
+    crest_uv = getattr(cs, "crest_uv", None)
+    basal_uv = getattr(cs, "basal_uv", None)
+    height_mm = getattr(meas, "bone_height_mm", None) if meas is not None else None
+    height_prov = getattr(h_rec, "provenance", None) if h_rec is not None else getattr(cs, "provenance", "label_derived")
+
+    if h_rec is not None and h_rec.is_available:
+        crest_uv = h_rec.start_uv_mm
+        basal_uv = h_rec.end_uv_mm
+        height_mm = h_rec.value_mm
+    else:
+        # Backward compatibility for minimal mock `CrossSectionData` objects in legacy tests
+        if crest_uv is None and getattr(cs, "crest_v", None) is not None:
+            crest_uv = (float(getattr(cs, "height_u", 0.0)), float(cs.crest_v))
+        if basal_uv is None and crest_uv is not None:
+            if getattr(cs, "basal_v", None) is not None:
+                basal_uv = (float(crest_uv[0]), float(cs.basal_v))
+            elif height_mm is not None and float(height_mm) > 0.0:
+                bv = float(crest_uv[1]) - float(height_mm) if is_mand else float(crest_uv[1]) + float(height_mm)
+                basal_uv = (float(crest_uv[0]), bv)
+        if height_mm is None and crest_uv is not None and basal_uv is not None:
+            # Only derive displayed length if a measurement object was explicitly supplied or basal_v was set
+            if getattr(cs, "basal_v", None) is not None or getattr(cs, "basal_uv", None) is not None:
+                height_mm = round(math.hypot(basal_uv[0] - crest_uv[0], basal_uv[1] - crest_uv[1]), 2)
+
+    # 2. Separate root extent (never substituted for available bone height!)
+    r_rec = records.get("root_extent")
+    root_start_uv = r_rec.start_uv_mm if (r_rec is not None and r_rec.is_available) else getattr(cs, "root_start_uv", None)
+    root_apex_uv = r_rec.end_uv_mm if (r_rec is not None and r_rec.is_available) else getattr(cs, "root_apex_uv", None)
+    root_extent_mm = r_rec.value_mm if (r_rec is not None and r_rec.is_available) else (
+        getattr(meas, "root_extent_mm", None) if meas is not None else None
+    )
+
+    # 3. Width endpoints (prefer exact 2D ridge-aligned endpoints, fallback to legacy width_segments)
+    width_endpoints: Dict[float, Tuple[Tuple[float, float], Tuple[float, float], Optional[float], str]] = {}
+    raw_endpoints = dict(getattr(cs, "width_endpoints_uv", None) or {})
+    raw_segments = dict(getattr(cs, "width_segments", None) or {})
+    all_depths = sorted(set(raw_endpoints.keys()) | set(raw_segments.keys()))
+    for depth in all_depths:
+        w_rec = records.get(f"width_{depth:g}")
+        prov = w_rec.provenance if w_rec is not None else "label_derived"
+        if w_rec is not None and w_rec.is_available:
+            width_endpoints[float(depth)] = (w_rec.start_uv_mm, w_rec.end_uv_mm, w_rec.value_mm, prov)
+        elif depth in raw_endpoints:
+            p0, p1 = raw_endpoints[depth]
+            val = round(math.hypot(p1[0] - p0[0], p1[1] - p0[1]), 2)
+            width_endpoints[float(depth)] = (p0, p1, val, prov)
+        elif depth in raw_segments and crest_uv is not None:
+            u_l, u_r = raw_segments[depth]
+            v_lvl = float(crest_uv[1]) - float(depth) if is_mand else float(crest_uv[1]) + float(depth)
+            val = round(abs(float(u_r) - float(u_l)), 2)
+            width_endpoints[float(depth)] = ((float(u_l), v_lvl), (float(u_r), v_lvl), val, prov)
+
+    # 4. Implant suggestion (exclusively from engine — never recalculated here!)
+    imp_diam = getattr(meas, "suggested_diameter_mm", None) if meas is not None else getattr(cs, "suggested_implant_diameter_mm", None)
+    imp_len = getattr(meas, "suggested_length_mm", None) if meas is not None else getattr(cs, "suggested_implant_length_mm", None)
+
+    # 5. Approximate bone density code (exclusively from engine — never recalculated here!)
+    misch_code = getattr(cs, "misch_code", None)
+    if misch_code is None and meas is not None and getattr(meas, "misch_density_class", None):
+        misch_code = str(meas.misch_density_class).split()[0].strip()
+
+    return {
+        "is_mand": is_mand,
+        "crest_uv": crest_uv,
+        "basal_uv": basal_uv,
+        "height_mm": float(height_mm) if height_mm is not None else None,
+        "height_prov": height_prov,
+        "crest_profile_uv": getattr(cs, "crest_profile_uv", None),
+        "root_start_uv": root_start_uv,
+        "root_apex_uv": root_apex_uv,
+        "root_extent_mm": float(root_extent_mm) if root_extent_mm is not None else None,
+        "width_endpoints": width_endpoints,
+        "canal_centroid_uv": getattr(cs, "canal_centroid_uv", None),
+        "vital_contour_uv": getattr(cs, "vital_contour_uv", None),
+        "sinus_floor_uv": getattr(cs, "sinus_floor_uv", None),
+        "imp_diam": float(imp_diam) if imp_diam is not None else None,
+        "imp_len": float(imp_len) if imp_len is not None else None,
+        "misch_code": misch_code,
+        "ridge_angle": getattr(cs, "ridge_axis_angle_deg", None),
+        "withheld_reason": (
+            getattr(meas, "withheld_reason", None) if meas is not None else getattr(cs, "withheld_reason", None)
+        ),
+    }
 
 
 def render_cross_section(
@@ -441,12 +407,9 @@ def render_cross_section(
     show_implant_guides: bool = True,
     enhance_bone_edges: bool = True,
 ) -> CrossSectionRender:
-    """Render one arch cross-section with clean anatomy and large millimetre overlays.
+    """Render one arch cross-section strictly from engine-supplied measurement endpoints.
 
-    `cs` is a `CrossSectionData` (duck-typed to keep this module Slicer-free).
-    Segmentation masks are OFF by default (`show_masks=False`) so CBCT bone stays clear.
-    Every tile renders both the vertical measurement line (to root apex or anatomical limit)
-    and the horizontal entry-point line in large high-contrast millimetre fonts.
+    Never detects anatomy, modifies endpoints, or fabricates missing measurements.
     """
     if not _PIL_AVAILABLE:
         return CrossSectionRender(None, available=False, reason="Pillow is not installed")
@@ -455,13 +418,11 @@ def render_cross_section(
 
     u_coords = np.asarray(cs.u_coords, dtype=np.float64)
     v_coords = np.asarray(cs.v_coords, dtype=np.float64)
-
     img_raw = np.asarray(cs.img_cs)
-    geom = _infer_cross_section_geometry(cs, meas, u_coords, v_coords)
+    geom = _resolve_engine_overlay_data(cs, meas)
 
-    # `cs.img_cs[iv, iu]` is indexed by `v_coords[iv]` (ascending inferior -> superior),
-    # whereas `_px()` maps `v_coords[-1]` (superior) to image row 0 (top). Flip vertically
-    # so the CBCT anatomy and every measurement line share one exact frame.
+    # `cs.img_cs[iv, iu]` is indexed by `v_coords[iv]`. `_px()` maps superior (`max(v)`) to row 0.
+    # Flip vertically when `v_coords` is ascending so CBCT anatomy and overlays share one frame.
     img_arr = img_raw
     mask_arr = getattr(cs, "mask_cs", None)
     if len(v_coords) >= 2 and float(v_coords[-1]) > float(v_coords[0]):
@@ -485,7 +446,6 @@ def render_cross_section(
     image = image.resize((width, height), getattr(resampling, "BICUBIC", Image.BILINEAR))
     draw = ImageDraw.Draw(image)
 
-    # Large, bold clinical typography for effortless reading in window & print views
     font_sm = _load_font(max(11, int(round(4.6 * scale))), bold=True)
     font_md = _load_font(max(13, int(round(5.4 * scale))), bold=True)
     font_lg = _load_font(max(14, int(round(6.2 * scale))), bold=True)
@@ -542,15 +502,15 @@ def render_cross_section(
         labels.append((chosen[0], chosen[1], text))
         return rect
 
-    # Anatomical orientation badges: Lingual (L) left, Buccal (B) right, Superior (S) top-center.
-    l_rect = _draw_pill_label(draw, 3, 3, "L", fg=(74, 222, 128), border=(34, 197, 94), font=font_md, bounds=bounds)
+    # Orientation badges: Lingual (L) left, Buccal (B) right, Superior (S) top-center.
+    l_rect = _draw_pill_label(draw, 3, 3, "L", fg=COLOR_BONE_HEIGHT_TEXT, border=COLOR_BONE_HEIGHT, font=font_md, bounds=bounds)
     b_tw, _ = _text_size(draw, "B", font_md)
     b_rect = _draw_pill_label(
-        draw, max(3, width - b_tw - 11), 3, "B", fg=(74, 222, 128), border=(34, 197, 94), font=font_md, bounds=bounds
+        draw, max(3, width - b_tw - 11), 3, "B", fg=COLOR_BONE_HEIGHT_TEXT, border=COLOR_BONE_HEIGHT, font=font_md, bounds=bounds
     )
     s_tw, _ = _text_size(draw, "S", font_sm)
     s_rect = _draw_pill_label(
-        draw, max(3, (width - s_tw - 8) // 2), 3, "S", fg=(148, 163, 184), font=font_sm, bounds=bounds
+        draw, max(3, (width - s_tw - 8) // 2), 3, "S", fg=COLOR_UNAVAILABLE, font=font_sm, bounds=bounds
     )
     occupied_rects.extend([l_rect, b_rect, s_rect])
     labels.extend([(3.0, 3.0, "L"), (float(max(3, width - b_tw - 11)), 3.0, "B")])
@@ -580,186 +540,231 @@ def render_cross_section(
     )
     occupied_rects.append(scale_rect)
 
-    crest_v = geom["crest_v"]
-    basal_v = geom["basal_v"]
-    h_u = float(geom["h_u"])
+    crest_uv = geom["crest_uv"]
+    basal_uv = geom["basal_uv"]
     height_mm_val = geom["height_mm"]
-    segments: Dict[float, Tuple[float, float]] = geom["segments"]
+    height_prov = geom["height_prov"]
+    width_endpoints = geom["width_endpoints"]
     is_mand = bool(geom["is_mand"])
-    canal = geom["canal"]
+    imp_diam = geom["imp_diam"]
+    imp_len = geom["imp_len"]
 
-    # Suggested implant envelope & axis guide (drawn underneath primary calipers for clarity)
-    w0_mm = abs(segments[0.0][1] - segments[0.0][0]) if 0.0 in segments else None
-    w3_mm = abs(segments[3.0][1] - segments[3.0][0]) if 3.0 in segments else None
-    suggested_impl = _suggest_implant_size(height_mm_val, w0_mm, w3_mm) if show_implant_guides else None
-    if show_implant_guides and suggested_impl is not None and crest_v is not None:
-        imp_d, imp_l = suggested_impl
-        half_d = 0.5 * imp_d
-        imp_end_v = float(crest_v) - imp_l if is_mand else float(crest_v) + imp_l
-        ix0, iy0 = _px(h_u - half_d, crest_v, u_coords, v_coords, scale)
-        ix1, iy1 = _px(h_u + half_d, imp_end_v, u_coords, v_coords, scale)
-        x_lo, x_hi = min(ix0, ix1), max(ix0, ix1)
-        y_lo, y_hi = min(iy0, iy1), max(iy0, iy1)
-        _draw_dashed_vline(draw, x_lo, y_lo, y_hi, fill=(56, 189, 248), dash=5, gap=4, width=max(1, scale - 1))
-        _draw_dashed_vline(draw, x_hi, y_lo, y_hi, fill=(56, 189, 248), dash=5, gap=4, width=max(1, scale - 1))
-        _draw_dashed_hline(draw, x_lo, x_hi, y_hi if is_mand else y_lo, fill=(56, 189, 248), dash=4, gap=3, width=max(1, scale - 1))
+    # Local alveolar ridge axis unit vector in (u, v) from actual endpoints
+    if crest_uv is not None and basal_uv is not None:
+        du_h = float(basal_uv[0] - crest_uv[0])
+        dv_h = float(basal_uv[1] - crest_uv[1])
+        h_len = math.hypot(du_h, dv_h)
+        if h_len > 1e-6:
+            d_apical = (du_h / h_len, dv_h / h_len)
+        else:
+            d_apical = (0.0, -1.0) if is_mand else (0.0, 1.0)
+    else:
+        d_apical = (0.0, -1.0) if is_mand else (0.0, 1.0)
+    # Perpendicular buccolingual unit vector pointing toward +u
+    d_bl = (-d_apical[1], d_apical[0])
+    if d_bl[0] < 0:
+        d_bl = (-d_bl[0], -d_bl[1])
+
+    # Suggested implant envelope (exclusively from engine-supplied dimensions)
+    if show_implant_guides and imp_diam is not None and imp_len is not None and crest_uv is not None:
+        half_d = 0.5 * imp_diam
+        c_l = (crest_uv[0] - half_d * d_bl[0], crest_uv[1] - half_d * d_bl[1])
+        c_r = (crest_uv[0] + half_d * d_bl[0], crest_uv[1] + half_d * d_bl[1])
+        a_l = (c_l[0] + imp_len * d_apical[0], c_l[1] + imp_len * d_apical[1])
+        a_r = (c_r[0] + imp_len * d_apical[0], c_r[1] + imp_len * d_apical[1])
+        p_cl = _px(c_l[0], c_l[1], u_coords, v_coords, scale)
+        p_cr = _px(c_r[0], c_r[1], u_coords, v_coords, scale)
+        p_al = _px(a_l[0], a_l[1], u_coords, v_coords, scale)
+        p_ar = _px(a_r[0], a_r[1], u_coords, v_coords, scale)
+        _draw_dashed_segment(draw, p_cl, p_al, fill=COLOR_IMPLANT, dash=5, gap=4, width=max(1, scale - 1))
+        _draw_dashed_segment(draw, p_cr, p_ar, fill=COLOR_IMPLANT, dash=5, gap=4, width=max(1, scale - 1))
+        _draw_dashed_segment(draw, p_al, p_ar, fill=COLOR_IMPLANT, dash=4, gap=3, width=max(1, scale - 1))
         _place_non_overlapping_pill(
             3.0,
             26.0,
-            f"Impl {imp_d:.1f}x{imp_l:g} mm",
+            f"Impl {imp_diam:.1f}x{imp_len:g} mm",
             fg=(125, 211, 252),
-            border=(56, 189, 248),
+            border=COLOR_IMPLANT,
             font=font_sm,
         )
 
-    # 1. Horizontal Entry-Point / Crest Line (drawn on EVERY single image)
-    if crest_v is not None:
-        x_left, y_crest = _px(u_coords[0], crest_v, u_coords, v_coords, scale)
-        x_right, _ = _px(u_coords[-1], crest_v, u_coords, v_coords, scale)
-        if 0.0 in segments:
-            w0_l, w0_r = segments[0.0]
-            wx0, _ = _px(w0_l, crest_v, u_coords, v_coords, scale)
-            wx1, _ = _px(w0_r, crest_v, u_coords, v_coords, scale)
-            _draw_dashed_hline(draw, x_left + 12, max(x_left + 12, wx0 - 4), y_crest, fill=(250, 204, 21), width=max(1, scale - 1))
-            _draw_dashed_hline(draw, min(x_right - 4, wx1 + 4), x_right - 4, y_crest, fill=(250, 204, 21), width=max(1, scale - 1))
-        else:
-            _draw_dashed_hline(draw, x_left + 12, x_right - 4, y_crest, fill=(250, 204, 21), width=max(2, scale - 1))
-        overlay.append(((x_left, y_crest), (x_right, y_crest)))
+    # 1. Alveolar crest marker & detected ridge crest contour (when supplied by engine)
+    if crest_uv is not None:
+        crest_profile = geom["crest_profile_uv"]
+        if crest_profile and len(crest_profile) >= 2:
+            prof_px = [_px(pu, pv, u_coords, v_coords, scale) for pu, pv in crest_profile]
+            for i_p in range(len(prof_px) - 1):
+                draw.line([prof_px[i_p], prof_px[i_p + 1]], fill=(180, 145, 25), width=max(1, scale - 1))
 
-        # Entry-point target crosshair at (h_u, crest_v)
-        ep_x, ep_y = _px(h_u, crest_v, u_coords, v_coords, scale)
-        ep_r = max(4, int(round(2.0 * scale)))
+        ep_x, ep_y = _px(crest_uv[0], crest_uv[1], u_coords, v_coords, scale)
+        ep_r = max(3, int(round(1.8 * scale)))
         draw.ellipse(
             [ep_x - ep_r, ep_y - ep_r, ep_x + ep_r, ep_y + ep_r],
-            outline=(250, 204, 21),
+            outline=COLOR_CREST_MARKER,
             width=max(2, scale - 1),
         )
-        draw.line([(ep_x - ep_r - 3, ep_y), (ep_x + ep_r + 3, ep_y)], fill=(250, 204, 21), width=max(1, scale - 1))
-        draw.line([(ep_x, ep_y - ep_r - 3), (ep_x, ep_y + ep_r + 3)], fill=(250, 204, 21), width=max(1, scale - 1))
 
-    # 2. Vertical Measurement Line from Entry Point to Root Apex / Anatomical Limit (EVERY single image)
-    if crest_v is not None and basal_v is not None and height_mm_val is not None and float(height_mm_val) > 0.0:
-        hx0, hy0 = _px(h_u, crest_v, u_coords, v_coords, scale)
-        hx1, hy1 = _px(h_u, basal_v, u_coords, v_coords, scale)
+    # 2. Available Bone Height line: crest_uv -> basal_uv (NEVER replaced by root apex)
+    if crest_uv is not None and basal_uv is not None and height_mm_val is not None and height_mm_val > 0.0:
+        p0 = _px(crest_uv[0], crest_uv[1], u_coords, v_coords, scale)
+        p1 = _px(basal_uv[0], basal_uv[1], u_coords, v_coords, scale)
         line_w = max(2, scale)
         cap_r = max(5, int(round(2.4 * scale)))
-        draw.line([(hx0, hy0), (hx1, hy1)], fill=(34, 197, 94), width=line_w)
-        draw.line([(hx0 - cap_r, hy0), (hx0 + cap_r, hy0)], fill=(34, 197, 94), width=max(2, line_w - 1))
-        draw.line([(hx1 - cap_r, hy1), (hx1 + cap_r, hy1)], fill=(34, 197, 94), width=max(2, line_w - 1))
-        overlay.append(((hx0, hy0), (hx1, hy1)))
-        mid_hy = 0.5 * (hy0 + hy1)
-        h_prefix = "Root" if geom["has_tooth_root"] else "H"
+        is_estimated = height_prov in (PROVENANCE_ESTIMATED, PROVENANCE_INTERPOLATED)
+        if is_estimated:
+            _draw_dashed_segment(draw, p0, p1, fill=COLOR_BONE_HEIGHT, dash=6, gap=4, width=line_w)
+        else:
+            draw.line([p0, p1], fill=COLOR_BONE_HEIGHT, width=line_w)
+
+        # Perpendicular end-caps aligned to the actual line angle
+        ldx, ldy = p1[0] - p0[0], p1[1] - p0[1]
+        ll = max(1e-6, math.hypot(ldx, ldy))
+        perp_px = (-ldy / ll, ldx / ll)
+        _draw_endcap(draw, p0, perp_px, cap_r, fill=COLOR_BONE_HEIGHT, width=max(2, line_w - 1))
+        _draw_endcap(draw, p1, perp_px, cap_r, fill=COLOR_BONE_HEIGHT, width=max(2, line_w - 1))
+        overlay.append((p0, p1))
+
+        mid_hx = 0.5 * (p0[0] + p1[0])
+        mid_hy = 0.5 * (p0[1] + p1[1])
+        h_tag = f"H~:{height_mm_val:.1f} mm" if is_estimated else f"H:{height_mm_val:.1f} mm"
         _place_non_overlapping_pill(
-            hx0 + cap_r + 5,
+            mid_hx + cap_r + 5,
             mid_hy - 8,
-            f"{h_prefix} {float(height_mm_val):.1f} mm",
-            fg=(74, 222, 128),
-            border=(34, 197, 94),
+            h_tag,
+            fg=COLOR_BONE_HEIGHT_TEXT,
+            border=COLOR_BONE_HEIGHT,
             font=font_lg,
         )
 
-        # Prosthetic / Implant Long-Axis trajectory extending 4 mm coronally above crest
-        if show_implant_guides:
-            ext_v = float(crest_v) + 4.0 if is_mand else float(crest_v) - 4.0
-            ax_x0, ax_y0 = _px(h_u, ext_v, u_coords, v_coords, scale)
-            ax_x1, ax_y1 = _px(h_u, crest_v, u_coords, v_coords, scale)
-            _draw_dashed_vline(draw, ax_x0, ax_y0, ax_y1, fill=(226, 232, 240), dash=3, gap=3, width=1)
-            ridge_ang = getattr(cs, "ridge_axis_angle_deg", None)
-            if ridge_ang is not None and abs(float(ridge_ang)) >= 2.0:
-                _place_non_overlapping_pill(
-                    width - 96.0,
-                    26.0,
-                    f"Ang {float(ridge_ang):+.0f}deg",
-                    fg=(226, 232, 240),
-                    border=(100, 116, 139),
-                    font=font_sm,
-                )
-
-        # 2.0 mm Apical Safety Margin barrier coronal to basal limit / IAN canal / sinus floor
-        if show_implant_guides and float(height_mm_val) > SAFETY_MARGIN_MM + 1.0:
-            safe_v = float(basal_v) + SAFETY_MARGIN_MM if is_mand else float(basal_v) - SAFETY_MARGIN_MM
-            sx0, sy = _px(h_u - 5.0, safe_v, u_coords, v_coords, scale)
-            sx1, _ = _px(h_u + 5.0, safe_v, u_coords, v_coords, scale)
-            _draw_dashed_hline(draw, sx0, sx1, sy, fill=(248, 113, 113), dash=5, gap=3, width=max(2, scale - 1))
+        # Ridge inclination badge when non-vertical
+        ridge_ang = geom["ridge_angle"]
+        if show_implant_guides and ridge_ang is not None and abs(float(ridge_ang)) >= 2.0:
             _place_non_overlapping_pill(
-                sx0 - 52.0,
-                sy - 8,
+                width - 96.0,
+                26.0,
+                f"Ang {float(ridge_ang):+.0f}deg",
+                fg=(226, 232, 240),
+                border=(100, 116, 139),
+                font=font_sm,
+            )
+
+        # 2.0 mm Apical Safety Margin barrier coronal to basal/vital boundary
+        if show_implant_guides and height_mm_val > SAFETY_MARGIN_MM + 1.0:
+            safe_center = (
+                basal_uv[0] - SAFETY_MARGIN_MM * d_apical[0],
+                basal_uv[1] - SAFETY_MARGIN_MM * d_apical[1],
+            )
+            s0 = _px(safe_center[0] - 4.5 * d_bl[0], safe_center[1] - 4.5 * d_bl[1], u_coords, v_coords, scale)
+            s1 = _px(safe_center[0] + 4.5 * d_bl[0], safe_center[1] + 4.5 * d_bl[1], u_coords, v_coords, scale)
+            _draw_dashed_segment(draw, s0, s1, fill=(248, 113, 113), dash=5, gap=3, width=max(2, scale - 1))
+            _place_non_overlapping_pill(
+                min(s0[0], s1[0]) - 52.0,
+                0.5 * (s0[1] + s1[1]) - 8,
                 "2mm SAFE",
                 fg=(252, 165, 165),
                 border=(239, 68, 68),
                 font=font_sm,
             )
 
-    # 3. Horizontal Buccolingual Width calipers (W0 Entry cyan, W3 gold-orange, W5 orange)
-    has_w5 = 5.0 in segments
-    for depth in sorted(segments.keys()):
-        if crest_v is None:
-            break
-        u_left, u_right = segments[depth]
-        v_level = crest_v - float(depth) if is_mand else crest_v + float(depth)
-        start = _px(u_left, v_level, u_coords, v_coords, scale)
-        end = _px(u_right, v_level, u_coords, v_coords, scale)
+    # 3. Separate Root Extent line (visually distinct violet; never replaces bone height)
+    root_start_uv = geom["root_start_uv"]
+    root_apex_uv = geom["root_apex_uv"]
+    root_extent_mm = geom["root_extent_mm"]
+    if root_start_uv is not None and root_apex_uv is not None and root_extent_mm is not None and root_extent_mm > 0.0:
+        rp0 = _px(root_start_uv[0], root_start_uv[1], u_coords, v_coords, scale)
+        rp1 = _px(root_apex_uv[0], root_apex_uv[1], u_coords, v_coords, scale)
+        _draw_dashed_segment(draw, rp0, rp1, fill=COLOR_ROOT_EXTENT, dash=4, gap=3, width=max(1, scale - 1))
+        r_r = max(2, scale)
+        draw.ellipse([rp1[0] - r_r, rp1[1] - r_r, rp1[0] + r_r, rp1[1] + r_r], fill=COLOR_ROOT_EXTENT)
+        overlay.append((rp0, rp1))
+        _place_non_overlapping_pill(
+            min(rp0[0], rp1[0]) - 68.0,
+            0.5 * (rp0[1] + rp1[1]) - 8,
+            f"Root {root_extent_mm:.1f} mm",
+            fg=COLOR_ROOT_EXTENT,
+            border=(168, 85, 247),
+            font=font_sm,
+        )
+
+    # 4. Buccolingual Width calipers strictly from engine endpoints (ridge-aligned)
+    has_w5 = 5.0 in width_endpoints
+    for depth in sorted(width_endpoints.keys()):
+        pt_l, pt_r, w_val, w_prov = width_endpoints[depth]
+        start = _px(pt_l[0], pt_l[1], u_coords, v_coords, scale)
+        end = _px(pt_r[0], pt_r[1], u_coords, v_coords, scale)
         is_primary = depth in (0.0, 3.0, 5.0) or (depth == 6.0 and not has_w5)
         if depth == 0.0:
-            colour = (0, 220, 255)
+            colour = COLOR_WIDTH_W0
         elif depth <= 3.5:
-            colour = (255, 180, 0)
+            colour = COLOR_WIDTH_W3
         else:
-            colour = (255, 120, 40)
+            colour = COLOR_WIDTH_DEEP
 
         w_line = max(2, scale) if is_primary else 1
         tick_r = max(4, int(round(1.8 * scale))) if is_primary else 2
-        draw.line([start, end], fill=colour, width=w_line)
-        draw.line([(start[0], start[1] - tick_r), (start[0], start[1] + tick_r)], fill=colour, width=max(2, w_line - 1))
-        draw.line([(end[0], end[1] - tick_r), (end[0], end[1] + tick_r)], fill=colour, width=max(2, w_line - 1))
+        if w_prov in (PROVENANCE_ESTIMATED, PROVENANCE_INTERPOLATED):
+            _draw_dashed_segment(draw, start, end, fill=colour, dash=5, gap=3, width=w_line)
+        else:
+            draw.line([start, end], fill=colour, width=w_line)
+
+        wdx, wdy = end[0] - start[0], end[1] - start[1]
+        wl = max(1e-6, math.hypot(wdx, wdy))
+        w_perp = (-wdy / wl, wdx / wl)
+        _draw_endcap(draw, start, w_perp, tick_r, fill=colour, width=max(2, w_line - 1))
+        _draw_endcap(draw, end, w_perp, tick_r, fill=colour, width=max(2, w_line - 1))
         overlay.append((start, end))
 
-        if is_primary:
-            w_val = abs(float(u_right) - float(u_left))
-            if depth == 0.0:
-                lbl_str = f"W0 {w_val:.1f} mm"
-            else:
-                lbl_str = f"W{depth:g} {w_val:.1f} mm"
+        if is_primary and w_val is not None:
+            lbl_str = f"W0 {w_val:.1f} mm" if depth == 0.0 else f"W{depth:g} {w_val:.1f} mm"
             if depth == 3.0:
-                pref_x = start[0] - _text_size(draw, lbl_str, font_md)[0] - 12
+                pref_x = min(start[0], end[0]) - _text_size(draw, lbl_str, font_md)[0] - 12
             else:
-                pref_x = end[0] + 6
+                pref_x = max(start[0], end[0]) + 6
             _place_non_overlapping_pill(
                 pref_x,
-                start[1] - 8,
+                0.5 * (start[1] + end[1]) - 8,
                 lbl_str,
                 fg=colour,
                 border=colour,
                 font=font_md,
             )
 
-    if canal is not None:
-        cu, cv = canal
-        cx, cy = _px(cu, cv, u_coords, v_coords, scale)
-        radius_mm = 1.5
-        radius_px = radius_mm / max(1e-6, (u_coords[-1] - u_coords[0]) / max(1, len(u_coords) - 1)) * scale
-        draw.ellipse(
-            [cx - radius_px, cy - radius_px, cx + radius_px, cy + radius_px],
-            outline=(255, 60, 60),
-            width=max(2, scale),
-        )
-        cross_r = max(2.0, radius_px * 0.45)
-        draw.line([(cx - cross_r, cy), (cx + cross_r, cy)], fill=(255, 100, 100), width=1)
-        draw.line([(cx, cy - cross_r), (cx, cy + cross_r)], fill=(255, 100, 100), width=1)
-        _place_non_overlapping_pill(
-            cx + radius_px + 5,
-            cy - 8,
-            "IAN",
-            fg=(255, 96, 96),
-            border=(239, 68, 68),
-            font=font_md,
-        )
+    # 5. Vital anatomical structures (actual segmentation contour + marker)
+    canal = geom["canal_centroid_uv"]
+    vital_contour = geom["vital_contour_uv"]
+    if is_mand and (vital_contour or canal is not None):
+        if vital_contour and len(vital_contour) >= 3:
+            c_px = [_px(float(cu), float(cv), u_coords, v_coords, scale) for cu, cv in vital_contour]
+            for idx_c in range(len(c_px)):
+                draw.line([c_px[idx_c], c_px[(idx_c + 1) % len(c_px)]], fill=COLOR_VITAL_CANAL, width=max(2, scale))
+        if canal is not None:
+            cu, cv = canal
+            cx, cy = _px(cu, cv, u_coords, v_coords, scale)
+            radius_mm = 1.5
+            radius_px = radius_mm / max(1e-6, (u_coords[-1] - u_coords[0]) / max(1, len(u_coords) - 1)) * scale
+            if not (vital_contour and len(vital_contour) >= 3):
+                draw.ellipse(
+                    [cx - radius_px, cy - radius_px, cx + radius_px, cy + radius_px],
+                    outline=COLOR_VITAL_CANAL,
+                    width=max(2, scale),
+                )
+            cross_r = max(2.0, radius_px * 0.45)
+            draw.line([(cx - cross_r, cy), (cx + cross_r, cy)], fill=(255, 100, 100), width=1)
+            draw.line([(cx, cy - cross_r), (cx, cy + cross_r)], fill=(255, 100, 100), width=1)
+            _place_non_overlapping_pill(
+                cx + radius_px + 5,
+                cy - 8,
+                "IAN",
+                fg=(255, 96, 96),
+                border=(239, 68, 68),
+                font=font_md,
+            )
 
-    sinus_pts = getattr(cs, "sinus_floor_uv", None)
+    sinus_pts = geom["sinus_floor_uv"]
     if sinus_pts and len(sinus_pts) >= 2:
         px_pts = [_px(float(su), float(sv), u_coords, v_coords, scale) for su, sv in sinus_pts]
         for i_s in range(len(px_pts) - 1):
-            draw.line([px_pts[i_s], px_pts[i_s + 1]], fill=(244, 114, 182), width=max(2, scale))
+            draw.line([px_pts[i_s], px_pts[i_s + 1]], fill=COLOR_VITAL_SINUS, width=max(2, scale))
         mid_sx, mid_sy = px_pts[len(px_pts) // 2]
         _place_non_overlapping_pill(
             mid_sx + 6,
@@ -770,24 +775,21 @@ def render_cross_section(
             font=font_sm,
         )
 
-    bone_density = (
-        _classify_misch_bone_density(img_raw, u_coords, v_coords, h_u, crest_v, basal_v)
-        if (show_implant_guides and crest_v is not None and basal_v is not None)
-        else None
-    )
+    bone_density = geom["misch_code"] if show_implant_guides else None
 
     # Crisp dark clinical footer bar at the bottom of the tile
     draw.rectangle([(0, height - footer_h), (width, height)], fill=(2, 4, 9))
     draw.line([(0, height - footer_h), (width, height - footer_h)], fill=(30, 41, 59), width=1)
-    if meas is None and (height_mm_val is None or float(height_mm_val) <= 0.0):
-        draw.text((6, height - footer_h + 4), "not measurable", fill=(248, 113, 113), font=font_md)
+    if meas is None and (height_mm_val is None or height_mm_val <= 0.0) and not width_endpoints:
+        draw.text((6, height - footer_h + 4), "not measurable", fill=COLOR_UNAVAILABLE, font=font_md)
         labels.append((6.0, float(height - footer_h + 4), "not measurable"))
     else:
         if meas is not None:
             text = measurement_footer_text(meas, bone_density=bone_density)
         else:
-            h_txt = f"{float(height_mm_val):.1f} mm" if height_mm_val is not None else "--"
-            w_txt = f"{float(w0_mm):.1f} mm" if w0_mm is not None else "--"
+            h_txt = f"{height_mm_val:.1f} mm" if height_mm_val is not None else "--"
+            w0_val = width_endpoints[0.0][2] if 0.0 in width_endpoints else None
+            w_txt = f"{w0_val:.1f} mm" if w0_val is not None else "--"
             text = f"H {h_txt}  W0 {w_txt}" + (f"  {bone_density}" if bone_density else "")
         draw.text((6, height - footer_h + 4), text, fill=(248, 250, 252), font=font_md)
         labels.append((6.0, float(height - footer_h + 4), text))
@@ -815,11 +817,7 @@ def render_panoramic_strip(
     show_cross_section_lines: bool = True,
     highlight_indices: Optional[Sequence[int]] = None,
 ) -> CrossSectionRender:
-    """Render a large, upright panoramic strip with full-height cross-section reference lines.
-
-    Column `k` maps to arc length `k * column_spacing_mm`. `flip_vertical=True` (default)
-    places superior at the top so the print panoramic matches the upright clinical view.
-    """
+    """Render a large, upright panoramic strip with full-height cross-section reference lines."""
     if not _PIL_AVAILABLE:
         return CrossSectionRender(None, available=False, reason="Pillow is not installed")
     arr = np.asarray(pano_array)
@@ -830,7 +828,6 @@ def render_panoramic_strip(
     if arr.ndim != 2 or arr.size == 0:
         return CrossSectionRender(None, available=False, reason="invalid panoramic array")
 
-    # Panoramic array row 0 is inferior (z-ascending); flip vertically so superior is top.
     if flip_vertical:
         arr = arr[::-1, :]
 
@@ -851,10 +848,8 @@ def render_panoramic_strip(
 
     tick_bar_h = max(26, int(round(img_h * 0.11)))
     draw.rectangle([(0, img_h - tick_bar_h), (img_w, img_h)], fill=(2, 4, 9))
-    # Radiographic patient orientation markers (R = Patient Right, L = Patient Left)
-    _draw_pill_label(draw, 8, 8, "R", fg=(56, 189, 248), bg=(2, 4, 9), border=(56, 189, 248), font=font)
-    _draw_pill_label(draw, max(8, img_w - 30), 8, "L", fg=(56, 189, 248), bg=(2, 4, 9), border=(56, 189, 248), font=font)
-    # 10 mm calibrated arch ruler ticks along the panoramic bottom border
+    _draw_pill_label(draw, 8, 8, "R", fg=COLOR_IMPLANT, bg=(2, 4, 9), border=COLOR_IMPLANT, font=font)
+    _draw_pill_label(draw, max(8, img_w - 30), 8, "L", fg=COLOR_IMPLANT, bg=(2, 4, 9), border=COLOR_IMPLANT, font=font)
     total_arc_mm = float(arr.shape[1] - 1) * max(1e-6, float(column_spacing_mm))
     for mm_mark in range(0, int(total_arc_mm) + 1, 10):
         rx = (float(mm_mark) / max(1e-6, float(column_spacing_mm))) * max(1, int(scale))
@@ -870,10 +865,9 @@ def render_panoramic_strip(
             continue
         x = col * max(1, int(scale))
         is_hi = index in hi_set
-        line_col = (74, 222, 128) if is_hi else (0, 220, 255)
+        line_col = COLOR_BONE_HEIGHT_TEXT if is_hi else COLOR_WIDTH_W0
         line_w = max(2, int(scale)) if is_hi else max(1, int(scale) - 1)
 
-        # Draw full-height cross-section cut line across the panoramic image
         if show_cross_section_lines:
             if is_hi:
                 draw.line([(x, 0), (x, img_h - tick_bar_h)], fill=line_col, width=line_w)
@@ -881,10 +875,9 @@ def render_panoramic_strip(
                 _draw_dashed_vline(draw, x, 0, img_h - tick_bar_h, fill=line_col, dash=8, gap=5, width=line_w)
             overlay.append(((x, 0.0), (x, float(img_h - tick_bar_h))))
         else:
-            draw.line([(x, img_h - tick_bar_h - 10), (x, img_h - tick_bar_h)], fill=(34, 197, 94), width=line_w)
-            draw.line([(x, 0), (x, max(12, tick_bar_h // 2))], fill=(0, 220, 255), width=line_w)
+            draw.line([(x, img_h - tick_bar_h - 10), (x, img_h - tick_bar_h)], fill=COLOR_BONE_HEIGHT, width=line_w)
+            draw.line([(x, 0), (x, max(12, tick_bar_h // 2))], fill=COLOR_WIDTH_W0, width=line_w)
 
-        # Top & bottom anchor ticks
         draw.line([(x, 0), (x, 10)], fill=line_col, width=max(2, line_w))
         draw.line([(x, img_h - tick_bar_h - 10), (x, img_h - tick_bar_h)], fill=line_col, width=max(2, line_w))
 
@@ -895,7 +888,7 @@ def render_panoramic_strip(
             draw.text(
                 (min(img_w - tw - 2, x + 3), img_h - tick_bar_h + 4),
                 lbl_str,
-                fill=(74, 222, 128) if is_hi else (226, 232, 240),
+                fill=COLOR_BONE_HEIGHT_TEXT if is_hi else (226, 232, 240),
                 font=font,
             )
             last_label_right = x + 3 + tw
