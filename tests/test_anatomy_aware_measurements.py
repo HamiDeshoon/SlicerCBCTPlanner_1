@@ -24,6 +24,8 @@ Plus WorkflowUIHelpers tests (workspace roles, single-active-slice gallery, RISE
 
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import math
 from pathlib import Path
 import sys
@@ -38,7 +40,6 @@ sys.path.insert(0, str(ROOT / "CBCTPlanner"))
 
 from CBCTPlannerLib.WorkflowUIHelpers import (
     GalleryNavigationState,
-    apply_risemar_validation_to_widget,
     apply_workspace_role,
     compute_volume_segmentation_cache_token,
 )
@@ -59,9 +60,7 @@ from CBCTPlannerLib.core.labels import (
     resolve_fdi_number,
 )
 from CBCTPlannerLib.core.measurements import (
-    IMPLANT_APICAL_SAFETY_MARGIN_MM,
     MeasurementEngine,
-    PROVENANCE_LABEL_DERIVED,
     WITHHELD_NO_ARCH,
     WITHHELD_NO_CANAL_SEG,
     WITHHELD_NO_MANDIBLE_SEG,
@@ -302,7 +301,9 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
         aff[2, 1], aff[2, 2] = s, c
 
         # Arch control points transformed by the same oblique affine
-        vox_pts = np.array([[40, 25, 25, 1], [30, 25, 25, 1], [20, 25, 25, 1], [10, 25, 25, 1]], dtype=np.float64)
+        vox_pts = np.array(
+            [[40, 25, 25, 1], [30, 25, 25, 1], [20, 25, 25, 1], [10, 25, 25, 1]], dtype=np.float64
+        )
         world_pts = (aff @ vox_pts.T).T[:, :3]
         occlusal_n = aff[:3, 2]
         arch = DentalArch(world_pts, jaw_type="lower", occlusal_normal=occlusal_n, ras_convention=True)
@@ -357,9 +358,9 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
 
         # Inject isolated stray voxels above crest AND a disconnected lateral bone island
         noisy = mask.copy()
-        noisy[38, 25, 24:27] = LOWER_JAW_ID           # isolated stray voxels 10 mm above crest
-        noisy[15:25, 11:15, 10:40] = LOWER_JAW_ID     # disconnected lingual island 6 mm away
-        noisy[15:25, 34:37, 10:40] = LOWER_JAW_ID     # disconnected buccal island 5 mm away
+        noisy[38, 25, 24:27] = LOWER_JAW_ID  # isolated stray voxels 10 mm above crest
+        noisy[15:25, 11:15, 10:40] = LOWER_JAW_ID  # disconnected lingual island 6 mm away
+        noisy[15:25, 34:37, 10:40] = LOWER_JAW_ID  # disconnected buccal island 5 mm away
 
         eng_noisy = self._build_engine(noisy, img)
         meas_noisy, cs_noisy = eng_noisy.measure_at_arc_mm("lower", 15.0, fdi_hint="46")
@@ -566,7 +567,10 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
 
         # Implant suggestion in engine == suggest_implant_dimensions == rendered overlay text!
         exp_d, exp_l, _ = suggest_implant_dimensions(
-            meas_gal.crest_width_mm, meas_gal.mid_root_width_mm, meas_gal.bone_height_mm, meas_gal.mesiodistal_space_mm
+            meas_gal.crest_width_mm,
+            meas_gal.mid_root_width_mm,
+            meas_gal.bone_height_mm,
+            meas_gal.mesiodistal_space_mm,
         )
         self.assertEqual(meas_gal.suggested_diameter_mm, exp_d)
         self.assertEqual(meas_gal.suggested_length_mm, exp_l)
@@ -595,6 +599,7 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
         class _MockObj:
             def __init__(self, mtime: int):
                 self._mtime = mtime
+
             def GetMTime(self) -> int:
                 return self._mtime
 
@@ -602,6 +607,7 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
             def __init__(self, mtime: int, n: int):
                 super().__init__(mtime)
                 self._n = n
+
             def GetNumberOfSegments(self) -> int:
                 return self._n
 
@@ -611,12 +617,16 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
                 self._mtime = mtime
                 self._seg = seg
                 self._t = None
+
             def GetID(self) -> str:
                 return self._id
+
             def GetMTime(self) -> int:
                 return self._mtime
+
             def GetSegmentation(self):
                 return self._seg
+
             def GetParentTransformNode(self):
                 return self._t
 
@@ -657,9 +667,7 @@ class TestCrossSectionEntryPoints(unittest.TestCase):
     """Regression tests for the jaw-name bug that blanked the gallery, print and film overlays."""
 
     def _engine(self, jaw: str = "lower"):
-        mask, img, arch = (
-            _make_mandible_ring_phantom() if jaw == "lower" else _make_maxilla_ring_phantom()
-        )
+        mask, img, arch = _make_mandible_ring_phantom() if jaw == "lower" else _make_maxilla_ring_phantom()
         spacing = 0.5
         affine = np.diag([spacing, spacing, spacing, 1.0])
         vol = CBCTVolume(img, (spacing, spacing, spacing), (0.0, 0.0, 0.0), np.eye(3), affine)
@@ -835,12 +843,14 @@ class TestWorkflowUIHelpers(unittest.TestCase):
             def __init__(self):
                 self.collapsed = True
                 self.visible = False
+
             def setVisible(self, v: bool):
                 self.visible = v
 
         class _Lbl:
             def __init__(self):
                 self.text = ""
+
             def setText(self, t: str):
                 self.text = t
 
@@ -858,7 +868,12 @@ class TestWorkflowUIHelpers(unittest.TestCase):
             advancedStep5Box=_Box(),
             globalStatusLabel=_Lbl(),
         )
-        for role in ("Radiologist Workspace", "Implant & Surgical Dentist", "Ortho & Craniofacial", "All Clinical Tools (Full Suite)"):
+        for role in (
+            "Radiologist Workspace",
+            "Implant & Surgical Dentist",
+            "Ortho & Craniofacial",
+            "All Clinical Tools (Full Suite)",
+        ):
             apply_workspace_role(widget, role)
             self.assertEqual(widget.volumeSelector, "VOL_NODE_KEEP")
             self.assertEqual(widget.segmentationSelector, "SEG_NODE_KEEP")

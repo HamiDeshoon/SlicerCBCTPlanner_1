@@ -225,6 +225,7 @@ class PrintLayoutEngine:
                 arch = engine._arch_for_jaw(is_mandible) if hasattr(engine, "_arch_for_jaw") else None
                 if arch is not None:
                     from .core.arch_detector import compute_fdi_arc_positions_mm
+
                     jaw_key = "lower" if is_mandible else "upper"
                     site_map = compute_fdi_arc_positions_mm(
                         total_arc_length_mm=float(arch.total_arc_length),
@@ -256,7 +257,9 @@ class PrintLayoutEngine:
                     )
                 pil_tile = None
                 if cs is not None:
-                    render = render_cross_section(cs, meas, scale=3, show_masks=False, show_implant_guides=True)
+                    render = render_cross_section(
+                        cs, meas, scale=3, show_masks=False, show_implant_guides=True
+                    )
                     if render.available and render.image is not None:
                         pil_tile = render.image
                         data_uri = _image_to_data_uri(pil_tile)
@@ -298,7 +301,8 @@ class PrintLayoutEngine:
                 all_specs.append(spec)
 
             hi_indices = [
-                i for i, s in enumerate(specs)
+                i
+                for i, s in enumerate(specs)
                 if (int(s.fdi) in missing_fdis_set or abs(float(s.offset_mm)) < 0.05)
             ]
             pano_uri = pano_b64 or self._pano_strip_uri(
@@ -533,7 +537,9 @@ class PrintLayoutEngine:
         joined = '<div class="print-page" style="page-break-after: always;">' + bodies[0] + "</div>"
         for body in bodies[1:]:
             joined += '<div class="print-page" style="page-break-before: always;">' + body + "</div>"
-        return "<!DOCTYPE html>\n<html lang=\"en\">\n<head>" + head + "</head><body>" + joined + "</body></html>"
+        return (
+            '<!DOCTYPE html>\n<html lang="en">\n<head>' + head + "</head><body>" + joined + "</body></html>"
+        )
 
     def _compose_page_image(
         self, record: dict, *, patient_name: str, page_number: int, total_pages: int
@@ -555,7 +561,9 @@ class PrintLayoutEngine:
         font_disc = _load_font(15, bold=False)
 
         # Header band
-        draw.text((margin, 34), "CBCT Dental Planner  |  8x10\" Clinical Film", fill=(56, 189, 248), font=font_title)
+        draw.text(
+            (margin, 34), 'CBCT Dental Planner  |  8x10" Clinical Film', fill=(56, 189, 248), font=font_title
+        )
         meta_line = (
             f"Quadrant {record['quadrant']} ({record['jaw_label']})   |   Teeth: "
             + ", ".join(f"#{fdi}" for fdi in record["fdis"])
@@ -568,7 +576,12 @@ class PrintLayoutEngine:
         pano_top = 136
         pano_h = 580
         pano_w = page_w - 2 * margin
-        draw.rectangle([(margin, pano_top), (margin + pano_w, pano_top + pano_h)], fill=(2, 6, 23), outline=(51, 65, 85), width=2)
+        draw.rectangle(
+            [(margin, pano_top), (margin + pano_w, pano_top + pano_h)],
+            fill=(2, 6, 23),
+            outline=(51, 65, 85),
+            width=2,
+        )
         pano = _data_uri_to_image(record["pano_b64"])
         if pano is not None:
             _paste_contain(page, pano, (margin + 4, pano_top + 4, pano_w - 8, pano_h - 8), bg=(2, 6, 23))
@@ -597,16 +610,27 @@ class PrintLayoutEngine:
             is_center = abs(float(spec.offset_mm)) < 0.05
             border_col = (56, 189, 248) if is_center else (51, 65, 85)
             border_w = 3 if is_center else 1
-            draw.rectangle([(x, y), (x + cell_w, y + cell_h)], fill=(2, 6, 23), outline=border_col, width=border_w)
+            draw.rectangle(
+                [(x, y), (x + cell_w, y + cell_h)], fill=(2, 6, 23), outline=border_col, width=border_w
+            )
 
             # Card header
             hdr_bg = (12, 74, 110) if is_center else (15, 23, 42)
             draw.rectangle([(x + 1, y + 1), (x + cell_w - 1, y + hdr_h)], fill=hdr_bg)
             hdr_txt = f"#{spec.fdi} S{spec.slice_index} ({spec.offset_mm:+.1f}mm)"
-            draw.text((x + 6, y + 5), hdr_txt, fill=(125, 211, 252) if not is_center else (255, 255, 255), font=font_card_hdr)
+            draw.text(
+                (x + 6, y + 5),
+                hdr_txt,
+                fill=(125, 211, 252) if not is_center else (255, 255, 255),
+                font=font_card_hdr,
+            )
 
             # Aspect-ratio-preserving cross-section image
-            image = spec._pil_image if getattr(spec, '_pil_image', None) is not None else _data_uri_to_image(spec.image_data_uri)
+            image = (
+                spec._pil_image
+                if getattr(spec, "_pil_image", None) is not None
+                else _data_uri_to_image(spec.image_data_uri)
+            )
             if image is not None:
                 _paste_contain(page, image, (x + 2, y + hdr_h + 2, cell_w - 4, img_box_h), bg=(2, 6, 23))
 
@@ -621,21 +645,41 @@ class PrintLayoutEngine:
             if badge:
                 draw.text((x + 6, fy + 20), f"W3:{w3_txt} [{badge}]", fill=(251, 191, 36), font=font_card_ftr)
             else:
-                ian_part = f" IAN:{spec.nerve_dist_mm:.1f}" if spec.nerve_dist_mm is not None else f" W5:{w5_txt}"
-                draw.text((x + 6, fy + 20), f"W3:{w3_txt}{ian_part}", fill=(148, 163, 184), font=font_card_ftr)
+                ian_part = (
+                    f" IAN:{spec.nerve_dist_mm:.1f}" if spec.nerve_dist_mm is not None else f" W5:{w5_txt}"
+                )
+                draw.text(
+                    (x + 6, fy + 20), f"W3:{w3_txt}{ian_part}", fill=(148, 163, 184), font=font_card_ftr
+                )
 
         # Bottom clinical key + 3D VR panel
         vr_w = 780
         key_w = page_w - 2 * margin - vr_w - 20
-        draw.rectangle([(margin, key_top), (margin + key_w, key_top + key_h)], fill=(2, 6, 23), outline=(51, 65, 85), width=2)
-        draw.text((margin + 18, key_top + 14), "Measurement Key & Overlay Legend", fill=(56, 189, 248), font=font_key_b)
+        draw.rectangle(
+            [(margin, key_top), (margin + key_w, key_top + key_h)],
+            fill=(2, 6, 23),
+            outline=(51, 65, 85),
+            width=2,
+        )
+        draw.text(
+            (margin + 18, key_top + 14),
+            "Measurement Key & Overlay Legend",
+            fill=(56, 189, 248),
+            font=font_key_b,
+        )
 
         legend_items = [
-            ((34, 197, 94), "H / Root (mm): vertical green caliper from entry point to root apex / canal / sinus"),
+            (
+                (34, 197, 94),
+                "H / Root (mm): vertical green caliper from entry point to root apex / canal / sinus",
+            ),
             ((0, 220, 255), "W0 Entry (mm): cyan crestal width + yellow bullseye osteotomy entry target"),
             ((255, 180, 0), "W3 / W5 (mm): gold (3 mm) & orange (5 mm) buccolingual ridge widths"),
             ((56, 189, 248), "Impl Guide: dashed safe fixture envelope, prosthetic axis & ridge angle"),
-            ((255, 60, 60), "IAN / SINUS / 2mm SAFE: red nerve ring, magenta sinus floor & 2 mm safety barrier"),
+            (
+                (255, 60, 60),
+                "IAN / SINUS / 2mm SAFE: red nerve ring, magenta sinus floor & 2 mm safety barrier",
+            ),
         ]
         ly = key_top + 54
         for rgb_col, desc in legend_items:
@@ -644,7 +688,9 @@ class PrintLayoutEngine:
             ly += 40
 
         vr_x = margin + key_w + 20
-        draw.rectangle([(vr_x, key_top), (vr_x + vr_w, key_top + key_h)], fill=(2, 6, 23), outline=(51, 65, 85), width=2)
+        draw.rectangle(
+            [(vr_x, key_top), (vr_x + vr_w, key_top + key_h)], fill=(2, 6, 23), outline=(51, 65, 85), width=2
+        )
         vr = _data_uri_to_image(record["vr_b64"])
         if vr is not None:
             _paste_contain(page, vr, (vr_x + 4, key_top + 4, vr_w - 8, key_h - 8), bg=(2, 6, 23))
@@ -652,7 +698,9 @@ class PrintLayoutEngine:
         # Footer disclaimer & page number
         draw.line([(margin, footer_top), (page_w - margin, footer_top)], fill=(51, 65, 85), width=1)
         for line_idx, line_txt in enumerate(textwrap.wrap(CLINICAL_DISCLAIMER_TEXT, width=130)[:2]):
-            draw.text((margin, footer_top + 14 + line_idx * 22), line_txt, fill=(148, 163, 184), font=font_disc)
+            draw.text(
+                (margin, footer_top + 14 + line_idx * 22), line_txt, fill=(148, 163, 184), font=font_disc
+            )
         draw.text(
             (page_w - margin - 180, footer_top + 22),
             f"Page {page_number} of {total_pages}",

@@ -23,8 +23,6 @@ from .arch_detector import (
     project_point_to_polyline_arc_mm,
 )
 from .labels import (
-    DENTALSEGMENTATOR_LOWER_TEETH_ID,
-    DENTALSEGMENTATOR_UPPER_TEETH_ID,
     get_fdi_quadrant,
     get_ipsilateral_canal_ids,
     get_ipsilateral_sinus_ids,
@@ -57,7 +55,7 @@ QUALITY_UNAVAILABLE = "unavailable"
 STANDARD_IMPLANT_DIAMETERS_MM: Tuple[float, ...] = (3.0, 3.5, 3.75, 4.0, 4.3, 4.5, 5.0)
 STANDARD_IMPLANT_LENGTHS_MM: Tuple[float, ...] = (6.0, 8.0, 10.0, 11.5, 13.0)
 IMPLANT_BUCCOLINGUAL_MARGIN_MM: float = 3.0  # 1.5 mm buccal + 1.5 mm lingual
-IMPLANT_MESIODISTAL_MARGIN_MM: float = 3.0   # 1.5 mm mesial + 1.5 mm distal
+IMPLANT_MESIODISTAL_MARGIN_MM: float = 3.0  # 1.5 mm mesial + 1.5 mm distal
 IMPLANT_APICAL_SAFETY_MARGIN_MM: float = 2.0
 
 logger = logging.getLogger("CBCTPlanner.measurements")
@@ -150,7 +148,11 @@ def _uv_to_world(
     P: np.ndarray, N: np.ndarray, B: np.ndarray, u: float, v: float
 ) -> Tuple[float, float, float]:
     """Map 2D cross-section `(u, v)` in mm to 3D physical RAS coordinates."""
-    pt = np.asarray(P, dtype=np.float64) + float(u) * np.asarray(N, dtype=np.float64) + float(v) * np.asarray(B, dtype=np.float64)
+    pt = (
+        np.asarray(P, dtype=np.float64)
+        + float(u) * np.asarray(N, dtype=np.float64)
+        + float(v) * np.asarray(B, dtype=np.float64)
+    )
     return (float(pt[0]), float(pt[1]), float(pt[2]))
 
 
@@ -174,12 +176,8 @@ def _ridge_envelope_mask(
     if tooth_id is not None:
         v_jaw = v_coords[np.flatnonzero(jaw_mask.any(axis=1))]
         occlusal_v = float(np.max(v_jaw)) if is_mandible else float(np.min(v_jaw))
-        in_socket = (mask_cs == int(tooth_id)) & (
-            np.abs(u_coords)[None, :] <= ENVELOPE_HALF_WIDTH_MM
-        )
-        occlusal_side = (
-            v_coords[:, None] <= occlusal_v if is_mandible else v_coords[:, None] >= occlusal_v
-        )
+        in_socket = (mask_cs == int(tooth_id)) & (np.abs(u_coords)[None, :] <= ENVELOPE_HALF_WIDTH_MM)
+        occlusal_side = v_coords[:, None] <= occlusal_v if is_mandible else v_coords[:, None] >= occlusal_v
         envelope |= in_socket & occlusal_side
     return envelope
 
@@ -383,7 +381,9 @@ class CrossSectionData:
     crest_uv: Optional[Tuple[float, float]] = None
     basal_uv: Optional[Tuple[float, float]] = None
     crest_profile_uv: Optional[List[Tuple[float, float]]] = None
-    width_endpoints_uv: Dict[float, Tuple[Tuple[float, float], Tuple[float, float]]] = field(default_factory=dict)
+    width_endpoints_uv: Dict[float, Tuple[Tuple[float, float], Tuple[float, float]]] = field(
+        default_factory=dict
+    )
     root_start_uv: Optional[Tuple[float, float]] = None
     root_apex_uv: Optional[Tuple[float, float]] = None
     vital_boundary_uv: Optional[Tuple[float, float]] = None
@@ -442,7 +442,10 @@ class MeasurementEngine:
         self._cropped_dt_cache: Dict[int, Tuple[np.ndarray, slice, slice, slice]] = {}
         self._tooth_span_cache: Dict[Tuple[str, int], Optional[Tuple[float, float]]] = {}
         self._site_cache: Dict[Tuple[str, float], Optional[ImplantSiteMeasurement]] = {}
-        self._arc_cache: Dict[Tuple[str, float, Optional[str]], Tuple[Optional[ImplantSiteMeasurement], Optional[CrossSectionData]]] = {}
+        self._arc_cache: Dict[
+            Tuple[str, float, Optional[str]],
+            Tuple[Optional[ImplantSiteMeasurement], Optional[CrossSectionData]],
+        ] = {}
         self._present_labels_cache: Optional[set] = None
         # Reason recorded by the most recent site/cross-section measurement (None when all metrics measured).
         self.last_withheld_reason: Optional[str] = None
@@ -682,9 +685,7 @@ class MeasurementEngine:
         ]
         return int(np.count_nonzero(sub == tooth_lbl)) < 25
 
-    def expand_missing_edentulous_span(
-        self, requested_fdis: List[int]
-    ) -> Tuple[List[int], List[int]]:
+    def expand_missing_edentulous_span(self, requested_fdis: List[int]) -> Tuple[List[int], List[int]]:
         """Smartly expand requested tooth site(s) to include all contiguous missing/empty teeth."""
         if not requested_fdis:
             return [], []
@@ -724,7 +725,9 @@ class MeasurementEngine:
         cache_key = (fdi_str, round(float(offset_mm), 4))
         if cache_key in self._site_cache:
             cached = self._site_cache[cache_key]
-            self.last_withheld_reason = cached.withheld_reason if cached is not None else self.last_withheld_reason
+            self.last_withheld_reason = (
+                cached.withheld_reason if cached is not None else self.last_withheld_reason
+            )
             return cached
 
         info = get_tooth_label(fdi_str)
@@ -782,7 +785,13 @@ class MeasurementEngine:
         quadrant: int,
         is_mandible: bool,
         crest_uv: Optional[Tuple[float, float]],
-    ) -> Tuple[Optional[int], Optional[np.ndarray], Optional[Tuple[float, float]], Optional[List[Tuple[float, float]]], Optional[str]]:
+    ) -> Tuple[
+        Optional[int],
+        Optional[np.ndarray],
+        Optional[Tuple[float, float]],
+        Optional[List[Tuple[float, float]]],
+        Optional[str],
+    ]:
         """Select the ipsilateral canal/sinus ONLY if present in the local 3D/2D planning region.
 
         Returns `(vital_id, local_vital_mask_2d, centroid_uv, contour_uv, unavailable_reason)`.
@@ -847,7 +856,13 @@ class MeasurementEngine:
             if is_mandible:
                 # Boundary pixels of the canal cross-section
                 padded = np.pad(local_2d, 1, mode="constant", constant_values=False)
-                interior = padded[1:-1, 1:-1] & padded[:-2, 1:-1] & padded[2:, 1:-1] & padded[1:-1, :-2] & padded[1:-1, 2:]
+                interior = (
+                    padded[1:-1, 1:-1]
+                    & padded[:-2, 1:-1]
+                    & padded[2:, 1:-1]
+                    & padded[1:-1, :-2]
+                    & padded[1:-1, 2:]
+                )
                 edge = local_2d & (~interior)
                 er, ec = np.where(edge)
                 if er.size > 0:
@@ -892,7 +907,13 @@ class MeasurementEngine:
         u_coords: np.ndarray,
         v_coords: np.ndarray,
         is_mandible: bool,
-    ) -> Tuple[Optional[Tuple[float, float]], Tuple[float, float], Tuple[float, float], Optional[float], List[Tuple[float, float]]]:
+    ) -> Tuple[
+        Optional[Tuple[float, float]],
+        Tuple[float, float],
+        Tuple[float, float],
+        Optional[float],
+        List[Tuple[float, float]],
+    ]:
         """Detect local alveolar crest `(u_crest, v_crest)` and ridge-aligned unit axes `(d_apical, d_bl)`.
 
         Algorithm:
@@ -1013,8 +1034,12 @@ class MeasurementEngine:
             v_crest = peak_val
             # Subvoxel parabolic refinement for isolated interior peak
             if 0 < best_idx < len(smooth_v) - 1:
-                y0, y1, y2 = float(smooth_v[best_idx - 1]), float(smooth_v[best_idx]), float(smooth_v[best_idx + 1])
-                denom = (y0 - 2.0 * y1 + y2)
+                y0, y1, y2 = (
+                    float(smooth_v[best_idx - 1]),
+                    float(smooth_v[best_idx]),
+                    float(smooth_v[best_idx + 1]),
+                )
+                denom = y0 - 2.0 * y1 + y2
                 if abs(denom) > 1e-6:
                     delta = float(np.clip(0.5 * (y0 - y2) / denom, -0.5, 0.5))
                     u_crest = float(surf_u[best_idx] + delta * du)
@@ -1081,7 +1106,9 @@ class MeasurementEngine:
         crest_uv: Optional[Tuple[float, float]],
         d_apical: Tuple[float, float],
         local_vital_mask_2d: Optional[np.ndarray] = None,
-    ) -> Tuple[Optional[float], Optional[float], Optional[Tuple[float, float]], Optional[Tuple[float, float]], str]:
+    ) -> Tuple[
+        Optional[float], Optional[float], Optional[Tuple[float, float]], Optional[Tuple[float, float]], str
+    ]:
         """Compute available bone height along `d_apical` from `crest_uv` to vital or basal cortical boundary.
 
         Returns `(bone_height_mm, vital_dist_mm, basal_uv, vital_boundary_uv, provenance)`.
@@ -1191,7 +1218,13 @@ class MeasurementEngine:
                     PROVENANCE_INTERPOLATED,
                 )
 
-        return round(full_h, 2), (round(vital_dist, 2) if vital_dist is not None else None), basal_uv, vital_boundary_uv, provenance
+        return (
+            round(full_h, 2),
+            (round(vital_dist, 2) if vital_dist is not None else None),
+            basal_uv,
+            vital_boundary_uv,
+            provenance,
+        )
 
     # ------------------------------------------------------------------
     # Anatomy-Aware Buccal & Lingual Cortical Boundary Detection (Part 3.4)
@@ -1210,7 +1243,9 @@ class MeasurementEngine:
         crest_uv: Optional[Tuple[float, float]] = None,
         d_apical: Optional[Tuple[float, float]] = None,
         d_bl: Optional[Tuple[float, float]] = None,
-    ) -> Tuple[Dict[float, Tuple[float, float]], Dict[float, Tuple[Tuple[float, float], Tuple[float, float]]]]:
+    ) -> Tuple[
+        Dict[float, Tuple[float, float]], Dict[float, Tuple[Tuple[float, float], Tuple[float, float]]]
+    ]:
         """Detect buccal and lingual cortical boundaries independently on the primary ridge component.
 
         Samples along the local buccolingual caliper `d_bl` perpendicular to the ridge axis `d_apical`,
@@ -1245,6 +1280,7 @@ class MeasurementEngine:
 
         try:
             from scipy import ndimage  # type: ignore
+
             has_scipy = True
         except ImportError:
             has_scipy = False
@@ -1330,10 +1366,7 @@ class MeasurementEngine:
             pt_r = (cx + s_right * bu, cy + s_right * bv)
 
             # Reject if either cortical boundary touches the cross-section lateral border
-            if (
-                pt_l[0] <= u_min + _CS_BORDER_TOL_MM
-                or pt_r[0] >= u_max - _CS_BORDER_TOL_MM
-            ):
+            if pt_l[0] <= u_min + _CS_BORDER_TOL_MM or pt_r[0] >= u_max - _CS_BORDER_TOL_MM:
                 continue
 
             segments[float(depth)] = (float(pt_l[0]), float(pt_r[0]))
@@ -1380,7 +1413,9 @@ class MeasurementEngine:
         # Anchor root extent start at crest level if tooth passes through crest, else coronal tooth reference
         if crest_uv is not None:
             v_crest = float(crest_uv[1])
-            if (is_mandible and v_crest > apex_uv[1] + 0.5) or ((not is_mandible) and v_crest < apex_uv[1] - 0.5):
+            if (is_mandible and v_crest > apex_uv[1] + 0.5) or (
+                (not is_mandible) and v_crest < apex_uv[1] - 0.5
+            ):
                 c_row = int(np.argmin(np.abs(v_coords - v_crest)))
                 c_cols = cols[np.abs(rows - c_row) <= 2]
                 start_u = float(np.mean(u_coords[c_cols])) if c_cols.size > 0 else apex_uv[0]
@@ -1497,7 +1532,9 @@ class MeasurementEngine:
             h_end_w = _uv_to_world(P, N, B, basal_uv[0], basal_uv[1])
             exact_h = round(float(np.linalg.norm(np.asarray(h_end_w) - np.asarray(h_start_w))), 2)
             bone_height_mm = exact_h
-            src_labels = (jaw_id, vital_id) if (vital_id is not None and vital_boundary_uv is not None) else (jaw_id,)
+            src_labels = (
+                (jaw_id, vital_id) if (vital_id is not None and vital_boundary_uv is not None) else (jaw_id,)
+            )
             records["available_bone_height"] = MeasurementRecord(
                 measurement_type="available_bone_height",
                 value_mm=exact_h,
@@ -1621,10 +1658,17 @@ class MeasurementEngine:
         vital_clearance_mm: Optional[float] = None
         if vital_dist_mm is not None and suggested_len is not None and crest_uv is not None:
             vital_clearance_mm = round(float(max(0.0, vital_dist_mm - suggested_len)), 2)
-            imp_tip_uv = (crest_uv[0] + suggested_len * d_apical[0], crest_uv[1] + suggested_len * d_apical[1])
-            v_end_uv = vital_boundary_uv if vital_boundary_uv is not None else (
-                crest_uv[0] + vital_dist_mm * d_apical[0],
-                crest_uv[1] + vital_dist_mm * d_apical[1],
+            imp_tip_uv = (
+                crest_uv[0] + suggested_len * d_apical[0],
+                crest_uv[1] + suggested_len * d_apical[1],
+            )
+            v_end_uv = (
+                vital_boundary_uv
+                if vital_boundary_uv is not None
+                else (
+                    crest_uv[0] + vital_dist_mm * d_apical[0],
+                    crest_uv[1] + vital_dist_mm * d_apical[1],
+                )
             )
             vc_sw = _uv_to_world(P, N, B, imp_tip_uv[0], imp_tip_uv[1])
             vc_ew = _uv_to_world(P, N, B, v_end_uv[0], v_end_uv[1])
@@ -1637,7 +1681,9 @@ class MeasurementEngine:
                 end_uv_mm=v_end_uv,
                 source_labels=(int(vital_id),) if vital_id is not None else (),
                 provenance=height_prov,
-                quality=QUALITY_VALID if vital_clearance_mm >= IMPLANT_APICAL_SAFETY_MARGIN_MM else QUALITY_WARNING,
+                quality=QUALITY_VALID
+                if vital_clearance_mm >= IMPLANT_APICAL_SAFETY_MARGIN_MM
+                else QUALITY_WARNING,
             )
         elif vital_unavail:
             records["vital_clearance"] = MeasurementRecord(
@@ -1654,8 +1700,10 @@ class MeasurementEngine:
         cs.buccal_plate_mm = buccal_plate_w
         cs.lingual_plate_mm = lingual_plate_w
 
-        overall_prov = height_prov if bone_height_mm is not None else (
-            PROVENANCE_LABEL_DERIVED if crest_w is not None else PROVENANCE_UNAVAILABLE
+        overall_prov = (
+            height_prov
+            if bone_height_mm is not None
+            else (PROVENANCE_LABEL_DERIVED if crest_w is not None else PROVENANCE_UNAVAILABLE)
         )
         if is_approx_site and overall_prov == PROVENANCE_LABEL_DERIVED:
             overall_quality = QUALITY_ESTIMATED
@@ -1759,9 +1807,7 @@ class MeasurementEngine:
             self.last_withheld_reason = WITHHELD_NO_ARCH
             return None, None
         frame = arch.get_frame_at_mm(float(arc_mm))
-        cs = self._resample_frame_data(
-            (frame.point, frame.tangent, frame.normal, frame.binormal)
-        )
+        cs = self._resample_frame_data((frame.point, frame.tangent, frame.normal, frame.binormal))
         is_mandible = jaw_key == "lower"
         cs.is_mandible = is_mandible
 

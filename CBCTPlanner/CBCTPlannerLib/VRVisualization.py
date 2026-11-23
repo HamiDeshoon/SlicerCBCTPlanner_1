@@ -93,9 +93,7 @@ class VRVisualizationLogic:
             return [ids.GetValue(i) for i in range(ids.GetNumberOfValues())]
         except Exception:
             if hasattr(segmentation, "GetNumberOfSegments") and hasattr(segmentation, "GetNthSegmentID"):
-                return [
-                    segmentation.GetNthSegmentID(i) for i in range(segmentation.GetNumberOfSegments())
-                ]
+                return [segmentation.GetNthSegmentID(i) for i in range(segmentation.GetNumberOfSegments())]
             return []
 
     @staticmethod
@@ -224,7 +222,12 @@ class VRVisualizationLogic:
                             opacity = tooth_op
                         elif "canal" in name_l or "nerve" in name_l:
                             opacity = canal_op
-                        elif "maxilla" in name_l or "mandible" in name_l or "jaw" in name_l or "skull" in name_l:
+                        elif (
+                            "maxilla" in name_l
+                            or "mandible" in name_l
+                            or "jaw" in name_l
+                            or "skull" in name_l
+                        ):
                             opacity = jaw_op
                         else:
                             opacity = default_op
@@ -243,9 +246,7 @@ class VRVisualizationLogic:
                     if hasattr(displayNode, "SetSegmentOpacity3D"):
                         displayNode.SetSegmentOpacity3D(seg_id, float(opacity))
                     if hasattr(displayNode, "SetSegmentOpacity2DFill"):
-                        displayNode.SetSegmentOpacity2DFill(
-                            seg_id, 0.18 if opacity < 0.5 else 0.30
-                        )
+                        displayNode.SetSegmentOpacity2DFill(seg_id, 0.18 if opacity < 0.5 else 0.30)
                     if hasattr(displayNode, "SetSegmentOpacity2DOutline"):
                         displayNode.SetSegmentOpacity2DOutline(seg_id, 0.95)
 
@@ -445,16 +446,12 @@ class VRVisualizationLogic:
                 if xs[index] <= xs[index - 1]:
                     xs[index] = xs[index - 1] + 1.0
             opacities = (
-                [0.0, 0.0, 0.025, 0.14, 0.78, 1.0]
-                if vivid_roots_mode
-                else [0.0, 0.0, 0.045, 0.28, 0.62, 1.0]
+                [0.0, 0.0, 0.025, 0.14, 0.78, 1.0] if vivid_roots_mode else [0.0, 0.0, 0.045, 0.28, 0.62, 1.0]
             )
         else:
             xs = [-400.0, 80.0, 320.0, 650.0, 1200.0, 2600.0]
             opacities = (
-                [0.0, 0.0, 0.025, 0.14, 0.80, 1.0]
-                if vivid_roots_mode
-                else [0.0, 0.0, 0.05, 0.32, 0.7, 1.0]
+                [0.0, 0.0, 0.025, 0.14, 0.80, 1.0] if vivid_roots_mode else [0.0, 0.0, 0.05, 0.32, 0.7, 1.0]
             )
         colors = [
             (0.0, 0.0, 0.0),

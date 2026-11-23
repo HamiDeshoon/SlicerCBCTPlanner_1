@@ -164,21 +164,15 @@ _VIVID_TOOTH_COLORS_BY_QUADRANT: Dict[int, Dict[int, Tuple[float, float, float]]
 }
 
 LABELS_BY_ID: Dict[int, AnatomicalLabel] = {
-    LOWER_JAW_ID: AnatomicalLabel(
-        LOWER_JAW_ID, "Lower Jawbone (Mandible)", "jaw", color=(0.83, 0.63, 0.90)
-    ),
-    UPPER_JAW_ID: AnatomicalLabel(
-        UPPER_JAW_ID, "Upper Jawbone (Maxilla)", "jaw", color=(0.89, 0.87, 0.56)
-    ),
+    LOWER_JAW_ID: AnatomicalLabel(LOWER_JAW_ID, "Lower Jawbone (Mandible)", "jaw", color=(0.83, 0.63, 0.90)),
+    UPPER_JAW_ID: AnatomicalLabel(UPPER_JAW_ID, "Upper Jawbone (Maxilla)", "jaw", color=(0.89, 0.87, 0.56)),
     LEFT_IAN_ID: AnatomicalLabel(
         LEFT_IAN_ID, "Left Inferior Alveolar Canal", "canal", color=(0.98, 0.24, 0.18)
     ),
     RIGHT_IAN_ID: AnatomicalLabel(
         RIGHT_IAN_ID, "Right Inferior Alveolar Canal", "canal", color=(1.00, 0.32, 0.16)
     ),
-    LEFT_SINUS_ID: AnatomicalLabel(
-        LEFT_SINUS_ID, "Left Maxillary Sinus", "sinus", color=(0.22, 0.74, 0.97)
-    ),
+    LEFT_SINUS_ID: AnatomicalLabel(LEFT_SINUS_ID, "Left Maxillary Sinus", "sinus", color=(0.22, 0.74, 0.97)),
     RIGHT_SINUS_ID: AnatomicalLabel(
         RIGHT_SINUS_ID, "Right Maxillary Sinus", "sinus", color=(0.18, 0.68, 0.94)
     ),
@@ -186,9 +180,7 @@ LABELS_BY_ID: Dict[int, AnatomicalLabel] = {
     BRIDGE_ID: AnatomicalLabel(BRIDGE_ID, "Bridge", "restoration", color=(0.30, 0.82, 0.95)),
     CROWN_ID: AnatomicalLabel(CROWN_ID, "Crown", "restoration", color=(0.40, 0.90, 0.95)),
     IMPLANT_ID: AnatomicalLabel(IMPLANT_ID, "Implant", "restoration", color=(0.20, 0.92, 0.55)),
-    LINGUAL_CANAL_ID: AnatomicalLabel(
-        LINGUAL_CANAL_ID, "Lingual Canal", "canal", color=(1.00, 0.45, 0.20)
-    ),
+    LINGUAL_CANAL_ID: AnatomicalLabel(LINGUAL_CANAL_ID, "Lingual Canal", "canal", color=(1.00, 0.45, 0.20)),
     LEFT_INCISIVE_CANAL_ID: AnatomicalLabel(
         LEFT_INCISIVE_CANAL_ID, "Left Incisive Canal", "canal", color=(1.00, 0.50, 0.25)
     ),
@@ -406,8 +398,7 @@ def resolve_combined_mask_scheme(
     the segmentation uses the canonical ToothFairy3 / multi-class numbering (`is_5class = False`).
     """
     has_multi_class_token = any(
-        (not is_5c and lbl > 0) or (lbl >= 11)
-        for lbl, _cat, is_5c, _prec in matched_records
+        (not is_5c and lbl > 0) or (lbl >= 11) for lbl, _cat, is_5c, _prec in matched_records
     )
     if has_multi_class_token:
         return False
@@ -510,6 +501,7 @@ def sort_teeth_anatomically(teeth_list: List[int]) -> List[int]:
         ordered.extend(int(fdi) for fdi in group if int(fdi) in teeth_set)
     return ordered
 
+
 RIGHT_SIDE_TEETH_IDS: List[int] = [tid for fdi, tid in FDI_TO_TOOTH_ID.items() if fdi[0] in ("1", "4")]
 LEFT_SIDE_TEETH_IDS: List[int] = [tid for fdi, tid in FDI_TO_TOOTH_ID.items() if fdi[0] in ("2", "3")]
 
@@ -600,7 +592,11 @@ def get_ipsilateral_canal_ids(fdi_or_quadrant: Any, is_5class: bool = False) -> 
 
     Never returns contralateral canal IDs or canal IDs for maxillary quadrants.
     """
-    q = int(fdi_or_quadrant) if isinstance(fdi_or_quadrant, int) and fdi_or_quadrant in (1, 2, 3, 4) else get_fdi_quadrant(fdi_or_quadrant)
+    q = (
+        int(fdi_or_quadrant)
+        if isinstance(fdi_or_quadrant, int) and fdi_or_quadrant in (1, 2, 3, 4)
+        else get_fdi_quadrant(fdi_or_quadrant)
+    )
     if q not in (3, 4):
         return []
     if is_5class:
@@ -613,7 +609,11 @@ def get_ipsilateral_sinus_ids(fdi_or_quadrant: Any, is_5class: bool = False) -> 
 
     Never returns contralateral sinus IDs or sinus IDs for mandibular quadrants.
     """
-    q = int(fdi_or_quadrant) if isinstance(fdi_or_quadrant, int) and fdi_or_quadrant in (1, 2, 3, 4) else get_fdi_quadrant(fdi_or_quadrant)
+    q = (
+        int(fdi_or_quadrant)
+        if isinstance(fdi_or_quadrant, int) and fdi_or_quadrant in (1, 2, 3, 4)
+        else get_fdi_quadrant(fdi_or_quadrant)
+    )
     if q not in (1, 2) or is_5class:
         return []
     return [RIGHT_SINUS_ID] if q == 1 else [LEFT_SINUS_ID]

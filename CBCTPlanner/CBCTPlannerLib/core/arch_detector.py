@@ -167,7 +167,12 @@ class ArchFrame:
 def validate_arch_frame(frame: ArchFrame, tol: float = 1e-5) -> Tuple[bool, List[str]]:
     """Validate that an ArchFrame is unit-normalized, mutually orthogonal, and finite."""
     issues: List[str] = []
-    for name, vec in (("point", frame.point), ("tangent", frame.tangent), ("normal", frame.normal), ("binormal", frame.binormal)):
+    for name, vec in (
+        ("point", frame.point),
+        ("tangent", frame.tangent),
+        ("normal", frame.normal),
+        ("binormal", frame.binormal),
+    ):
         arr = np.asarray(vec, dtype=np.float64)
         if arr.shape != (3,) or not np.all(np.isfinite(arr)):
             issues.append(f"{name} is non-finite or not 3D")
@@ -180,7 +185,11 @@ def validate_arch_frame(frame: ArchFrame, tol: float = 1e-5) -> Tuple[bool, List
         norm = float(np.linalg.norm(vec))
         if abs(norm - 1.0) > tol:
             issues.append(f"{name} is not unit length (norm={norm:.6f})")
-    for pair_name, dot_val in (("T.N", float(np.dot(T, N))), ("T.B", float(np.dot(T, B))), ("N.B", float(np.dot(N, B)))):
+    for pair_name, dot_val in (
+        ("T.N", float(np.dot(T, N))),
+        ("T.B", float(np.dot(T, B))),
+        ("N.B", float(np.dot(N, B))),
+    ):
         if abs(dot_val) > tol:
             issues.append(f"{pair_name} not orthogonal (dot={dot_val:.6f})")
     return len(issues) == 0, issues

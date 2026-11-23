@@ -1528,7 +1528,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         adtNativeRow2.addWidget(self.btnRunAutoCropROI)
         step7Layout.addRow("CLI-C, VFACE & Crop:", adtNativeRow2)
 
-        self.adtResultsLabel = qt.QLabel("AutomatedDentalTools ready — click ALI, ASO, CLI-C, VFACE, or AutoCrop3D above.")
+        self.adtResultsLabel = qt.QLabel(
+            "AutomatedDentalTools ready — click ALI, ASO, CLI-C, VFACE, or AutoCrop3D above."
+        )
         self.adtResultsLabel.setWordWrap(True)
         self.adtResultsLabel.setStyleSheet(
             "background-color: #0f172a; color: #e2e8f0; padding: 6px; border-radius: 4px; border: 1px solid #334155;"
@@ -1537,9 +1539,21 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         adtRow = qt.QHBoxLayout()
         self.adtToolCombo = qt.QComboBox()
-        for tool in ("ASO", "AMASSS", "ALI", "AReg", "AutoCrop3D", "BatchDentalSegmentator", "MRI2CBCT", "CLI-C", "VFACE"):
+        for tool in (
+            "ASO",
+            "AMASSS",
+            "ALI",
+            "AReg",
+            "AutoCrop3D",
+            "BatchDentalSegmentator",
+            "MRI2CBCT",
+            "CLI-C",
+            "VFACE",
+        ):
             self.adtToolCombo.addItem(tool, tool)
-        self.adtToolCombo.setToolTip("Installed SlicerAutomatedDentalTools module to launch (or run built-in native engine).")
+        self.adtToolCombo.setToolTip(
+            "Installed SlicerAutomatedDentalTools module to launch (or run built-in native engine)."
+        )
         self.btnLaunchAdtTool = qt.QPushButton("Launch / Run Tool")
         self.btnLaunchAdtTool.setToolTip(
             "Launch the selected SlicerAutomatedDentalTools module if installed, or execute the built-in native algorithm."
@@ -2143,9 +2157,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         if self.logic.flip_orientation_axis(volNode, segNode, axis):
             self.globalStatusLabel.setText(f"Manual {axis} flip applied")
-            self.step1HintLabel.setText(
-                f"Manual {axis} flip applied and slice views refreshed."
-            )
+            self.step1HintLabel.setText(f"Manual {axis} flip applied and slice views refreshed.")
             if slicer:
                 slicer.util.showStatusMessage(f"Applied {axis} flip to volume and slice views", 4000)
         else:
@@ -2539,7 +2551,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
         if segNode is not None and self.logic is not None:
             self.logic.vr.set_jawbone_3d_opacity(segNode, jaw_opacity=float(val), tooth_opacity=1.0)
-            self.globalStatusLabel.setText(f"Jawbone 3D Opacity: {float(val) * 100:.0f}% (Teeth & Roots: 100%)")
+            self.globalStatusLabel.setText(
+                f"Jawbone 3D Opacity: {float(val) * 100:.0f}% (Teeth & Roots: 100%)"
+            )
 
     def onSurfaceSmoothingSliderChanged(self, _val: float) -> None:
         segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
@@ -3598,8 +3612,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         self._showPrintPreviewDialog(html_file, pdf_file, slices_data, quadrant, sorted(selected_fdis))
         self.globalStatusLabel.setText(
-            f"Saved print files to {out_dir}: {pdf_file.name}"
-            + (f", {png_file.name}" if png_file else "")
+            f"Saved print files to {out_dir}: {pdf_file.name}" + (f", {png_file.name}" if png_file else "")
         )
         if slicer:
             slicer.util.showStatusMessage(f"Generated 8×10″ Print Layout: {pdf_file}", 5000)
@@ -3802,13 +3815,17 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Update the Step 5 Radiologist/Dentist clinical callout card for `fdi`."""
         if getattr(self, "siteClinicalCalloutLabel", None) is None:
             return
-        target_fdi = fdi or self.activeToothFDI or (next(iter(self.selectedTeeth)) if self.selectedTeeth else None)
+        target_fdi = (
+            fdi or self.activeToothFDI or (next(iter(self.selectedTeeth)) if self.selectedTeeth else None)
+        )
         if not target_fdi:
             return
         row = self.treatmentPlanByFDI.get(int(target_fdi))
         if row is None and self.logic is not None and hasattr(self, "volumeSelector"):
             volNode = self.volumeSelector.currentNode()
-            segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+            segNode = (
+                self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+            )
             if volNode is not None:
                 row = self.logic.analyze_single_tooth(int(target_fdi), volNode, segmentationNode=segNode)
                 self.treatmentPlanByFDI[int(target_fdi)] = row
@@ -4060,9 +4077,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             card = qt.QFrame()
             card.setFrameShape(qt.QFrame.StyledPanel)
             border_css = "2px solid #38bdf8" if is_center else "1px solid #1e293b"
-            card.setStyleSheet(
-                f"background-color: #020617; border: {border_css}; border-radius: 5px;"
-            )
+            card.setStyleSheet(f"background-color: #020617; border: {border_css}; border-radius: 5px;")
             tip_parts = [f"Slice {idx + 1} ({off:+.1f} mm)"]
             if fdi_val is not None:
                 tip_parts[0] = f"FDI #{fdi_val} - " + tip_parts[0]
@@ -4163,7 +4178,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
         if not volNode or not segNode or not self.logic:
             if slicer:
-                slicer.util.warningDisplay("Select both a CBCT volume and a ToothFairy3 segmentation for CLI-C.")
+                slicer.util.warningDisplay(
+                    "Select both a CBCT volume and a ToothFairy3 segmentation for CLI-C."
+                )
             return
         items = self.logic.run_native_clic_impaction_analysis(volNode, segNode)
         if not items:
@@ -4923,7 +4940,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 bad_axes = inverted_axes_from_report(report)
                 if auto_fix_anatomy and bad_axes:
                     self.flip_orientation_axis(target_volume, segmentationNode, bad_axes)
-                    mask_fixed, is_5class_fixed = self._extract_combined_label_mask(target_volume, segmentationNode)
+                    mask_fixed, is_5class_fixed = self._extract_combined_label_mask(
+                        target_volume, segmentationNode
+                    )
                     if mask_fixed is not None:
                         report = verify_orientation(mask_fixed, result.affine, is_5class=is_5class_fixed)
                     report.notes.insert(
@@ -6155,6 +6174,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 if expanded_list:
                     tooth_list = sort_teeth_anatomically(expanded_list)
                     from CBCTPlannerLib.core.print_layout import slice_count_for_selection
+
                     rec_slices, rec_step = slice_count_for_selection(len(tooth_list))
                     num_slices = max(int(num_slices), int(rec_slices))
                     step_mm = float(rec_step)
@@ -6180,7 +6200,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             tooth_arcs[int(tooth)] = float(tooth_t) * float(arch.total_arc_length)
 
         # Ensure full quadrant or multi-tooth span never collapses onto a single tooth
-        if len(tooth_list) >= 2 and (not tooth_arcs or (max(tooth_arcs.values()) - min(tooth_arcs.values())) < 2.0):
+        if len(tooth_list) >= 2 and (
+            not tooth_arcs or (max(tooth_arcs.values()) - min(tooth_arcs.values())) < 2.0
+        ):
             site_map = compute_fdi_arc_positions_mm(
                 total_arc_length_mm=float(arch.total_arc_length),
                 jaw_type=jaw_key,
@@ -6200,17 +6222,21 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             t_center, _ = arch.find_closest_parameter(center)
             center_arc = float(t_center) * float(arch.total_arc_length)
 
-        if len(tooth_list) >= 2 and tooth_arcs and (max(tooth_arcs.values()) - min(tooth_arcs.values())) >= 1.5:
+        if (
+            len(tooth_list) >= 2
+            and tooth_arcs
+            and (max(tooth_arcs.values()) - min(tooth_arcs.values())) >= 1.5
+        ):
             pad = 2.5 if len(tooth_list) <= 3 else 2.0
-            arc_values = np.linspace(min(tooth_arcs.values()) - pad, max(tooth_arcs.values()) + pad, num_slices)
+            arc_values = np.linspace(
+                min(tooth_arcs.values()) - pad, max(tooth_arcs.values()) + pad, num_slices
+            )
         else:
             arc_values = center_arc + (np.arange(num_slices) - (num_slices - 1) / 2.0) * step_mm
 
         for index, arc_mm in enumerate(arc_values):
             target_fdi = (
-                min(tooth_arcs, key=lambda t: abs(tooth_arcs[t] - float(arc_mm)))
-                if tooth_arcs
-                else int(fdi)
+                min(tooth_arcs, key=lambda t: abs(tooth_arcs[t] - float(arc_mm))) if tooth_arcs else int(fdi)
             )
             meas = None
             cs = None
@@ -6413,7 +6439,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     keep = int(str(fdi)[0]) in quadrants
                 else:
                     name = (segment.GetName() or "").lower()
-                    keep = any(word in name for word in ("jaw", "canal", "nerve", "mandible", "maxilla", "teeth"))
+                    keep = any(
+                        word in name for word in ("jaw", "canal", "nerve", "mandible", "maxilla", "teeth")
+                    )
                 _set_vis(segment_id, keep)
             yield
         finally:
