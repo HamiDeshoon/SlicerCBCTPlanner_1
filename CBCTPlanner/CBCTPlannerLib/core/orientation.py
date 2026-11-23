@@ -405,18 +405,26 @@ def verify_orientation(
         report.notes.append(f"mask must be 3D, got shape {mask.shape}")
         return report
 
-    if is_5class:
-        upper_teeth = (3,)
-        lower_teeth = (4,)
-        upper_jaw = (1,)
-        lower_jaw = (2,)
-    else:
-        from .labels import MANDIBULAR_TEETH_IDS, MAXILLARY_TEETH_IDS, UPPER_JAW_ID, LOWER_JAW_ID
+    from .labels import (
+        DENTALSEGMENTATOR_LOWER_TEETH_ID,
+        DENTALSEGMENTATOR_UPPER_TEETH_ID,
+        LEFT_SIDE_TEETH_IDS,
+        MANDIBULAR_TEETH_IDS,
+        MAXILLARY_TEETH_IDS,
+        RIGHT_SIDE_TEETH_IDS,
+        get_jaw_label_id,
+    )
 
+    if is_5class:
+        upper_teeth = (DENTALSEGMENTATOR_UPPER_TEETH_ID,)
+        lower_teeth = (DENTALSEGMENTATOR_LOWER_TEETH_ID,)
+        upper_jaw = (get_jaw_label_id(False, is_5class=True),)
+        lower_jaw = (get_jaw_label_id(True, is_5class=True),)
+    else:
         upper_teeth = tuple(MAXILLARY_TEETH_IDS)
         lower_teeth = tuple(MANDIBULAR_TEETH_IDS)
-        upper_jaw = (UPPER_JAW_ID,)
-        lower_jaw = (LOWER_JAW_ID,)
+        upper_jaw = (get_jaw_label_id(False, is_5class=False),)
+        lower_jaw = (get_jaw_label_id(True, is_5class=False),)
 
     lower_z = _mask_centroid(mask, affine, lower_teeth + lower_jaw)
     upper_z = _mask_centroid(mask, affine, upper_teeth + upper_jaw)
@@ -440,8 +448,8 @@ def verify_orientation(
     if is_5class:
         report.notes.append("L-R: 5-class labels carry no FDI side information; cannot determine.")
     else:
-        right = _mask_centroid(mask, affine, tuple(range(11, 19)) + tuple(range(41, 49)))
-        left = _mask_centroid(mask, affine, tuple(range(21, 29)) + tuple(range(31, 39)))
+        right = _mask_centroid(mask, affine, tuple(RIGHT_SIDE_TEETH_IDS))
+        left = _mask_centroid(mask, affine, tuple(LEFT_SIDE_TEETH_IDS))
         if right is not None and left is not None:
             report.lr_ok = bool(right[0] > left[0])
             if not report.lr_ok:

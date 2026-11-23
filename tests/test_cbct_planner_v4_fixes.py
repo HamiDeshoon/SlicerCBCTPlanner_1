@@ -113,7 +113,7 @@ class TestPanoramicAndCrossSectionRender(unittest.TestCase):
         mask = np.zeros_like(img, dtype=np.uint8)
         mask[np.ix_(v_bone, u_bone)] = 1
 
-        # Even when meas=None and crest_v=None, fallback draws vertical & entry lines
+        # Single source of truth: when meas=None and crest_v=None, renderer draws NO fabricated H/W lines
         cs_empty = SimpleNamespace(
             img_cs=img,
             mask_cs=mask,
@@ -124,14 +124,14 @@ class TestPanoramicAndCrossSectionRender(unittest.TestCase):
             height_u=0.0,
             width_segments={},
             is_mandible=True,
-            canal_centroid_uv=(0.0, -9.5),
+            canal_centroid_uv=None,
         )
         r1 = cpr.render_cross_section(cs_empty, meas=None, scale=3)
         self.assertTrue(r1.available)
-        self.assertGreaterEqual(len(r1.overlay_px), 3)
-        self.assertTrue(any("mm" in t for _, _, t in r1.labels))
+        self.assertEqual(len(r1.overlay_px), 0)
+        self.assertTrue(any("not measurable" in t for _, _, t in r1.labels))
 
-        # Full measured site includes H, W0, Impl suggestion, and D2 Misch density
+        # Full measured site renders engine-supplied H, W0, Impl suggestion, and Misch density verbatim
         cs_full = SimpleNamespace(
             img_cs=img,
             mask_cs=mask,
@@ -144,12 +144,18 @@ class TestPanoramicAndCrossSectionRender(unittest.TestCase):
             is_mandible=True,
             canal_centroid_uv=(0.0, -9.5),
         )
-        meas = SimpleNamespace(bone_height_mm=14.0, crest_width_mm=7.6)
+        meas = SimpleNamespace(
+            bone_height_mm=14.0,
+            crest_width_mm=7.6,
+            suggested_diameter_mm=4.5,
+            suggested_length_mm=11.5,
+            misch_density_class="D2 (approximate)",
+        )
         r2 = cpr.render_cross_section(cs_full, meas=meas, scale=3)
         texts = [t for _, _, t in r2.labels]
         self.assertTrue(any("H 14.0 mm" in t for t in texts), texts)
         self.assertTrue(any("W0 7.6 mm" in t for t in texts), texts)
-        self.assertTrue(any("Impl " in t for t in texts), texts)
+        self.assertTrue(any("Impl 4.5x11.5 mm" in t for t in texts), texts)
         self.assertTrue(any("D2" in t for t in texts), texts)
 
 

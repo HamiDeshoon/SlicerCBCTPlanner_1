@@ -46,6 +46,7 @@ except ImportError:
     ImageDraw = None
     ImageFont = None
 
+from .core.labels import tooth_mask_from_labels
 from .core.measurements import withheld_badge
 from .core_print_render import (
     _load_font,
@@ -502,7 +503,7 @@ class PrintLayoutEngine:
                 rgb = np.repeat(gray[:, :, None], 3, axis=2).astype(np.float32)
                 if mask is not None and mask.shape == img_3d.shape:
                     m_proj = np.max(mask, axis=1)[::-1, :]
-                    teeth_m = (m_proj == 3) | (m_proj == 4) | ((m_proj >= 11) & (m_proj <= 48))
+                    teeth_m = tooth_mask_from_labels(m_proj)
                     rgb[teeth_m] = 0.35 * rgb[teeth_m] + 0.65 * np.array([255.0, 220.0, 120.0])
                     if np.any(m_proj == 5):
                         rgb[m_proj == 5] = np.array([255.0, 60.0, 50.0])

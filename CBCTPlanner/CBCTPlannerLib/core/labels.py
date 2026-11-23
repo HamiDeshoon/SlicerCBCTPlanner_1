@@ -509,3 +509,203 @@ def sort_teeth_anatomically(teeth_list: List[int]) -> List[int]:
     for group in (_Q1_ORDER, _Q2_ORDER, _Q4_ORDER, _Q3_ORDER):
         ordered.extend(int(fdi) for fdi in group if int(fdi) in teeth_set)
     return ordered
+
+RIGHT_SIDE_TEETH_IDS: List[int] = [tid for fdi, tid in FDI_TO_TOOTH_ID.items() if fdi[0] in ("1", "4")]
+LEFT_SIDE_TEETH_IDS: List[int] = [tid for fdi, tid in FDI_TO_TOOTH_ID.items() if fdi[0] in ("2", "3")]
+
+
+def resolve_fdi_number(fdi_or_id: Any) -> Optional[str]:
+    """Normalize an FDI string/int, tooth label ID (11..48), or pulp ID (111..148) to canonical FDI string."""
+    if fdi_or_id is None:
+        return None
+    s = str(fdi_or_id).strip().lstrip("#")
+    if s in FDI_TO_TOOTH_ID:
+        return s
+    try:
+        iv = int(s)
+    except (TypeError, ValueError):
+        return None
+    if iv in TOOTH_ID_TO_FDI:
+        return TOOTH_ID_TO_FDI[iv]
+    if iv in PULP_ID_TO_FDI:
+        return PULP_ID_TO_FDI[iv]
+    return None
+
+
+def get_fdi_quadrant(fdi_or_id: Any) -> Optional[int]:
+    """Return the FDI quadrant (1..4) for a valid tooth code or label ID."""
+    fdi = resolve_fdi_number(fdi_or_id)
+    if fdi is None:
+        return None
+    return int(fdi[0])
+
+
+def get_fdi_side(fdi_or_id: Any) -> Optional[str]:
+    """Return anatomical side ('right' for Q1/Q4, 'left' for Q2/Q3) for a valid FDI tooth."""
+    q = get_fdi_quadrant(fdi_or_id)
+    if q in (1, 4):
+        return "right"
+    if q in (2, 3):
+        return "left"
+    return None
+
+
+def is_mandibular_fdi(fdi_or_id: Any) -> bool:
+    """Return True if the FDI tooth belongs to the mandible (Quadrants 3 or 4)."""
+    q = get_fdi_quadrant(fdi_or_id)
+    return q in (3, 4)
+
+
+def is_maxillary_fdi(fdi_or_id: Any) -> bool:
+    """Return True if the FDI tooth belongs to the maxilla (Quadrants 1 or 2)."""
+    q = get_fdi_quadrant(fdi_or_id)
+    return q in (1, 2)
+
+
+def get_jaw_label_id(is_mandible: bool, is_5class: bool = False) -> int:
+    """Return the canonical jawbone label ID for ToothFairy3 or DentalSegmentator 5-class schemes."""
+    if is_5class:
+        return DENTALSEGMENTATOR_MANDIBLE_ID if is_mandible else DENTALSEGMENTATOR_MAXILLA_ID
+    return LOWER_JAW_ID if is_mandible else UPPER_JAW_ID
+
+
+def get_tooth_group_label_id(is_mandible: bool, is_5class: bool = True) -> int:
+    """Return the grouped teeth label ID for 5-class DentalSegmentator masks."""
+    if not is_5class:
+        raise ValueError("Grouped tooth label IDs apply only to 5-class DentalSegmentator masks.")
+    return DENTALSEGMENTATOR_LOWER_TEETH_ID if is_mandible else DENTALSEGMENTATOR_UPPER_TEETH_ID
+
+
+def get_ipsilateral_canal_ids(fdi_or_quadrant: Any, is_5class: bool = False) -> List[int]:
+    """Return only the ipsilateral mandibular canal label ID(s) for a mandibular quadrant/FDI.
+
+    Never returns contralateral canal IDs or canal IDs for maxillary quadrants.
+    """
+    q = int(fdi_or_quadrant) if isinstance(fdi_or_quadrant, int) and fdi_or_quadrant in (1, 2, 3, 4) else get_fdi_quadrant(fdi_or_quadrant)
+    if q not in (3, 4):
+        return []
+    if is_5class:
+        return [DENTALSEGMENTATOR_CANAL_ID]
+    return [LEFT_IAN_ID] if q == 3 else [RIGHT_IAN_ID]
+
+
+def get_ipsilateral_sinus_ids(fdi_or_quadrant: Any, is_5class: bool = False) -> List[int]:
+    """Return only the ipsilateral maxillary sinus label ID(s) for a maxillary quadrant/FDI.
+
+    Never returns contralateral sinus IDs or sinus IDs for mandibular quadrants.
+    """
+    q = int(fdi_or_quadrant) if isinstance(fdi_or_quadrant, int) and fdi_or_quadrant in (1, 2, 3, 4) else get_fdi_quadrant(fdi_or_quadrant)
+    if q not in (1, 2) or is_5class:
+        return []
+    return [RIGHT_SINUS_ID] if q == 1 else [LEFT_SINUS_ID]
+
+
+def is_tooth_label_id(label_id: int, is_5class: bool = False) -> bool:
+    """Return True if `label_id` identifies a tooth in the active labeling scheme."""
+    lid = int(label_id)
+    if is_5class:
+        return lid in (DENTALSEGMENTATOR_UPPER_TEETH_ID, DENTALSEGMENTATOR_LOWER_TEETH_ID)
+    return lid in TOOTH_ID_TO_FDI
+
+
+def is_jaw_label_id(label_id: int, is_5class: bool = False) -> bool:
+    """Return True if `label_id` identifies maxilla or mandible in the active scheme."""
+    lid = int(label_id)
+    if is_5class:
+        return lid in (DENTALSEGMENTATOR_MAXILLA_ID, DENTALSEGMENTATOR_MANDIBLE_ID)
+    return lid in (LOWER_JAW_ID, UPPER_JAW_ID)
+
+
+def is_canal_label_id(label_id: int, is_5class: bool = False) -> bool:
+    """Return True if `label_id` identifies an inferior alveolar / mandibular canal."""
+    lid = int(label_id)
+    if is_5class:
+        return lid == DENTALSEGMENTATOR_CANAL_ID
+    return lid in CANAL_IDS
+
+
+def is_sinus_label_id(label_id: int, is_5class: bool = False) -> bool:
+    """Return True if `label_id` identifies a maxillary sinus."""
+    lid = int(label_id)
+    if is_5class:
+        return False
+    return lid in SINUS_IDS
+
+
+def infer_mask_is_5class(mask: np.ndarray) -> bool:
+    """Infer whether a combined label array uses 5-class DentalSegmentator IDs vs ToothFairy3."""
+    arr = np.asarray(mask)
+    if arr.size == 0:
+        return False
+    max_val = int(arr.max())
+    return 0 < max_val <= 5
+
+
+def tooth_mask_from_labels(mask: np.ndarray, is_5class: Optional[bool] = None) -> np.ndarray:
+    """Return a boolean array selecting all tooth voxels using the canonical label registry."""
+    arr = np.asarray(mask)
+    use_5class = infer_mask_is_5class(arr) if is_5class is None else bool(is_5class)
+    if use_5class:
+        return (arr == DENTALSEGMENTATOR_UPPER_TEETH_ID) | (arr == DENTALSEGMENTATOR_LOWER_TEETH_ID)
+    return np.isin(arr, ALL_TOOTH_IDS)
+
+
+def jaw_mask_from_labels(
+    mask: np.ndarray,
+    is_mandible: Optional[bool] = None,
+    is_5class: Optional[bool] = None,
+) -> np.ndarray:
+    """Return a boolean array selecting jawbone voxels using the canonical label registry."""
+    arr = np.asarray(mask)
+    use_5class = infer_mask_is_5class(arr) if is_5class is None else bool(is_5class)
+    if is_mandible is None:
+        return (arr == get_jaw_label_id(True, use_5class)) | (arr == get_jaw_label_id(False, use_5class))
+    return arr == get_jaw_label_id(bool(is_mandible), use_5class)
+
+
+def combine_labeled_segment_masks(
+    segments: Sequence[Tuple[str, str, np.ndarray, Optional[str], Optional[str]]],
+) -> Tuple[np.ndarray, bool]:
+    """Deterministically combine individual binary segment masks into one canonical label volume.
+
+    Each entry is `(seg_id, seg_name, binary_mask, fdi_attribute, terminology_str)`.
+    Independent of segment insertion order: enforces `SEGMENT_PRECEDENCE`
+    (`pulp > tooth > canal > sinus > jaw`) and resolves 5-class vs ToothFairy3 jaw/canal IDs.
+    """
+    if not segments:
+        return np.zeros((0, 0, 0), dtype=np.int32), False
+
+    matched: List[Tuple[int, str, bool, int, np.ndarray, str]] = []
+    shape = None
+    for seg_id, seg_name, bin_mask, fdi_attr, term_str in segments:
+        arr = np.asarray(bin_mask, dtype=bool)
+        if shape is None:
+            shape = arr.shape
+        lbl_val, category, seg_is_5c, prec = match_segment_to_label_and_precedence(
+            seg_id, seg_name, fdi_attribute=fdi_attr, terminology_str=term_str
+        )
+        if lbl_val > 0:
+            matched.append((lbl_val, category, seg_is_5c, prec, arr, seg_name.lower()))
+
+    if shape is None:
+        return np.zeros((0, 0, 0), dtype=np.int32), False
+
+    is_5class = resolve_combined_mask_scheme([(m[0], m[1], m[2], m[3]) for m in matched])
+    combined = np.zeros(shape, dtype=np.int32)
+
+    # Sort deterministically by (precedence ascending, canonical label ascending) so higher
+    # precedence always wins regardless of original segment insertion order.
+    resolved_items: List[Tuple[int, int, np.ndarray]] = []
+    for lbl_val, category, seg_is_5c, prec, arr, name_low in matched:
+        final_lbl = lbl_val
+        if not is_5class and seg_is_5c and category == "jaw":
+            if lbl_val == DENTALSEGMENTATOR_MANDIBLE_ID or "mandible" in name_low or "lower jaw" in name_low:
+                final_lbl = LOWER_JAW_ID
+            elif lbl_val == DENTALSEGMENTATOR_MAXILLA_ID or "maxilla" in name_low or "upper jaw" in name_low:
+                final_lbl = UPPER_JAW_ID
+        resolved_items.append((prec, final_lbl, arr))
+
+    resolved_items.sort(key=lambda item: (item[0], item[1]))
+    for _prec, final_lbl, arr in resolved_items:
+        combined[arr] = int(final_lbl)
+    return combined, is_5class

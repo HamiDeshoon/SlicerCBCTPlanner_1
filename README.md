@@ -41,7 +41,7 @@
 
 ### 5. RISE-MAR Metal Artifact Reduction ([Masaaki-75/rise-mar](https://github.com/masaaki-75/rise-mar))
 - Implemented in `CBCTPlannerLib/RiseMarEngine.py` following [Ma et al., IEEE TMI 2025 (arXiv:2501.15610)](https://arxiv.org/html/2501.15610v1):
-  - Default model weights pre-configured to `C:\Users\hamid\Downloads\risemar_dental_preview.pkl`.
+  - Default model weights pre-configured to a user-configured `.pkl` / `.pth` checkpoint (stored in Slicer settings).
   - Clips HU values to `[-1024, 3072]` and normalizes to `[0, 1]`, runs the 2D CBAM Attention U-Net generator paired with physics-guided radial streak & photon-starvation suppression, preserves high-density metal cores, and reports before/after **Clinical Quality Assessor (`CQA`)** scores (`1–10` Likert scale).
 
 ## Running Tests

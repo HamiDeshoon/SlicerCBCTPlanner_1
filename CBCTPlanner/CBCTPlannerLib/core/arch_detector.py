@@ -163,6 +163,28 @@ class ArchFrame:
     arc_length_mm: float
 
 
+def validate_arch_frame(frame: ArchFrame, tol: float = 1e-5) -> Tuple[bool, List[str]]:
+    """Validate that an ArchFrame is unit-normalized, mutually orthogonal, and finite."""
+    issues: List[str] = []
+    for name, vec in (("point", frame.point), ("tangent", frame.tangent), ("normal", frame.normal), ("binormal", frame.binormal)):
+        arr = np.asarray(vec, dtype=np.float64)
+        if arr.shape != (3,) or not np.all(np.isfinite(arr)):
+            issues.append(f"{name} is non-finite or not 3D")
+    if issues:
+        return False, issues
+    T = np.asarray(frame.tangent, dtype=np.float64)
+    N = np.asarray(frame.normal, dtype=np.float64)
+    B = np.asarray(frame.binormal, dtype=np.float64)
+    for name, vec in (("tangent", T), ("normal", N), ("binormal", B)):
+        norm = float(np.linalg.norm(vec))
+        if abs(norm - 1.0) > tol:
+            issues.append(f"{name} is not unit length (norm={norm:.6f})")
+    for pair_name, dot_val in (("T.N", float(np.dot(T, N))), ("T.B", float(np.dot(T, B))), ("N.B", float(np.dot(N, B)))):
+        if abs(dot_val) > tol:
+            issues.append(f"{pair_name} not orthogonal (dot={dot_val:.6f})")
+    return len(issues) == 0, issues
+
+
 @dataclass
 class ToothArcSite:
     """B2: Mapped tooth site along the dental arch curve with explicit provenance."""
@@ -326,6 +348,11 @@ class DentalArch:
         binormal = binormal / b_norm if b_norm > 1e-8 else up
         if np.dot(binormal, up) < 0:
             binormal = -binormal
+        # Re-orthogonalize normal against (tangent, binormal) to eliminate numerical drift
+        normal = normal - np.dot(normal, tangent) * tangent - np.dot(normal, binormal) * binormal
+        n_norm2 = float(np.linalg.norm(normal))
+        if n_norm2 > 1e-8:
+            normal = normal / n_norm2
 
         return ArchFrame(
             point=pt,

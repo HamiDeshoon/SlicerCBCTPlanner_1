@@ -101,6 +101,7 @@ except ImportError:
 from CBCTPlannerLib import (
     CLINICAL_DISCLAIMER_TEXT,
     DEFAULT_RISEMAR_WEIGHTS_PATH,
+    validate_risemar_weights_path,
     SOFTWARE_VERSION,
     VIVID_3D_STYLE_PRESETS,
     ALILandmarkResult,
@@ -142,6 +143,14 @@ from CBCTPlannerLib import (
     run_automated_dental_tool,
     should_handle_navigation_shortcut,
 )
+from CBCTPlannerLib.WorkflowUIHelpers import (
+    GalleryNavigationState,
+    apply_risemar_validation_to_widget,
+    apply_workspace_role,
+    compute_volume_segmentation_cache_token,
+    load_risemar_weights_setting,
+    save_risemar_weights_setting,
+)
 from CBCTPlannerLib.core.arch_detector import (
     JAW_TOOTH_ORDER,
     DentalArch,
@@ -151,7 +160,9 @@ from CBCTPlannerLib.core.arch_detector import (
     fit_dental_arch_from_points,
 )
 from CBCTPlannerLib.core.labels import (
+    is_mandibular_fdi,
     sort_teeth_anatomically as _sort_teeth_anatomically,
+    tooth_mask_from_labels,
     ANATOMICAL_MESIODISTAL_WIDTHS_MM,
     FDI_TO_TOOTH_ID,
     LOWER_JAW_ID,
@@ -275,7 +286,16 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.inlineGalleryScroll: Any = None
         self.inlineGalleryContainer: Any = None
         self.inlineGalleryGrid: Any = None
+        self.inlineGalleryThumbsBox: Any = None
+        self.inlineGalleryStaleLabel: Any = None
+        self.inlineGalleryActiveImageLabel: Any = None
+        self.inlineGalleryActiveCaptionLabel: Any = None
+        self.inlineGalleryIndexLabel: Any = None
+        self.btnGalleryPrev: Any = None
+        self.btnGalleryNext: Any = None
+        self.btnGenerateFullGallery: Any = None
         self.btnRefreshInlineGallery: Any = None
+        self._galleryState: GalleryNavigationState = GalleryNavigationState()
         self.btnRunNativeALI: Any = None
         self.btnRunNativeASO: Any = None
         self.btnRunNativeCLIC: Any = None
@@ -402,7 +422,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         self.btnQuickRiseMar = qt.QPushButton("🧲 RISE-MAR (Artifact Reduction)")
         self.btnQuickRiseMar.setToolTip(
-            "Run RISE-MAR Metal Artifact Reduction using C:\\Users\\hamid\\Downloads\\risemar_dental_preview.pkl."
+            "Run RISE-MAR Metal Artifact Reduction using the validated weights file configured in Step 1."
         )
         self.btnQuickRiseMar.setStyleSheet(
             "font-weight: bold; background-color: #7c3aed; color: white; padding: 4px 8px; border-radius: 3px;"
@@ -733,10 +753,12 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         risemarLayout = qt.QFormLayout(self.risemarBox)
 
         marPathRow = qt.QHBoxLayout()
+        saved_mar_path = load_risemar_weights_setting(qt)
         self.risemarWeightsPathEdit = qt.QLineEdit()
-        self.risemarWeightsPathEdit.setText(DEFAULT_RISEMAR_WEIGHTS_PATH)
+        self.risemarWeightsPathEdit.setPlaceholderText("Select RISE-MAR model weights (.pkl / .pth)...")
+        self.risemarWeightsPathEdit.setText(saved_mar_path)
         self.risemarWeightsPathEdit.setToolTip(
-            "Path to RISE-MAR model weights (.pkl / .pth). Defaults to C:\\Users\\hamid\\Downloads\\risemar_dental_preview.pkl."
+            "Path to RISE-MAR model weights (.pkl / .pth). Remembered in 3D Slicer settings."
         )
         self.btnBrowseRiseMarWeights = qt.QPushButton("Browse...")
         marPathRow.addWidget(self.risemarWeightsPathEdit, 1)
@@ -760,10 +782,12 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnRunRiseMar.setStyleSheet(
             "font-weight: bold; background-color: #7c3aed; color: white; padding: 6px;"
         )
-        self.risemarStatusLabel = qt.QLabel("Ready (Weights: risemar_dental_preview.pkl)")
+        self.risemarStatusLabel = qt.QLabel("")
+        self.risemarStatusLabel.setWordWrap(True)
         marRunRow.addWidget(self.btnRunRiseMar)
         marRunRow.addWidget(self.risemarStatusLabel, 1)
         risemarLayout.addRow(marRunRow)
+        apply_risemar_validation_to_widget(self, saved_mar_path)
 
         # ==================== STEP 2: ARCH (B18, B20, F3) ====================
         self.step2Box = ctk.ctkCollapsibleButton()
@@ -1181,33 +1205,81 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         step5Layout.addWidget(self.btnGenerate8x10PrintLayout)
 
-        # Embedded Inline Measured Cross-Section Images Gallery (always visible in Step 5!)
+        # Embedded Inline Measured Cross-Section Viewer & Lazy Thumbnail Strip (Part 6.1)
         self.inlineGalleryBox = ctk.ctkCollapsibleButton()
-        self.inlineGalleryBox.text = "Live Measured Cross-Section Images (H, W0, W3, W5 & Nerve Overlays)"
+        self.inlineGalleryBox.text = "Measured Cross-Section Viewer (H, W0, W3, W5, Root & Vital Overlays)"
         self.inlineGalleryBox.collapsed = False
         galleryOuter = qt.QVBoxLayout(self.inlineGalleryBox)
+        galleryOuter.setContentsMargins(6, 6, 6, 6)
+        galleryOuter.setSpacing(6)
+
+        self.inlineGalleryStaleLabel = qt.QLabel("")
+        self.inlineGalleryStaleLabel.setWordWrap(True)
+        self.inlineGalleryStaleLabel.setStyleSheet(
+            "color: #fbbf24; background-color: #451a03; border: 1px solid #d97706; border-radius: 4px; padding: 4px 6px; font-weight: bold;"
+        )
+        self.inlineGalleryStaleLabel.setVisible(False)
+        galleryOuter.addWidget(self.inlineGalleryStaleLabel)
 
         galleryTopRow = qt.QHBoxLayout()
         self.inlineGalleryStatusLabel = qt.QLabel(
-            "Click any tooth/quadrant or 'Refresh Measured Slices' to render measured cross-section images inline."
+            "Select a tooth or click 'Refresh Active Slice' to display the measured cross-section."
         )
         self.inlineGalleryStatusLabel.setWordWrap(True)
-        self.btnRefreshInlineGallery = qt.QPushButton("🔄 Refresh Measured Slices")
+        self.btnRefreshInlineGallery = qt.QPushButton("Refresh Active Slice")
         self.btnRefreshInlineGallery.setToolTip(
-            "Render and display measured cross-sectional slices with H, W0, W3, W5, and Nerve lines right here in the panel."
+            "Render the active tooth cross-section immediately without generating all 15-28 gallery tiles."
+        )
+        self.btnGenerateFullGallery = qt.QPushButton("Generate Full Gallery")
+        self.btnGenerateFullGallery.setToolTip(
+            "Generate the complete multi-slice cross-section gallery (15-27 slices) on demand."
         )
         galleryTopRow.addWidget(self.inlineGalleryStatusLabel, 1)
         galleryTopRow.addWidget(self.btnRefreshInlineGallery)
+        galleryTopRow.addWidget(self.btnGenerateFullGallery)
         galleryOuter.addLayout(galleryTopRow)
+
+        self.inlineGalleryActiveImageLabel = qt.QLabel("No active cross-section rendered yet.")
+        self.inlineGalleryActiveImageLabel.setAlignment(qt.Qt.AlignCenter)
+        self.inlineGalleryActiveImageLabel.setMinimumHeight(280)
+        self.inlineGalleryActiveImageLabel.setStyleSheet(
+            "background-color: #020617; color: #94a3b8; border: 1px solid #1e293b; border-radius: 6px; padding: 6px;"
+        )
+        galleryOuter.addWidget(self.inlineGalleryActiveImageLabel)
+
+        self.inlineGalleryActiveCaptionLabel = qt.QLabel("")
+        self.inlineGalleryActiveCaptionLabel.setAlignment(qt.Qt.AlignCenter)
+        self.inlineGalleryActiveCaptionLabel.setWordWrap(True)
+        galleryOuter.addWidget(self.inlineGalleryActiveCaptionLabel)
+
+        navRow = qt.QHBoxLayout()
+        self.btnGalleryPrev = qt.QPushButton("Previous")
+        self.btnGalleryPrev.setEnabled(False)
+        self.inlineGalleryIndexLabel = qt.QLabel("Slice 0 / 0")
+        self.inlineGalleryIndexLabel.setAlignment(qt.Qt.AlignCenter)
+        self.btnGalleryNext = qt.QPushButton("Next")
+        self.btnGalleryNext.setEnabled(False)
+        navRow.addWidget(self.btnGalleryPrev)
+        navRow.addWidget(self.inlineGalleryIndexLabel, 1)
+        navRow.addWidget(self.btnGalleryNext)
+        galleryOuter.addLayout(navRow)
+
+        self.inlineGalleryThumbsBox = ctk.ctkCollapsibleButton()
+        self.inlineGalleryThumbsBox.text = "All Cross-Section Thumbnails (0)"
+        self.inlineGalleryThumbsBox.collapsed = True
+        thumbsOuter = qt.QVBoxLayout(self.inlineGalleryThumbsBox)
+        thumbsOuter.setContentsMargins(4, 4, 4, 4)
 
         self.inlineGalleryScroll = qt.QScrollArea()
         self.inlineGalleryScroll.setWidgetResizable(True)
-        self.inlineGalleryScroll.setMinimumHeight(230)
+        self.inlineGalleryScroll.setMinimumHeight(180)
+        self.inlineGalleryScroll.setMaximumHeight(225)
         self.inlineGalleryContainer = qt.QWidget()
         self.inlineGalleryGrid = qt.QGridLayout(self.inlineGalleryContainer)
         self.inlineGalleryGrid.setSpacing(6)
         self.inlineGalleryScroll.setWidget(self.inlineGalleryContainer)
-        galleryOuter.addWidget(self.inlineGalleryScroll)
+        thumbsOuter.addWidget(self.inlineGalleryScroll)
+        galleryOuter.addWidget(self.inlineGalleryThumbsBox)
         step5Layout.addWidget(self.inlineGalleryBox)
 
         # Collapsible Section for Advanced Details (prevents UI clutter)
@@ -1582,11 +1654,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.surfaceStylePresetCombo.currentTextChanged.connect(self.onSurfaceStylePresetChanged)
         self.jawOpacitySlider.valueChanged.connect(self.onJawOpacitySliderChanged)
         self.surfaceSmoothingSlider.valueChanged.connect(self.onSurfaceSmoothingSliderChanged)
+        self.risemarWeightsPathEdit.textChanged.connect(self.onRiseMarWeightsPathChanged)
         self.btnBrowseRiseMarWeights.clicked.connect(self.onBrowseRiseMarWeightsClicked)
         self.btnRunRiseMar.clicked.connect(self.onRunRiseMarClicked)
         self.btnBrowsePrintDir.clicked.connect(self.onBrowsePrintDirClicked)
         self.btnOpenPrintDir.clicked.connect(self.onOpenPrintDirClicked)
         self.btnRefreshInlineGallery.clicked.connect(self.onRefreshInlineGalleryClicked)
+        self.btnGenerateFullGallery.clicked.connect(self.onGenerateFullGalleryClicked)
+        self.btnGalleryPrev.clicked.connect(self.onGalleryPrevClicked)
+        self.btnGalleryNext.clicked.connect(self.onGalleryNextClicked)
         self.btnRunNativeALI.clicked.connect(self.onRunNativeALIClicked)
         self.btnRunNativeASO.clicked.connect(self.onRunNativeASOClicked)
         self.btnRunNativeCLIC.clicked.connect(self.onRunNativeCLICClicked)
@@ -1920,6 +1996,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # Step 1 Callbacks: Volume, Checkpoint Inference, Layout, Occlusal Plane & VR
     # ------------------------------------------------------------------
     def onVolumeNodeChanged(self, node: Any) -> None:
+        self._markInlineGalleryStale("CBCT volume changed")
         if (
             node is not None
             and self.logic is not None
@@ -1953,6 +2030,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.updateGUIFromParameterNode()
 
     def onSegmentationNodeChanged(self, node: Any) -> None:
+        self._markInlineGalleryStale("Segmentation changed")
         if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
             self._parameterNode.SetNodeReferenceID("Segmentation", node.GetID() if node else "")
             self.updateGUIFromParameterNode()
@@ -2469,43 +2547,28 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.onApplyDental3DStyling()
 
     def onRoleModeChanged(self, mode_text: str) -> None:
-        mode_low = (mode_text or "").lower()
-        if "radiologist" in mode_low:
-            self.step1Box.collapsed = False
-            self.step3Box.collapsed = False
-            self.step4Box.collapsed = False
-            self.step5Box.collapsed = False
-            self.step6Box.collapsed = False
-            self.step7Box.collapsed = True
-            self.globalStatusLabel.setText("Workspace: Radiologist (Measurements, Cross-Sections, MAR & Print Film)")
-        elif "implant" in mode_low or "dentist" in mode_low:
-            self.step1Box.collapsed = False
-            self.step2Box.collapsed = False
-            self.step5Box.collapsed = False
-            if getattr(self, "advancedStep5Box", None) is not None:
-                self.advancedStep5Box.collapsed = False
-            self.step6Box.collapsed = False
-            self.globalStatusLabel.setText("Workspace: Implant & Surgical Dentist (Vivid 3D Roots, Implants & Guide)")
-        elif "ortho" in mode_low or "craniofacial" in mode_low:
-            self.step1Box.collapsed = False
-            self.step6Box.collapsed = False
-            self.step7Box.collapsed = False
-            self.globalStatusLabel.setText("Workspace: Ortho & Craniofacial (ALI, ASO, CLI-C, VFACE, Ceph & Airway)")
-        else:
-            self.step1Box.collapsed = False
-            self.globalStatusLabel.setText("Workspace: Full Clinical Suite")
+        """Apply workspace role without erasing volume/segmentation selections or measurements."""
+        apply_workspace_role(self, mode_text)
+
+    def onRiseMarWeightsPathChanged(self, new_path: str) -> None:
+        save_risemar_weights_setting(qt, new_path)
+        apply_risemar_validation_to_widget(self, new_path)
 
     def onBrowseRiseMarWeightsClicked(self) -> None:
         if qt is None:
             return
+        cur_txt = self.risemarWeightsPathEdit.text.strip() if self.risemarWeightsPathEdit is not None else ""
+        start_dir = str(Path(cur_txt).parent) if cur_txt else str(Path.home())
         path = qt.QFileDialog.getOpenFileName(
             self.parent,
             "Select RISE-MAR Model Weights (.pkl / .pth)",
-            str(Path(self.risemarWeightsPathEdit.text or DEFAULT_RISEMAR_WEIGHTS_PATH).parent),
+            start_dir,
             "RISE-MAR Weights (*.pkl *.pth *.pt);;All Files (*)",
         )
         if path:
             self.risemarWeightsPathEdit.setText(path)
+            save_risemar_weights_setting(qt, path)
+            apply_risemar_validation_to_widget(self, path)
 
     def onRunRiseMarClicked(self) -> None:
         volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
@@ -2516,8 +2579,14 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         w_path = (
             self.risemarWeightsPathEdit.text.strip()
             if getattr(self, "risemarWeightsPathEdit", None) is not None
-            else DEFAULT_RISEMAR_WEIGHTS_PATH
-        ) or DEFAULT_RISEMAR_WEIGHTS_PATH
+            else ""
+        )
+        ok_weights, msg_weights = validate_risemar_weights_path(w_path)
+        if not ok_weights:
+            apply_risemar_validation_to_widget(self, w_path)
+            if slicer:
+                slicer.util.warningDisplay(msg_weights)
+            return
         fast_only = (
             bool(self.risemarFastCheck.isChecked())
             if getattr(self, "risemarFastCheck", None) is not None
@@ -2579,6 +2648,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # Step 2 Callbacks: Dental Arch Curve (Shared vs Per-Jaw, Auto-Fit vs Manual)
     # ------------------------------------------------------------------
     def onArchModeChanged(self, mode_text: str) -> None:
+        self._markInlineGalleryStale("Arch configuration changed")
         if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
             self._parameterNode.SetParameter("ArchMode", mode_text)
         self.updateGUIFromParameterNode()
@@ -2870,7 +2940,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if volNode and self.logic:
             self.activeToothFDI = fdi
             if not self.archModeCombo.currentText.startswith("Shared"):
-                target_jaw = "Lower" if fdi >= 31 else "Upper"
+                target_jaw = "Lower" if is_mandibular_fdi(fdi) else "Upper"
                 if self.activeJawCombo.currentText != target_jaw:
                     self.activeJawCombo.setCurrentText(target_jaw)
             settings = self._currentCursorSettings(sync_axial_slice=True, site_label=f"Tooth #{fdi} [Locked]")
@@ -2998,7 +3068,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.activeToothFDI = int(fdi)
         if not self.archModeCombo.currentText.startswith("Shared"):
-            target_jaw = "Lower" if fdi >= 31 else "Upper"
+            target_jaw = "Lower" if is_mandibular_fdi(fdi) else "Upper"
             if self.activeJawCombo.currentText != target_jaw:
                 self.activeJawCombo.setCurrentText(target_jaw)
 
@@ -3793,15 +3863,20 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         out_path.mkdir(parents=True, exist_ok=True)
         qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(out_path)))
 
-    def onRefreshInlineGalleryClicked(self) -> None:
-        """Render and display measured cross-sectional slices directly in the Step 5 inline gallery."""
+    def _markInlineGalleryStale(self, reason: str = "Input volume, segmentation, or arch changed") -> None:
+        self._galleryState.mark_stale(reason)
+        if getattr(self, "inlineGalleryStaleLabel", None) is not None and self._galleryState.is_stale:
+            self.inlineGalleryStaleLabel.setText(f"Gallery may be stale ({reason}). Click Refresh to update.")
+            self.inlineGalleryStaleLabel.setVisible(True)
+
+    def _renderGalleryItems(self, *, full_gallery: bool) -> None:
         volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
         segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
         if not volNode or not self.logic:
             return
-        selected = sort_teeth_anatomically(list(self.selectedTeeth))
+        selected = _sort_teeth_anatomically(list(self.selectedTeeth))
         fdi = self.activeToothFDI or (selected[0] if selected else 46)
-        jaw_key = "Lower" if int(str(fdi)[0]) in (3, 4) else "Upper"
+        jaw_key = "Lower" if is_mandibular_fdi(fdi) else "Upper"
         curve = self.logic.get_curve_node_for_jaw(volNode, jaw_key, parameterNode=self._parameterNode)
         if (curve is None or curve.GetNumberOfControlPoints() < 4) and segNode is not None:
             curve = self.logic.auto_fit_arch_for_jaw(
@@ -3812,19 +3887,108 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 confirm_overwrite=False,
                 allow_overwrite_user_edit=False,
             )
-        from CBCTPlannerLib.core.print_layout import slice_count_for_selection
+        if full_gallery:
+            from CBCTPlannerLib.core.print_layout import slice_count_for_selection
 
-        n_slices, step_mm = slice_count_for_selection(max(1, len(selected)))
+            n_slices, step_mm = slice_count_for_selection(max(1, len(selected)))
+            target_fdis = selected or [fdi]
+        else:
+            n_slices, step_mm = 1, 1.0
+            target_fdis = [fdi]
         series = self.logic.generate_cross_section_slice_series(
             fdi=fdi,
             volumeNode=volNode,
             segmentationNode=segNode,
             num_slices=n_slices,
             step_mm=step_mm,
-            fdis=selected or [fdi],
+            fdis=target_fdis,
         )
-        self._populateInlineMeasuredGallery(series)
+        self._populateInlineMeasuredGallery(series, full_gallery=full_gallery)
         self._updateActiveSiteClinicalCallout(fdi)
+
+    def onRefreshInlineGalleryClicked(self) -> None:
+        """Render the single active measured cross-section by default (or refresh full gallery if already loaded)."""
+        self._renderGalleryItems(full_gallery=self._galleryState.full_gallery_loaded)
+
+    def onGenerateFullGalleryClicked(self) -> None:
+        """Generate the complete 15-27 slice cross-section gallery on explicit user request."""
+        self._renderGalleryItems(full_gallery=True)
+
+    def onGalleryPrevClicked(self) -> None:
+        self._galleryState.step(-1)
+        self._renderActiveGallerySlice()
+
+    def onGalleryNextClicked(self) -> None:
+        self._galleryState.step(1)
+        self._renderActiveGallerySlice()
+
+    def _selectGallerySlice(self, index: int) -> None:
+        self._galleryState.select(index)
+        self._renderActiveGallerySlice()
+
+    def _renderActiveGallerySlice(self) -> None:
+        if qt is None or getattr(self, "inlineGalleryActiveImageLabel", None) is None:
+            return
+        item = self._galleryState.active_item
+        total = len(self._galleryState.items)
+        idx = self._galleryState.active_index
+        if getattr(self, "btnGalleryPrev", None) is not None:
+            self.btnGalleryPrev.setEnabled(self._galleryState.can_prev)
+        if getattr(self, "btnGalleryNext", None) is not None:
+            self.btnGalleryNext.setEnabled(self._galleryState.can_next)
+        if getattr(self, "inlineGalleryIndexLabel", None) is not None:
+            self.inlineGalleryIndexLabel.setText(f"Slice {idx + 1} / {total}" if total > 0 else "Slice 0 / 0")
+        if item is None:
+            self.inlineGalleryActiveImageLabel.setText("No active cross-section rendered yet.")
+            if getattr(self, "inlineGalleryActiveCaptionLabel", None) is not None:
+                self.inlineGalleryActiveCaptionLabel.setText("")
+            return
+
+        import base64
+
+        if isinstance(item, dict):
+            uri = item.get("image_data_uri", "")
+            off = float(item.get("offset_mm", 0.0))
+            fdi_val = item.get("fdi")
+            h_txt = str(item.get("height_mm", "--")).replace("N/A", "--")
+            w0_txt = str(item.get("w_crest_mm", "--")).replace("N/A", "--")
+            w3_txt = str(item.get("w_3mm", "--")).replace("N/A", "--")
+            w5_txt = str(item.get("w_5mm", "--")).replace("N/A", "--")
+            ian_v = item.get("nerve_dist_mm")
+            ian_txt = f"{float(ian_v):.1f}" if ian_v is not None else "--"
+            reason = item.get("withheld_reason")
+        else:
+            uri = getattr(item, "image_data_uri", "")
+            off = float(getattr(item, "offset_mm", 0.0))
+            fdi_val = getattr(item, "fdi", None)
+            h_v = getattr(item, "height_mm", None)
+            w0_v = getattr(item, "crest_width_mm", None)
+            w3_v = getattr(item, "width_3mm", None)
+            w5_v = getattr(item, "width_5mm", None)
+            ian_v = getattr(item, "nerve_dist_mm", None)
+            h_txt = f"{h_v:.1f}" if h_v is not None else "--"
+            w0_txt = f"{w0_v:.1f}" if w0_v is not None else "--"
+            w3_txt = f"{w3_v:.1f}" if w3_v is not None else "--"
+            w5_txt = f"{w5_v:.1f}" if w5_v is not None else "--"
+            ian_txt = f"{ian_v:.1f}" if ian_v is not None else "--"
+            reason = getattr(item, "withheld_reason", None)
+
+        if uri and "," in uri:
+            pixmap = qt.QPixmap()
+            if pixmap.loadFromData(base64.b64decode(uri.split(",", 1)[1])):
+                self.inlineGalleryActiveImageLabel.setPixmap(
+                    pixmap.scaled(360, 440, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+                )
+        else:
+            self.inlineGalleryActiveImageLabel.setText("Slice unavailable")
+
+        if getattr(self, "inlineGalleryActiveCaptionLabel", None) is not None:
+            fdi_tag = f"FDI #{fdi_val} | " if fdi_val is not None else ""
+            note_part = f" | Note: {reason}" if reason else ""
+            self.inlineGalleryActiveCaptionLabel.setText(
+                f"<b>{fdi_tag}Slice {idx + 1} ({off:+.1f} mm)</b> — "
+                f"H: {h_txt} mm | W0: {w0_txt} mm | W3: {w3_txt} mm | W5: {w5_txt} mm | Vital: {ian_txt} mm{note_part}"
+            )
 
     def _populateInlineMeasuredGallery(
         self,
@@ -3832,8 +3996,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         html_path: Optional[Path] = None,
         pdf_path: Optional[Path] = None,
         png_path: Optional[Path] = None,
+        full_gallery: Optional[bool] = None,
     ) -> None:
-        """Populate the embedded Step 5 measured cross-section image gallery from `slices_items`."""
+        """Populate the Step 5 active cross-section viewer and collapsible horizontal thumbnail strip."""
         if qt is None or getattr(self, "inlineGalleryGrid", None) is None:
             return
         while self.inlineGalleryGrid.count():
@@ -3841,6 +4006,14 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if child and child.widget():
                 child.widget().deleteLater()
 
+        is_full = (len(slices_items) > 1) if full_gallery is None else bool(full_gallery)
+        self._galleryState.set_items(slices_items, full_gallery=is_full)
+        if getattr(self, "inlineGalleryStaleLabel", None) is not None:
+            self.inlineGalleryStaleLabel.setVisible(False)
+        if getattr(self, "inlineGalleryThumbsBox", None) is not None:
+            self.inlineGalleryThumbsBox.text = f"All Cross-Section Thumbnails ({len(slices_items)})"
+
+        self._renderActiveGallerySlice()
         if not slices_items:
             if getattr(self, "inlineGalleryStatusLabel", None) is not None:
                 self.inlineGalleryStatusLabel.setText(
@@ -3851,10 +4024,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         import base64
 
         shown = list(slices_items)
-        cols = 3 if len(shown) <= 9 else (5 if len(shown) <= 15 else 6)
-        thumb_w, thumb_h = (185, 240) if cols == 3 else ((155, 205) if cols == 5 else (140, 185))
+        thumb_w, thumb_h = (120, 155)
         for idx, item in enumerate(shown):
-            r, c = divmod(idx, cols)
+            r, c = 0, idx
             if isinstance(item, dict):
                 uri = item.get("image_data_uri", "")
                 off = float(item.get("offset_mm", 0.0))
@@ -4882,7 +5054,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 try:
                     sw.sliceView().forceRender()
                 except Exception:
-                    pass
+                    pass  # silent-ok: headless sliceView mock may not implement forceRender
 
     def standardize_to_lpi(self, volumeNode: Any) -> None:
         """Deprecated alias for `reset_slice_views` (the old name was misleading)."""
@@ -5008,7 +5180,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 vol = CBCTVolume.from_slicer_volume_node(volumeNode)
                 if is_5class:
                     if jaw_low.startswith("sh"):
-                        z_idx, y_idx, x_idx = np.where((mask == 3) | (mask == 4))
+                        z_idx, y_idx, x_idx = np.where(tooth_mask_from_labels(mask, is_5class=True))
                     else:
                         target_val = 3 if jaw_low.startswith("up") else 4
                         z_idx, y_idx, x_idx = np.where(mask == target_val)
@@ -5203,7 +5375,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     def fdi_to_normalized_arch_t(fdi: int) -> float:
         """B2: Map FDI tooth number to normalized arch parameter t in [0.04, 0.96] using anatomical mesiodistal widths."""
         fdi_str = str(fdi)
-        order = JAW_TOOTH_ORDER["lower"] if int(fdi) >= 31 else JAW_TOOTH_ORDER["upper"]
+        order = JAW_TOOTH_ORDER["lower"] if is_mandibular_fdi(fdi) else JAW_TOOTH_ORDER["upper"]
         if fdi_str not in order:
             raise ValueError(f"Invalid FDI tooth number: {fdi}")
         widths = np.array([ANATOMICAL_MESIODISTAL_WIDTHS_MM.get(k, 7.5) for k in order], dtype=np.float64)
@@ -5264,7 +5436,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         volumeNode: Any,
         segmentationNode: Any = None,
     ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]]:
-        jaw = "Lower" if int(fdi) >= 31 else "Upper"
+        jaw = "Lower" if is_mandibular_fdi(fdi) else "Upper"
         pNode = self.getParameterNode() if slicer is not None else None
         arch_mode = (pNode.GetParameter("ArchMode") or "") if pNode else ""
         eff_jaw = "Shared" if arch_mode.startswith("Shared") else jaw
@@ -5299,7 +5471,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         settings: Optional[CursorSettings] = None,
     ) -> Optional[float]:
         """O4 & B11: Jump Cross-Section Lightbox, Axial lines, Pano lines, and Red Axial offset (`sync_axial_slice=True`) to `fdi`."""
-        jaw = "Lower" if int(fdi) >= 31 else "Upper"
+        jaw = "Lower" if is_mandibular_fdi(fdi) else "Upper"
         pNode = self.getParameterNode() if slicer is not None else None
         arch_mode = (pNode.GetParameter("ArchMode") or "") if pNode else ""
         eff_jaw = "Shared" if arch_mode.startswith("Shared") else jaw
@@ -5485,7 +5657,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         else:
             P, _, N, B, _, _ = frame_info
 
-        is_lower = int(fdi) >= 31
+        is_lower = is_mandibular_fdi(fdi)
         apical_vec = -B if is_lower else B
         yellow_id = self.navigator._get_view_node_id("Yellow")
 
@@ -5598,12 +5770,8 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def _mask_cache_token(volumeNode: Any, segmentationNode: Any) -> Tuple[Any, ...]:
-        """Identity plus mtime for both nodes; any segment edit invalidates the mask."""
-        key: list = []
-        for node in (volumeNode, segmentationNode):
-            key.append(node.GetID() if hasattr(node, "GetID") else str(id(node)))
-            key.append(int(node.GetMTime()) if hasattr(node, "GetMTime") else 0)
-        return tuple(key)
+        """Identity, mtime, segmentation/image mtime, geometry, and parent transform token."""
+        return compute_volume_segmentation_cache_token(volumeNode, segmentationNode)
 
     def _collect_arches(self, volumeNode: Any) -> Dict[str, DentalArch]:
         arches: Dict[str, DentalArch] = {}
@@ -5677,7 +5845,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         segmentationNode: Any = None,
         engine: Optional[MeasurementEngine] = None,
     ) -> Dict[str, Any]:
-        is_lower = int(fdi) >= 31
+        is_lower = is_mandibular_fdi(fdi)
         jaw = "lower" if is_lower else "upper"
         site_map = (
             self.get_fdi_arc_site_map(volumeNode, jaw=jaw, segmentationNode=segmentationNode)
@@ -5931,12 +6099,15 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         pNode = self.getParameterNode() if slicer is not None else None
         jaw = (pNode.GetParameter("ActiveJaw") or "Lower") if pNode else "Lower"
         curveNode = self.get_curve_node_for_jaw(volumeNode, jaw, parameterNode=pNode)
-        if curveNode is not None and curveNode.GetNumberOfControlPoints() >= 4:
-            arch_pts = self.panoramic.extract_world_points_from_curve_node(curveNode)
-        else:
-            arch_pts = np.array(
-                [[25.0, -15.0, 0.0], [15.0, 10.0, 0.0], [-15.0, 10.0, 0.0], [-25.0, -15.0, 0.0]],
-                dtype=np.float64,
+        if curveNode is None or curveNode.GetNumberOfControlPoints() < 4:
+            raise ValueError(
+                f"Cannot export surgical guide for {jaw} jaw: a valid fitted or manually confirmed "
+                "dental arch curve (>= 4 control points) is required. Fit or draw the arch in Step 2 first."
+            )
+        arch_pts = self.panoramic.extract_world_points_from_curve_node(curveNode)
+        if len(arch_pts) < 4 or not np.all(np.isfinite(arch_pts)):
+            raise ValueError(
+                f"Cannot export surgical guide for {jaw} jaw: arch curve control points are invalid or degenerate."
             )
         implants = self.implants.get_reportable_implants(include_unconfirmed=False)
         return self.surgical_guides.export_surgical_guide_stl_and_json(

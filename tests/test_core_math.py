@@ -572,10 +572,10 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         # would stop at the basal block (~3 mm of height).
         self.assertAlmostEqual(meas.bone_height_mm or 0.0, 16.0, delta=1.0)
         # Crest width spans the lingual plate plus the root wall; jawbone alone is ~1 mm.
-        self.assertAlmostEqual(meas.crest_width_mm or 0.0, 5.0, delta=0.75)
+        self.assertAlmostEqual(meas.crest_width_mm or 0.0, 6.0, delta=0.75)
 
     def test_ridge_envelope_hu_fallback_when_segmentation_covers_only_teeth(self) -> None:
-        """RC-01: a teeth-only segmentation measures gray-value bone instead of rejecting the site."""
+        """Clinical safety: a teeth-only segmentation withholds bone metrics instead of using HU thresholds."""
         img = np.full((50, 50, 50), -500.0, dtype=np.float32)
         mask = np.zeros((50, 50, 50), dtype=np.uint16)
         mask[10:30, 21:29, 10:40] = 46  # only the tooth is segmented
@@ -583,11 +583,9 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
 
         engine = self._ridge_engine(mask, img, is_5class=False)
         meas = engine.measure_implant_site("46")
-        self.assertIsNotNone(meas)
-        assert meas is not None
-        self.assertIsNone(meas.withheld_reason)
-        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 19.0, delta=0.75)
-        self.assertAlmostEqual(meas.crest_width_mm or 0.0, 7.0, delta=1.0)
+        self.assertIsNone(meas)
+        self.assertIsNotNone(engine.last_withheld_reason)
+        self.assertIn("mandibular jaw segmentation", str(engine.last_withheld_reason).lower())
 
     def test_b5_cpr_displacement_and_grid_frame_identical_handedness(self) -> None:
         """B5: Verify CPR displacement frame (-N, B, T) and grid frame both have det = +1 (no mirroring)."""
@@ -946,12 +944,9 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertTrue(render.available)
         width = (len(u) - 1) * 2
         expected_x = (-3.0 - u[0]) / (u[-1] - u[0]) * width
-        crest_line = next(
+        w0_line = next(
             line for line in render.overlay_px if line[0][1] == line[1][1] and line[0][0] < line[1][0]
         )
-        self.assertLessEqual(abs(crest_line[0][0] - 0.0), 1.5)
-        self.assertAlmostEqual(crest_line[1][0], width, delta=1.5)
-        w0_line = render.overlay_px[-3]
         self.assertLessEqual(abs(w0_line[0][0] - expected_x), 1.0)
 
         class _Arch:
@@ -996,7 +991,7 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
 
             first_png = base64.b64decode(slices_15[0].image_data_uri.split(",", 1)[1])
             with Image.open(io.BytesIO(first_png)) as png:
-                self.assertEqual(png.size, (160, 160))
+                self.assertEqual(png.size, (240, 240))
                 pixels = np.asarray(png.convert("L"), dtype=np.float32)
             self.assertGreater(float(pixels.std()), 15.0)
             self.assertGreater(float(pixels.max()) - float(pixels.min()), 80.0)

@@ -36,9 +36,9 @@
   3. VR preset `"DentalSegmentator Vivid Teeth & Roots"` suppresses soft tissue and makes trabecular bone a subtle veil (`alpha <= 0.10`) while ramping root dentin (`950–1450 HU`) and crown enamel (`1500–2800 HU`) to high opacity (`0.75–1.0`).
 
 ### Rule Card RC-04: RISE-MAR Metal Artifact Reduction (`Masaaki-75/rise-mar`)
-- **Given**: A CBCT volume affected by metallic dental restorations, implants, or brackets, and weights at `C:\Users\hamid\Downloads\risemar_dental_preview.pkl`.
+- **Given**: A CBCT volume affected by metallic dental restorations, implants, or brackets, and weights at a user-configured `.pkl` / `.pth` checkpoint (stored in Slicer settings).
 - **When**: The user enables/runs **RISE-MAR Metal Artifact Reduction**.
 - **Then**:
   1. Clips HU to `[-1024, 3072]` and normalizes to `[0, 1]` per `Ma et al., IEEE TMI 2025`.
-  2. Loads `risemar_dental_preview.pkl` (supporting pickled `nn.Module`, `state_dict` into the CBAM Attention U-Net generator, or dynamic layer reconstruction, with automatic sinogram-streak/frequency hybrid fallback when weights are absent in CI).
+  2. Loads user-configured RISE-MAR weights (`.pkl` / `.pth`) (supporting pickled `nn.Module`, `state_dict` into the CBAM Attention U-Net generator, or dynamic layer reconstruction, with automatic sinogram-streak/frequency hybrid fallback when weights are absent in CI).
   3. Restores streak-corrupted peri-implant/interproximal regions while preserving true high-density metallic cores (`> 2500 HU`), computes pre/post Clinical Quality Assessor (`CQA`, 1–10 scale) scores, and outputs `<Volume>_RISE_MAR` (or updates in-place).

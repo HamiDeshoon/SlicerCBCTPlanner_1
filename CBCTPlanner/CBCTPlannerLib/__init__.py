@@ -70,6 +70,7 @@ from .Phase7Tools import (
 from .RiseMarEngine import (
     DEFAULT_METAL_THRESHOLD_HU,
     DEFAULT_RISEMAR_WEIGHTS_PATH,
+    validate_risemar_weights_path,
     RISEMAR_HU_MAX,
     RISEMAR_HU_MIN,
     RiseMarConfig,
@@ -132,6 +133,7 @@ __all__ = [
     "CursorSettings",
     "DEFAULT_METAL_THRESHOLD_HU",
     "DEFAULT_RISEMAR_WEIGHTS_PATH",
+    "validate_risemar_weights_path",
     "DENTAL_SEGMENT_PRESETS",
     "GuideSleeveSpec",
     "ImpactedToothCLICResult",

@@ -21,6 +21,7 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
+from .core.labels import is_mandibular_fdi
 
 try:
     import slicer  # type: ignore
@@ -231,7 +232,7 @@ class ImplantPlannerLogic:
                 length_mm=10.0,
             )
 
-        is_mandible = int(fdi) >= 31
+        is_mandible = is_mandibular_fdi(fdi)
         apical_vec = self.compute_tilted_implant_axis(
             T,
             N,
@@ -343,7 +344,7 @@ class ImplantPlannerLogic:
                 imp.min_neighbor_implant_distance_mm = round(min_imp_dist, 2)
 
             # 2. Canal proximity via CanalTraceData if available
-            is_mandible = int(fdi) >= 31
+            is_mandible = is_mandibular_fdi(fdi)
             if is_mandible and canals:
                 side_key = "Right" if int(str(fdi)[0]) == 4 else "Left"
                 canal_trace = canals.get(side_key) or next(iter(canals.values()), None)
@@ -646,7 +647,7 @@ class ImplantPlannerLogic:
         )
         apical = np.asarray(implant.axis_apical_ras, dtype=np.float64)
         apical /= max(1e-8, float(np.linalg.norm(apical)))
-        is_mandible = int(implant.fdi) >= 31
+        is_mandible = is_mandibular_fdi(implant.fdi)
         screen_up = -apical if is_mandible else apical
 
         n_vec = np.asarray(buccal_normal, dtype=np.float64)

@@ -23,6 +23,7 @@ except ImportError:
 from .core import ensure_optional_package
 from .core.arch_detector import project_point_to_polyline_arc_mm
 from .core.labels import (
+    is_mandibular_fdi,
     DENTALSEGMENTATOR_CANAL_ID,
     FDI_TO_PULP_ID,
     LEFT_IAN_ID,
@@ -171,7 +172,7 @@ class CanalTracerLogic:
         pz, py, px = np.where(bin_pulp)
         w_pts = volume.voxel_to_world(np.column_stack([px, py, pz]))
         # Order along Superior-Inferior axis (Z) from crown to apex
-        is_lower = int(fdi) >= 31
+        is_lower = is_mandibular_fdi(fdi)
         order = np.argsort(w_pts[:, 2])[::-1] if is_lower else np.argsort(w_pts[:, 2])
         w_sorted = w_pts[order]
         n_bins = min(8, max(4, len(w_sorted) // 2))
