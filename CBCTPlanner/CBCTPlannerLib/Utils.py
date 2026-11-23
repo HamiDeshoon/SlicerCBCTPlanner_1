@@ -29,14 +29,14 @@ CUSTOM_DENTAL_LIGHTBOX_LAYOUT_ID = 503
 
 CUSTOM_DENTAL_LAYOUT_XML = """
 <layout type="vertical" split="true">
-  <item splitSize="450">
+  <item splitSize="580">
     <view class="vtkMRMLSliceNode" singletontag="Green">
       <property name="orientation" action="default">Axial</property>
       <property name="viewlabel" action="default">G</property>
       <property name="viewcolor" action="default">#6EB04B</property>
     </view>
   </item>
-  <item splitSize="550">
+  <item splitSize="420">
     <layout type="horizontal" split="true">
       <item splitSize="333">
         <view class="vtkMRMLSliceNode" singletontag="Red">
@@ -64,30 +64,30 @@ CUSTOM_DENTAL_LAYOUT_XML = """
 
 CUSTOM_DENTAL_LIGHTBOX_LAYOUT_XML = """
 <layout type="vertical" split="true">
-  <item splitSize="480">
+  <item splitSize="540">
     <layout type="horizontal" split="true">
-      <item splitSize="420">
+      <item splitSize="560">
         <view class="vtkMRMLSliceNode" singletontag="Green">
           <property name="orientation" action="default">Axial</property>
           <property name="viewlabel" action="default">Pano</property>
           <property name="viewcolor" action="default">#6EB04B</property>
         </view>
       </item>
-      <item splitSize="300">
+      <item splitSize="220">
         <view class="vtkMRMLSliceNode" singletontag="Red">
           <property name="orientation" action="default">Axial</property>
           <property name="viewlabel" action="default">Axial</property>
           <property name="viewcolor" action="default">#F34A33</property>
         </view>
       </item>
-      <item splitSize="280">
+      <item splitSize="220">
         <view class="vtkMRMLViewNode" singletontag="1">
           <property name="viewlabel" action="default">3D</property>
         </view>
       </item>
     </layout>
   </item>
-  <item splitSize="520">
+  <item splitSize="460">
     <layout type="horizontal" split="true">
       <item splitSize="333">
         <view class="vtkMRMLSliceNode" singletontag="YellowMinus">

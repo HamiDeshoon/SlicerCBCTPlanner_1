@@ -230,6 +230,11 @@ class CrossSectionData:
     width_segments: Dict[float, Tuple[float, float]]
     canal_centroid_uv: Optional[Tuple[float, float]]
     basal_v: Optional[float] = None
+    root_apex_v: Optional[float] = None
+    sinus_floor_uv: Optional[List[Tuple[float, float]]] = None
+    ridge_axis_angle_deg: Optional[float] = None
+    buccal_plate_mm: Optional[float] = None
+    lingual_plate_mm: Optional[float] = None
     height_u: float = 0.0
     is_mandible: bool = True
     # Why this cross-section withheld a metric (implausible ridge, no crest, failure).
@@ -478,6 +483,75 @@ class MeasurementEngine:
         resolved = self._site_center_with_provenance(str(fdi), offset_mm=offset_mm)
         return None if resolved is None else resolved[0]
 
+    def is_tooth_missing(self, fdi: int) -> bool:
+        """Return True when `fdi` has no segmented tooth mask (edentulous site)."""
+        fdi_str = str(int(fdi))
+        if not self.is_dental_segmentator_5class:
+            return self._get_tooth_info(fdi_str) is None
+        # For 5-class masks, check whether tooth voxels exist within +/- 3.5 mm of the site center
+        info = get_tooth_label(fdi_str)
+        if info is None:
+            return False
+        center = self.get_site_center_ras(fdi_str)
+        if center is None:
+            return False
+        is_mand = info.quadrant in (3, 4)
+        tooth_lbl = DENTALSEGMENTATOR_LOWER_TEETH_ID if is_mand else DENTALSEGMENTATOR_UPPER_TEETH_ID
+        vox = self.volume.world_to_voxel(center)
+        vx, vy, vz = int(round(vox[0])), int(round(vox[1])), int(round(vox[2]))
+        sz, sy, sx = self.volume.spacing
+        rx = max(2, int(round(3.5 / max(1e-3, sx))))
+        ry = max(2, int(round(3.5 / max(1e-3, sy))))
+        rz = max(2, int(round(5.0 / max(1e-3, sz))))
+        sub = self.mask[
+            max(0, vz - rz) : min(self.mask.shape[0], vz + rz + 1),
+            max(0, vy - ry) : min(self.mask.shape[1], vy + ry + 1),
+            max(0, vx - rx) : min(self.mask.shape[2], vx + rx + 1),
+        ]
+        return int(np.count_nonzero(sub == tooth_lbl)) < 25
+
+    def expand_missing_edentulous_span(
+        self, requested_fdis: List[int]
+    ) -> Tuple[List[int], List[int]]:
+        """Smartly expand requested tooth site(s) to include all contiguous missing/empty teeth.
+
+        For example, if the clinician requests tooth #45 (tooth 5) and both #45 and #46 are
+        missing, this automatically returns `([45, 46], [45, 46])` so every empty tooth in
+        the edentulous span is measured and drawn.
+        Returns `(expanded_fdis, missing_fdis)`.
+        """
+        if not requested_fdis:
+            return [], []
+        req_set = {int(f) for f in requested_fdis}
+        expanded = set(req_set)
+        missing_detected: set = set()
+
+        # Check each requested tooth; if it is missing, walk mesially & distally in the same
+        # quadrant (positions 1..7; include 8 only if explicitly requested) to capture the
+        # entire contiguous edentulous span.
+        for fdi in sorted(req_set):
+            q = int(str(fdi)[0])
+            pos = int(str(fdi)[1])
+            if self.is_tooth_missing(fdi):
+                missing_detected.add(fdi)
+                # Walk mesially (toward 1)
+                for p in range(pos - 1, 0, -1):
+                    cand = q * 10 + p
+                    if self.is_tooth_missing(cand):
+                        expanded.add(cand)
+                        missing_detected.add(cand)
+                    else:
+                        break
+                # Walk distally (toward 7)
+                for p in range(pos + 1, 8):
+                    cand = q * 10 + p
+                    if self.is_tooth_missing(cand):
+                        expanded.add(cand)
+                        missing_detected.add(cand)
+                    else:
+                        break
+        return sorted(expanded), sorted(missing_detected)
+
     def measure_implant_site(self, fdi: str, offset_mm: float = 0.0) -> Optional[ImplantSiteMeasurement]:
         """Compute implant planning metrics in the arch-frame cross-section (B4); returns None if unmeasurable."""
         self.last_withheld_reason = None
@@ -574,15 +648,25 @@ class MeasurementEngine:
             withheld_reason = height_reason
         if crest_v is not None and bone_height_mm is not None:
             cs.basal_v = crest_v - bone_height_mm if is_mandible else crest_v + bone_height_mm
+        if tooth_id is not None:
+            t_rows = np.flatnonzero((mask_cs == int(tooth_id)).any(axis=1))
+            if t_rows.size >= 3:
+                apex_idx = int(t_rows[0]) if is_mandible else int(t_rows[-1])
+                cs.root_apex_v = float(v_coords[apex_idx])
 
         depths = [0.0, 3.0, 5.0, 6.0, 9.0]
         if width_ok:
-            widths = self._compute_bone_widths_in_cs(
-                u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths, bone_mask=bone_mask
-            )
             cs.width_segments = self._compute_bone_widths_with_endpoints_in_cs(
                 u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, depths, bone_mask=bone_mask
             )
+            widths = {
+                depth: (
+                    round(abs(float(cs.width_segments[depth][1]) - float(cs.width_segments[depth][0])), 2)
+                    if depth in cs.width_segments
+                    else None
+                )
+                for depth in depths
+            }
         else:
             widths = {depth: None for depth in depths}
             withheld_reason = _join_reasons(withheld_reason, width_reason)
@@ -617,13 +701,32 @@ class MeasurementEngine:
         buccal_plate_w, lingual_plate_w = self._compute_cortical_plates_in_cs(
             u_coords, v_coords, mask_cs, crest_v, is_mandible, jaw_id, tooth=tooth
         )
+        cs.buccal_plate_mm = buccal_plate_w
+        cs.lingual_plate_mm = lingual_plate_w
+        # Compute ridge buccolingual inclination angle from crest center to 5 mm / 6 mm center
+        if 0.0 in cs.width_segments and (5.0 in cs.width_segments or 3.0 in cs.width_segments):
+            d_ref = 5.0 if 5.0 in cs.width_segments else 3.0
+            u0 = 0.5 * (cs.width_segments[0.0][0] + cs.width_segments[0.0][1])
+            ud = 0.5 * (cs.width_segments[d_ref][0] + cs.width_segments[d_ref][1])
+            cs.ridge_axis_angle_deg = round(float(np.degrees(np.arctan2(ud - u0, d_ref))), 1)
+
         if vital_id is not None:
-            canal_v, canal_u = np.where(mask_cs == vital_id)
-            if len(canal_u) > 0:
-                cs.canal_centroid_uv = (
-                    float(np.mean(u_coords[canal_u])),
-                    float(np.mean(v_coords[canal_v])),
-                )
+            vital_v, vital_u = np.where(mask_cs == vital_id)
+            if len(vital_u) > 0:
+                if is_mandible:
+                    cs.canal_centroid_uv = (
+                        float(np.mean(u_coords[vital_u])),
+                        float(np.mean(v_coords[vital_v])),
+                    )
+                else:
+                    # Maxillary sinus floor contour: inferior-most sinus voxel per column
+                    sinus_pts: List[Tuple[float, float]] = []
+                    for u_col in np.unique(vital_u)[::2]:
+                        col_vs = vital_v[vital_u == u_col]
+                        if col_vs.size > 0:
+                            sinus_pts.append((float(u_coords[int(u_col)]), float(v_coords[int(col_vs.min())])))
+                    if len(sinus_pts) >= 2:
+                        cs.sinus_floor_uv = sinus_pts
 
         return ImplantSiteMeasurement(
             tooth_fdi=fdi,

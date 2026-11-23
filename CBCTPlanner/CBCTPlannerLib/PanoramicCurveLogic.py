@@ -668,18 +668,57 @@ class PanoramicCurveLogic:
         )
         mode = projection_mode.strip().upper()
         base_vox, disp_vox = cls._slab_voxel_basis(cbct_volume, base_surface, disp_x_cols)
+        dim_y, dim_z = base_vox.shape[:2]
         accum: Optional[np.ndarray] = None
+        try:
+            from scipy import ndimage  # type: ignore
 
-        for u_val in u_offsets:
-            sampled = cls._sample_slab_layer(cbct_volume, base_vox, disp_vox, float(u_val))
-            if accum is None:
-                accum = sampled
-            elif mode == "MIP":
-                np.maximum(accum, sampled, out=accum)
-            elif mode == "MINIP":
-                np.minimum(accum, sampled, out=accum)
-            else:
-                accum += sampled
+            # Pre-allocate reusable float32 coordinate & output buffers (eliminates per-layer allocs)
+            coords = np.empty((3, dim_y, dim_z), dtype=np.float32)
+            layer_buf = np.empty((dim_y, dim_z), dtype=np.float32)
+            base_z = np.ascontiguousarray(base_vox[:, :, 2], dtype=np.float32)
+            base_y = np.ascontiguousarray(base_vox[:, :, 1], dtype=np.float32)
+            base_x = np.ascontiguousarray(base_vox[:, :, 0], dtype=np.float32)
+            disp_z = np.ascontiguousarray(disp_vox[None, :, 2], dtype=np.float32)
+            disp_y = np.ascontiguousarray(disp_vox[None, :, 1], dtype=np.float32)
+            disp_x = np.ascontiguousarray(disp_vox[None, :, 0], dtype=np.float32)
+
+            for u_val in u_offsets:
+                u_f = np.float32(u_val)
+                np.multiply(disp_z, u_f, out=coords[0])
+                coords[0] += base_z
+                np.multiply(disp_y, u_f, out=coords[1])
+                coords[1] += base_y
+                np.multiply(disp_x, u_f, out=coords[2])
+                coords[2] += base_x
+                ndimage.map_coordinates(
+                    cbct_volume.image,
+                    coords,
+                    output=layer_buf,
+                    order=1,
+                    mode="constant",
+                    cval=-1000.0,
+                    prefilter=False,
+                )
+                if accum is None:
+                    accum = layer_buf.copy()
+                elif mode == "MIP":
+                    np.maximum(accum, layer_buf, out=accum)
+                elif mode == "MINIP":
+                    np.minimum(accum, layer_buf, out=accum)
+                else:
+                    accum += layer_buf
+        except ImportError:
+            for u_val in u_offsets:
+                sampled = cls._sample_slab_layer(cbct_volume, base_vox, disp_vox, float(u_val))
+                if accum is None:
+                    accum = sampled
+                elif mode == "MIP":
+                    np.maximum(accum, sampled, out=accum)
+                elif mode == "MINIP":
+                    np.minimum(accum, sampled, out=accum)
+                else:
+                    accum += sampled
 
         assert accum is not None
         return cls._finalize_projection(accum, mode, n_layers)
