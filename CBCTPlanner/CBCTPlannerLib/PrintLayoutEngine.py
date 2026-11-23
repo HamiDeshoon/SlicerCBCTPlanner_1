@@ -18,7 +18,7 @@ Multi-quadrant selections produce one page per quadrant, footered "Page N of M".
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import html
 import io
@@ -81,13 +81,14 @@ class CrossSectionSliceSpec:
     image_data_uri: str = ""
     # Why a tile withholds H/W (empty when every metric was measured).
     withheld_reason: Optional[str] = None
+    _pil_image: Optional[Any] = field(default=None, repr=False)
 
 
 def _image_to_data_uri(image: Any) -> str:
     if image is None:
         return ""
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
+    image.save(buffer, format="PNG", compress_level=3)
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
@@ -190,6 +191,23 @@ class PrintLayoutEngine:
             if q_fdis:
                 groups.append((q, q_fdis))
 
+        # Smartly expand contiguous missing/empty teeth (e.g. if tooth 5 is requested and
+        # both teeth 5 & 6 are missing, automatically include & measure all empty teeth in the span).
+        missing_fdis_set = set()
+        if hasattr(engine, "expand_missing_edentulous_span"):
+            try:
+                expanded_fdis, missing_fdis = engine.expand_missing_edentulous_span(fdis)
+                if expanded_fdis:
+                    fdis = sort_teeth_anatomically(expanded_fdis)
+                    missing_fdis_set = set(int(x) for x in missing_fdis)
+                    groups = []
+                    for q in (1, 2, 3, 4):
+                        q_fdis = [fdi for fdi in fdis if int(str(fdi)[0]) == q]
+                        if q_fdis:
+                            groups.append((q, q_fdis))
+            except Exception:
+                logger.debug("Missing-tooth span expansion skipped", exc_info=True)
+
         all_specs: List[CrossSectionSliceSpec] = []
         page_records: List[dict] = []
         for q, q_fdis in groups:
@@ -199,13 +217,28 @@ class PrintLayoutEngine:
             arcs = self._tooth_arcs(engine, q_fdis)
             if not arcs:
                 raise RuntimeError(f"No arch positions for quadrant {q}; fit the arch first")
+            # Ensure a full quadrant or multi-tooth span never collapses onto a single tooth
+            if len(q_fdis) >= 2 and (max(arcs.values()) - min(arcs.values())) < 2.0:
+                arch = engine._arch_for_jaw(is_mandible) if hasattr(engine, "_arch_for_jaw") else None
+                if arch is not None:
+                    from .core.arch_detector import compute_fdi_arc_positions_mm
+                    jaw_key = "lower" if is_mandible else "upper"
+                    site_map = compute_fdi_arc_positions_mm(
+                        total_arc_length_mm=float(arch.total_arc_length),
+                        jaw_type=jaw_key,
+                        arch=arch,
+                    )
+                    for tf in q_fdis:
+                        if str(tf) in site_map:
+                            arcs[int(tf)] = float(site_map[str(tf)].arc_mm)
             center_arc = float(np.mean(list(arcs.values())))
-            if len(q_fdis) <= 3:
+            if len(q_fdis) == 1:
                 arc_values = center_arc + (np.arange(n_slices) - (n_slices - 1) / 2.0) * step_mm
             else:
                 first_arc = min(arcs.values())
                 last_arc = max(arcs.values())
-                arc_values = np.linspace(first_arc - 2.0, last_arc + 2.0, n_slices)
+                pad = 2.5 if len(q_fdis) <= 3 else 2.0
+                arc_values = np.linspace(first_arc - pad, last_arc + pad, n_slices)
 
             specs: List[CrossSectionSliceSpec] = []
             for s_idx, arc_mm in enumerate(arc_values):
@@ -218,13 +251,14 @@ class PrintLayoutEngine:
                     logger.exception(
                         "Cross-section measurement failed at %.2f mm (FDI %s)", arc_mm, target_fdi
                     )
+                pil_tile = None
                 if cs is not None:
-                    render = render_cross_section(cs, meas, scale=3)
-                    data_uri = (
-                        _image_to_data_uri(render.image)
-                        if render.available and render.image is not None
-                        else _unavailable_data_uri("Cross-section")
-                    )
+                    render = render_cross_section(cs, meas, scale=3, show_masks=False, show_implant_guides=True)
+                    if render.available and render.image is not None:
+                        pil_tile = render.image
+                        data_uri = _image_to_data_uri(pil_tile)
+                    else:
+                        data_uri = _unavailable_data_uri("Cross-section")
                 else:
                     data_uri = _unavailable_data_uri("Cross-section")
 
@@ -250,6 +284,7 @@ class PrintLayoutEngine:
                     mean_hu=meas.mean_density_hu if meas else None,
                     is_mandible=is_mandible,
                     image_data_uri=data_uri,
+                    _pil_image=pil_tile,
                     withheld_reason=(
                         meas.withheld_reason
                         if meas is not None
@@ -259,8 +294,16 @@ class PrintLayoutEngine:
                 specs.append(spec)
                 all_specs.append(spec)
 
+            hi_indices = [
+                i for i, s in enumerate(specs)
+                if (int(s.fdi) in missing_fdis_set or abs(float(s.offset_mm)) < 0.05)
+            ]
             pano_uri = pano_b64 or self._pano_strip_uri(
-                arc_values, [s.fdi for s in specs], engine=engine, is_mandible=is_mandible
+                arc_values,
+                [f"#{s.fdi}" for s in specs],
+                engine=engine,
+                is_mandible=is_mandible,
+                highlight_indices=hi_indices,
             )
             if not pano_uri:
                 pano_uri = _unavailable_data_uri("Panoramic")
@@ -350,9 +393,10 @@ class PrintLayoutEngine:
     def _pano_strip_uri(
         self,
         arcs: Sequence[float],
-        labels: Sequence[int],
+        labels: Sequence[Any],
         engine: Any = None,
         is_mandible: bool = True,
+        highlight_indices: Optional[Sequence[int]] = None,
     ) -> Optional[str]:
         """Render the panoramic strip from `PanoramicVolume`, or synthesize it in-process from `engine`."""
         # 1. Try existing Slicer PanoramicVolume node first
@@ -372,8 +416,11 @@ class PrintLayoutEngine:
                         column_spacing_mm=max(1e-3, spacing),
                         tick_arcs_mm=arcs,
                         labels=[str(label) for label in labels],
-                        strip_height=340,
+                        strip_height=460,
                         scale=2,
+                        flip_vertical=True,
+                        show_cross_section_lines=True,
+                        highlight_indices=highlight_indices,
                     )
                     if render.available and render.image is not None:
                         return _image_to_data_uri(render.image)
@@ -413,15 +460,18 @@ class PrintLayoutEngine:
                         height_mm=70.0,
                         spacing_mm=0.75,
                         projection_mode="Mean",
-                        flip_vertical=True,
+                        flip_vertical=False,
                     )
                     render = render_panoramic_strip(
                         pano_arr,
                         column_spacing_mm=0.75,
                         tick_arcs_mm=arcs,
                         labels=[str(label) for label in labels],
-                        strip_height=340,
+                        strip_height=460,
                         scale=2,
+                        flip_vertical=True,
+                        show_cross_section_lines=True,
+                        highlight_indices=highlight_indices,
                     )
                     if render.available and render.image is not None:
                         return _image_to_data_uri(render.image)
@@ -488,7 +538,7 @@ class PrintLayoutEngine:
         if Image is None:
             return None
         page_w, page_h = 2400, 3000
-        page = Image.new("RGB", (page_w, page_h), (15, 23, 42))
+        page = Image.new("RGB", (page_w, page_h), (2, 4, 9))
         draw = ImageDraw.Draw(page)
         margin = 68
 
@@ -513,7 +563,7 @@ class PrintLayoutEngine:
 
         # Panoramic reference strip (aspect-ratio preserved)
         pano_top = 136
-        pano_h = 340
+        pano_h = 580
         pano_w = page_w - 2 * margin
         draw.rectangle([(margin, pano_top), (margin + pano_w, pano_top + pano_h)], fill=(2, 6, 23), outline=(51, 65, 85), width=2)
         pano = _data_uri_to_image(record["pano_b64"])
@@ -524,7 +574,7 @@ class PrintLayoutEngine:
         specs: List[CrossSectionSliceSpec] = record["slices"]
         cols = 5 if len(specs) <= 15 else (7 if len(specs) <= 21 else 9)
         rows = int(math.ceil(len(specs) / cols))
-        grid_top = 500
+        grid_top = 736
         footer_top = 2855
         key_h = 280
         key_top = footer_top - key_h - 18
@@ -553,7 +603,7 @@ class PrintLayoutEngine:
             draw.text((x + 6, y + 5), hdr_txt, fill=(125, 211, 252) if not is_center else (255, 255, 255), font=font_card_hdr)
 
             # Aspect-ratio-preserving cross-section image
-            image = _data_uri_to_image(spec.image_data_uri)
+            image = spec._pil_image if getattr(spec, '_pil_image', None) is not None else _data_uri_to_image(spec.image_data_uri)
             if image is not None:
                 _paste_contain(page, image, (x + 2, y + hdr_h + 2, cell_w - 4, img_box_h), bg=(2, 6, 23))
 
@@ -578,11 +628,11 @@ class PrintLayoutEngine:
         draw.text((margin + 18, key_top + 14), "Measurement Key & Overlay Legend", fill=(56, 189, 248), font=font_key_b)
 
         legend_items = [
-            ((34, 197, 94), "H  Bone Height (mm): vertical green caliper from alveolar crest to canal / basal limit"),
-            ((0, 220, 255), "W0  Crestal Width (mm): cyan buccolingual caliper at alveolar crest"),
-            ((255, 180, 0), "W3  Width @ 3 mm depth (mm): gold-orange buccolingual caliper"),
-            ((255, 120, 40), "W5  Width @ 5 mm depth (mm): orange buccolingual caliper"),
-            ((255, 60, 60), "IAN  Inferior Alveolar Nerve canal ring / maxillary sinus clearance (red)"),
+            ((34, 197, 94), "H / Root (mm): vertical green caliper from entry point to root apex / canal / sinus"),
+            ((0, 220, 255), "W0 Entry (mm): cyan crestal width + yellow bullseye osteotomy entry target"),
+            ((255, 180, 0), "W3 / W5 (mm): gold (3 mm) & orange (5 mm) buccolingual ridge widths"),
+            ((56, 189, 248), "Impl Guide: dashed safe fixture envelope, prosthetic axis & ridge angle"),
+            ((255, 60, 60), "IAN / SINUS / 2mm SAFE: red nerve ring, magenta sinus floor & 2 mm safety barrier"),
         ]
         ly = key_top + 54
         for rgb_col, desc in legend_items:
@@ -677,13 +727,13 @@ class PrintLayoutEngine:
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
     }}
-    body {{ width: 7.5in; height: 9.5in; margin: 0; padding: 8px; background: #0f172a; color: #f8fafc; }}
+    body {{ width: 7.5in; height: 9.5in; margin: 0; padding: 8px; background: #020409; color: #f8fafc; }}
     .no-print {{ display: none !important; }}
 }}
 * {{ box-sizing: border-box; }}
 body {{
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background: #0f172a;
+    background: #020409;
     color: #f8fafc;
     margin: 0;
     padding: 14px;
@@ -719,7 +769,7 @@ body {{
     background: #020617;
     border-radius: 4px;
     overflow: hidden;
-    max-height: 132px;
+    max-height: 244px;
     display: flex;
     flex-direction: column;
 }}
@@ -730,7 +780,7 @@ body {{
     background: #1e293b;
     color: #94a3b8;
 }}
-.pano-img {{ width: 100%; max-height: 112px; object-fit: contain; background: #020617; }}
+.pano-img {{ width: 100%; max-height: 220px; object-fit: contain; background: #020617; }}
 .grid-section {{
     display: grid;
     grid-template-columns: repeat({cols}, 1fr);
@@ -741,7 +791,7 @@ body {{
     border-radius: 4px;
 }}
 .cs-card {{
-    background: #0f172a;
+    background: #020409;
     border: 1px solid #1e293b;
     border-radius: 3px;
     overflow: hidden;

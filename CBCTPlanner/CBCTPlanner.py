@@ -2557,10 +2557,16 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                         slicer.util.setSliceViewerLayers(background=marNode, fit=False)
                     except Exception:
                         logger.debug("Could not set MAR volume in slice viewers", exc_info=True)
-            summary_txt = (
-                f"RISE-MAR Complete ({res.mode_used}): {res.processed_slices}/{res.total_slices} slices | "
-                f"CQA Quality: {res.cqa_score_before:.2f} -> {res.cqa_score_after:.2f} ({res.elapsed_sec:.1f}s)"
-            )
+            if res.mode_used == "no_metal_noop":
+                summary_txt = (
+                    f"RISE-MAR Pre-Check: 0 metal voxels detected (>= {res.effective_metal_threshold_hu:.0f} HU) — "
+                    f"original contrast preserved ({res.elapsed_sec:.1f}s)"
+                )
+            else:
+                summary_txt = (
+                    f"RISE-MAR Complete ({res.mode_used}): {res.processed_slices}/{res.total_slices} metal slices "
+                    f"({res.metal_voxel_count} vox) | CQA: {res.cqa_score_before:.2f} -> {res.cqa_score_after:.2f} ({res.elapsed_sec:.1f}s)"
+                )
             if getattr(self, "risemarStatusLabel", None) is not None:
                 self.risemarStatusLabel.setText(summary_txt)
             self.globalStatusLabel.setText(summary_txt)
@@ -3806,12 +3812,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 confirm_overwrite=False,
                 allow_overwrite_user_edit=False,
             )
+        from CBCTPlannerLib.core.print_layout import slice_count_for_selection
+
+        n_slices, step_mm = slice_count_for_selection(max(1, len(selected)))
         series = self.logic.generate_cross_section_slice_series(
             fdi=fdi,
             volumeNode=volNode,
             segmentationNode=segNode,
-            num_slices=9 if len(selected) <= 2 else 15,
-            step_mm=1.0,
+            num_slices=n_slices,
+            step_mm=step_mm,
             fdis=selected or [fdi],
         )
         self._populateInlineMeasuredGallery(series)
@@ -3841,9 +3850,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         import base64
 
-        shown = list(slices_items)[:15]
-        cols = 3 if len(shown) <= 9 else 5
-        thumb_w, thumb_h = (175, 230) if cols == 3 else (145, 195)
+        shown = list(slices_items)
+        cols = 3 if len(shown) <= 9 else (5 if len(shown) <= 15 else 6)
+        thumb_w, thumb_h = (185, 240) if cols == 3 else ((155, 205) if cols == 5 else (140, 185))
         for idx, item in enumerate(shown):
             r, c = divmod(idx, cols)
             if isinstance(item, dict):
@@ -5955,19 +5964,24 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             return results
 
         tooth_list = [int(f) for f in (fdis or [fdi])]
-        is_mandible = int(str(fdi)[0]) in (3, 4)
+        if hasattr(engine, "expand_missing_edentulous_span"):
+            try:
+                expanded_list, _missing_list = engine.expand_missing_edentulous_span(tooth_list)
+                if expanded_list:
+                    tooth_list = sort_teeth_anatomically(expanded_list)
+                    from CBCTPlannerLib.core.print_layout import slice_count_for_selection
+                    rec_slices, rec_step = slice_count_for_selection(len(tooth_list))
+                    num_slices = max(int(num_slices), int(rec_slices))
+                    step_mm = float(rec_step)
+            except Exception:
+                logger.debug("Missing-tooth span expansion skipped in slice series", exc_info=True)
+
+        is_mandible = int(str(tooth_list[0])[0]) in (3, 4)
         jaw_label = "Mandible" if is_mandible else "Maxilla"
         arch = engine._arch_for_jaw(is_mandible)
         if arch is None:
             logger.error("Slice series needs a fitted arch for the %s", jaw_label)
             return results
-
-        center = engine.get_site_center_ras(str(fdi))
-        if center is None:
-            logger.error("No site center is available for FDI %s", fdi)
-            return results
-        t_center, _ = arch.find_closest_parameter(center)
-        center_arc = float(t_center) * float(arch.total_arc_length)
 
         tooth_arcs: Dict[int, float] = {}
         for tooth in tooth_list:
@@ -5977,8 +5991,31 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             tooth_t, _ = arch.find_closest_parameter(tooth_center)
             tooth_arcs[int(tooth)] = float(tooth_t) * float(arch.total_arc_length)
 
-        if len(tooth_list) >= 4 and tooth_arcs:
-            arc_values = np.linspace(min(tooth_arcs.values()) - 2.0, max(tooth_arcs.values()) + 2.0, num_slices)
+        # Ensure full quadrant or multi-tooth span never collapses onto a single tooth
+        if len(tooth_list) >= 2 and (not tooth_arcs or (max(tooth_arcs.values()) - min(tooth_arcs.values())) < 2.0):
+            jaw_key = "lower" if is_mandible else "upper"
+            site_map = compute_fdi_arc_positions_mm(
+                total_arc_length_mm=float(arch.total_arc_length),
+                jaw_type=jaw_key,
+                arch=arch,
+            )
+            for tooth in tooth_list:
+                if str(tooth) in site_map:
+                    tooth_arcs[int(tooth)] = float(site_map[str(tooth)].arc_mm)
+
+        if tooth_arcs:
+            center_arc = float(np.mean(list(tooth_arcs.values())))
+        else:
+            center = engine.get_site_center_ras(str(fdi))
+            if center is None:
+                logger.error("No site center is available for FDI %s", fdi)
+                return results
+            t_center, _ = arch.find_closest_parameter(center)
+            center_arc = float(t_center) * float(arch.total_arc_length)
+
+        if len(tooth_list) >= 2 and tooth_arcs and (max(tooth_arcs.values()) - min(tooth_arcs.values())) >= 1.5:
+            pad = 2.5 if len(tooth_list) <= 3 else 2.0
+            arc_values = np.linspace(min(tooth_arcs.values()) - pad, max(tooth_arcs.values()) + pad, num_slices)
         else:
             arc_values = center_arc + (np.arange(num_slices) - (num_slices - 1) / 2.0) * step_mm
 
@@ -5996,7 +6033,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 logger.exception("Cross-section measurement failed at %.2f mm", arc_mm)
             data_uri = ""
             if cs is not None:
-                render = render_cross_section(cs, meas, scale=3)
+                render = render_cross_section(cs, meas, scale=3, show_masks=False, show_implant_guides=True)
                 if render.available and render.image is not None:
                     import base64 as _b64
                     import io as _io

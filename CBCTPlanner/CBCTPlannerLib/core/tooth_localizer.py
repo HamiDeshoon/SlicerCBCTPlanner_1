@@ -69,6 +69,27 @@ class ToothLocalizer:
         self.arches = arches or {}
         sz, sy, sx = volume.spacing
         self.voxel_volume_mm3 = float(sx * sy * sz)
+        self._label_slices: Optional[Dict[int, Tuple[slice, slice, slice]]] = None
+
+    def _get_label_slices(self) -> Dict[int, Tuple[slice, slice, slice]]:
+        """Compute tight 3D bounding slices for all labels in one C-level pass (10-30x faster)."""
+        if self._label_slices is not None:
+            return self._label_slices
+        slices_map: Dict[int, Tuple[slice, slice, slice]] = {}
+        try:
+            from scipy import ndimage  # type: ignore
+
+            objs = ndimage.find_objects(self.mask)
+            for lbl_id, slc in enumerate(objs, start=1):
+                if slc is not None and len(slc) == 3:
+                    slices_map[int(lbl_id)] = slc
+        except Exception:
+            full = (slice(0, self.mask.shape[0]), slice(0, self.mask.shape[1]), slice(0, self.mask.shape[2]))
+            for lbl_id in np.unique(self.mask):
+                if int(lbl_id) > 0:
+                    slices_map[int(lbl_id)] = full
+        self._label_slices = slices_map
+        return slices_map
 
     def extract_tooth(self, fdi: str) -> Optional[ToothInfo]:
         """Localize and extract geometric properties of a specific tooth by FDI code."""
@@ -76,12 +97,17 @@ class ToothLocalizer:
         if not info:
             return None
 
-        tooth_mask = self.mask == info.id
-        voxel_count = int(np.count_nonzero(tooth_mask))
+        slc = self._get_label_slices().get(int(info.id))
+        if slc is None:
+            return None
+        sub_mask = self.mask[slc] == info.id
+        voxel_count = int(np.count_nonzero(sub_mask))
         if voxel_count < 4:
             return None
 
-        z_idx, y_idx, x_idx = np.where(tooth_mask)
+        sz_off, sy_off, sx_off = int(slc[0].start or 0), int(slc[1].start or 0), int(slc[2].start or 0)
+        lz, ly, lx = np.where(sub_mask)
+        z_idx, y_idx, x_idx = lz + sz_off, ly + sy_off, lx + sx_off
         vox_pts = np.column_stack([x_idx, y_idx, z_idx])
         ones = np.ones((len(vox_pts), 1), dtype=np.float64)
         vox_homog = np.hstack([vox_pts, ones])
@@ -177,11 +203,20 @@ class ToothLocalizer:
         apical_foramen_point = None
 
         if pulp_id is not None:
-            pulp_vox = int(np.count_nonzero(self.mask == pulp_id))
-            if pulp_vox > 0:
+            p_slc = self._get_label_slices().get(int(pulp_id))
+            if p_slc is not None:
+                p_sub = self.mask[p_slc] == pulp_id
+                pulp_vox = int(np.count_nonzero(p_sub))
+            else:
+                p_sub = None
+                pulp_vox = 0
+            if pulp_vox > 0 and p_sub is not None and p_slc is not None:
                 pulp_present = True
                 pulp_vol_mm3 = float(pulp_vox * self.voxel_volume_mm3)
-                pz, py, px = np.where(self.mask == pulp_id)
+                lpz, lpy, lpx = np.where(p_sub)
+                pz = lpz + int(p_slc[0].start or 0)
+                py = lpy + int(p_slc[1].start or 0)
+                px = lpx + int(p_slc[2].start or 0)
                 p_vox = np.column_stack([px, py, pz])
                 p_ones = np.ones((len(p_vox), 1), dtype=np.float64)
                 p_world = (self.volume.affine @ np.hstack([p_vox, p_ones]).T).T[:, :3]
