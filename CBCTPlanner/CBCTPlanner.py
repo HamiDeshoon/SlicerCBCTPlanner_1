@@ -630,8 +630,13 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 str(settings.value(self.SETTINGS_PREFIX + "autoStandardizeOnLoadRas", "true")).lower()
                 == "true"
             )
+            # Migration: the pre-RAS-default key is obsolete. Drop it so a stale "false"
+            # left by an older release cannot linger and be mistaken for the current choice.
+            legacy_key = self.SETTINGS_PREFIX + "autoStandardizeOnLoad"
+            if settings.contains(legacy_key):
+                settings.remove(legacy_key)
         except Exception:
-            logger.debug("Could not read autoStandardizeOnLoad setting", exc_info=True)
+            logger.debug("Could not read/migrate autoStandardizeOnLoad setting", exc_info=True)
         step1Layout.addRow(self.autoStandardizeOnLoadCheck)
 
         layoutBtnRow = qt.QHBoxLayout()
