@@ -143,6 +143,7 @@ from CBCTPlannerLib import (
     run_automated_dental_tool,
     should_handle_navigation_shortcut,
 )
+from CBCTPlannerLib.AdvancedTools import capture_vtk_render_window_png_base64
 from CBCTPlannerLib.WorkflowUIHelpers import (
     GalleryNavigationState,
     apply_risemar_validation_to_widget,
@@ -194,6 +195,7 @@ NOT_MEASURED = "not measured"
 DEFAULTS = {
     "PanoThicknessMm": 25.0,
     "PanoHeightMm": 120.0,
+    "PanoProjectionMode": "RaySum",
 }
 
 
@@ -850,7 +852,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         # ==================== STEP 3: PANORAMIC (O1, F3) ====================
         self.step3Box = ctk.ctkCollapsibleButton()
-        self.step3Box.text = "Step 3: In-Process Panoramic CPR (Mean / MIP / MinIP / RaySum)"
+        self.step3Box.text = "Step 3: In-Process Panoramic CPR (RaySum / Mean / MIP / MinIP)"
         self.step3Box.collapsed = True
         self.layout.addWidget(self.step3Box)
         step3Outer = qt.QVBoxLayout(self.step3Box)
@@ -901,9 +903,10 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         step3Layout.addRow("Panoramic Geometry:", panoGeomRow)
 
         self.panoProjCombo = qt.QComboBox()
-        self.panoProjCombo.addItems(["Mean", "MIP", "MinIP", "RaySum"])
+        self.panoProjCombo.addItems(["RaySum", "Mean", "MIP", "MinIP"])
+        self.panoProjCombo.setCurrentText(DEFAULTS["PanoProjectionMode"])
         self.panoProjCombo.setToolTip(
-            "Intensity projection mode across the slab (including RaySum pseudo-pan, F3)."
+            "Intensity projection mode across the slab (RaySum pseudo-pan default, F3)."
         )
         step3Layout.addRow("Projection Mode:", self.panoProjCombo)
 
@@ -1855,7 +1858,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             )
             self.panoOffsetSpin.setValue(float(self._parameterNode.GetParameter("PanoOffsetMm") or 0.0))
             self.panoProjCombo.setCurrentText(
-                self._parameterNode.GetParameter("PanoProjectionMode") or "Mean"
+                self._parameterNode.GetParameter("PanoProjectionMode") or DEFAULTS["PanoProjectionMode"]
             )
             self.panoFlipVerticalCheck.setChecked(
                 (self._parameterNode.GetParameter("PanoFlipVertical") or "false").lower() == "true"
@@ -2422,17 +2425,27 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onSetDentalLightboxLayout(self) -> None:
         volNode = self.volumeSelector.currentNode()
         registerAndSetDentalLightboxLayout(volumeNode=volNode)
+        if qt is not None and hasattr(qt, "QApplication"):
+            qt.QApplication.processEvents()
         self.enableLightboxCheckBox.setChecked(True)
-        if volNode and self.logic:
-            self.logic.reset_slice_views(volNode)
-            self._syncCursorToViews()
+        if self.logic:
+            if volNode:
+                self.logic.reset_slice_views(volNode)
+                self._syncCursorToViews()
+            else:
+                self.logic.refit_panoramic_view()
 
     def onSetDentalLayout(self) -> None:
         registerAndSetDentalLayout()
+        if qt is not None and hasattr(qt, "QApplication"):
+            qt.QApplication.processEvents()
         volNode = self.volumeSelector.currentNode()
-        if volNode and self.logic:
-            self.logic.reset_slice_views(volNode)
-            self._syncCursorToViews()
+        if self.logic:
+            if volNode:
+                self.logic.reset_slice_views(volNode)
+                self._syncCursorToViews()
+            else:
+                self.logic.refit_panoramic_view()
 
     def onSetStandardMpr(self) -> None:
         volNode = self.volumeSelector.currentNode()
@@ -4335,7 +4348,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "PanoThicknessMm": f"{DEFAULTS['PanoThicknessMm']:.1f}",
             "PanoHeightMm": f"{DEFAULTS['PanoHeightMm']:.1f}",
             "PanoOffsetMm": "0.0",
-            "PanoProjectionMode": "Mean",
+            "PanoProjectionMode": DEFAULTS["PanoProjectionMode"],
             "PanoFlipVertical": "false",
             "ShowAxialTicks": "true",
             "OcclusalNormalX": "0.0",
@@ -4345,7 +4358,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "CanalSafetyMarginMm": "2.0",
             "IncludePatientMetadata": "false",
             "CheckpointPath": "",
-            "VRPreset": "CT-Dental-CBCT",
+            "VRPreset": "DentalSegmentator (Teeth & Bone)",
             "VRShiftHu": "0.0",
             "VRVisible": "false",
             "VRCropEnabled": "false",
@@ -5086,6 +5099,23 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         self.reset_slice_views(volumeNode)
         return True
 
+    def refit_panoramic_view(self, slice_view_name: str = "Green") -> bool:
+        """Re-fit the active Panoramic volume inside `slice_view_name` after layout geometry changes."""
+        if slicer is None or not self.navigator.is_panoramic_shown_in_green():
+            return False
+        layoutManager = slicer.app.layoutManager() if getattr(slicer, "app", None) else None
+        if not layoutManager:
+            return False
+        sw = layoutManager.sliceWidget(slice_view_name)
+        comp = sw.mrmlSliceCompositeNode() if sw else None
+        bg_id = comp.GetBackgroundVolumeID() if comp else None
+        pano_node = slicer.mrmlScene.GetNodeByID(bg_id) if bg_id else None
+        if pano_node is None:
+            return False
+        return self.panoramic.display_panoramic_in_slice_view(
+            pano_node, slice_view_name=slice_view_name, force_fit=True
+        )
+
     def reset_slice_views(self, volumeNode: Any) -> None:
         """Reset Axial (Red), Sagittal/Cross-Section (Yellow*), and Coronal (Green) views without clobbering Panoramic."""
         if slicer is None or not volumeNode:
@@ -5103,6 +5133,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             ("Green", "Coronal"),
         ):
             if slice_name == "Green" and pano_shown:
+                self.refit_panoramic_view(slice_view_name="Green")
                 continue
             sw = layoutManager.sliceWidget(slice_name)
             if sw:
@@ -6414,12 +6445,23 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     # B21, B22 & F10: Report & CSV/JSON Export
     # ------------------------------------------------------------------
     @staticmethod
-    def _capture_slice_screenshot_base64(slice_name: str) -> Optional[str]:
+    def _capture_slice_screenshot_base64(
+        slice_name: str,
+        transparent_bg: Optional[bool] = None,
+        tight_crop: Optional[bool] = None,
+    ) -> Optional[str]:
         """B21: Capture slice view via `vtkWindowToImageFilter` on `renderWindow()`."""
-        return capture_slice_view_png_base64(slice_name)
+        is_green = str(slice_name) == "Green"
+        return capture_slice_view_png_base64(
+            slice_name,
+            transparent_bg=is_green if transparent_bg is None else bool(transparent_bg),
+            tight_crop=is_green if tight_crop is None else bool(tight_crop),
+        )
 
-    def capture_3d_view_png_base64(self, view_index: int = 0) -> Optional[str]:
-        """Capture the real 3D view (view index 0) as a PNG data URI."""
+    def capture_3d_view_png_base64(
+        self, view_index: int = 0, transparent_bg: bool = True, tight_crop: bool = True
+    ) -> Optional[str]:
+        """Capture the real 3D view (view index 0) as a tightly cropped RGBA transparent PNG data URI."""
         if slicer is None:
             return None
         try:
@@ -6430,32 +6472,13 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             if render_window is None:
                 logger.error("No 3D view is available for VR capture")
                 return None
-            view.forceRender()
-            import vtk
-
-            window_to_image = vtk.vtkWindowToImageFilter()
-            window_to_image.SetInput(render_window)
-            window_to_image.SetScale(1)
-            window_to_image.ReadFrontBufferOff()
-            window_to_image.Update()
-            writer = vtk.vtkPNGWriter()
-            writer.SetWriteToMemory(True)
-            writer.SetInputConnection(window_to_image.GetOutputPort())
-            writer.Write()
-            result = writer.GetResult()
-            if result is None or result.GetNumberOfTuples() == 0:
-                return None
-            try:
-                from vtk.util.numpy_support import vtk_to_numpy  # type: ignore
-
-                data = bytes(vtk_to_numpy(result))
-            except Exception:
-                data = bytes(result.GetValue(i) for i in range(result.GetNumberOfValues()))
-            if not data:
-                return None
-            import base64 as _b64
-
-            return "data:image/png;base64," + _b64.b64encode(data).decode("ascii")
+            return capture_vtk_render_window_png_base64(
+                render_window,
+                force_render_fn=getattr(view, "forceRender", None),
+                transparent_bg=bool(transparent_bg),
+                tight_crop=bool(tight_crop),
+                pad_frac=0.02,
+            )
         except Exception:
             logger.exception("3D VR capture failed")
             return None

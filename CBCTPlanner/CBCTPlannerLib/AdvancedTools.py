@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field
+import io
+import logging
 import math
 from pathlib import Path
 import re
@@ -37,6 +39,8 @@ except ImportError:
 from .core import ensure_optional_package
 from .core.labels import LOWER_JAW_ID
 from .core.volume_loader import CBCTVolume
+
+logger = logging.getLogger(__name__)
 
 
 # =====================================================================
@@ -435,9 +439,203 @@ def compute_surface_to_surface_distance_mm(
 
 
 # =====================================================================
-# B21: RenderWindow Slice Screenshot Capture
+# B21: RenderWindow Slice & 3D Screenshot Capture (with RGBA Transparent Background)
 # =====================================================================
-def capture_slice_view_png_base64(slice_name: str, slice_widget: Any = None) -> Optional[str]:
+def _border_connected_mask(mask: np.ndarray) -> np.ndarray:
+    """Return True for background pixels connected to any image border."""
+    h, w = mask.shape
+    if h == 0 or w == 0 or not np.any(mask):
+        return np.zeros_like(mask, dtype=bool)
+    try:
+        from scipy import ndimage  # type: ignore
+
+        labeled, _ = ndimage.label(mask)
+        border_ids = np.unique(np.concatenate([labeled[0, :], labeled[-1, :], labeled[:, 0], labeled[:, -1]]))
+        border_ids = border_ids[border_ids > 0]
+        if border_ids.size == 0:
+            return np.zeros_like(mask, dtype=bool)
+        return np.isin(labeled, border_ids)
+    except ImportError:
+        visited = np.zeros_like(mask, dtype=bool)
+        stack: List[Tuple[int, int]] = []
+        for x in range(w):
+            if mask[0, x]:
+                stack.append((0, x))
+            if mask[h - 1, x]:
+                stack.append((h - 1, x))
+        for y in range(1, h - 1):
+            if mask[y, 0]:
+                stack.append((y, 0))
+            if mask[y, w - 1]:
+                stack.append((y, w - 1))
+        while stack:
+            cy, cx = stack.pop()
+            if visited[cy, cx]:
+                continue
+            visited[cy, cx] = True
+            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                ny, nx = cy + dy, cx + dx
+                if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not visited[ny, nx]:
+                    stack.append((ny, nx))
+        return visited
+
+
+def finalize_transparent_png_bytes(
+    raw_bytes: bytes,
+    *,
+    transparent_bg: bool = True,
+    tight_crop: bool = False,
+    pad_frac: float = 0.02,
+    bg_tol: int = 8,
+) -> bytes:
+    """Post-process PNG bytes for RGBA border transparency and optional tight cropping."""
+    if not raw_bytes or (not transparent_bg and not tight_crop):
+        return raw_bytes
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        return raw_bytes
+
+    img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
+    arr = np.array(img, copy=True)
+    if transparent_bg and arr.ndim == 3 and arr.shape[2] == 4 and int(arr[:, :, 3].min()) >= 255:
+        # Fallback when OpenGL surface lacked alpha bitplanes: flood-fill corner background color
+        corner_rgb = arr[0, 0, :3].astype(np.int16)
+        near_bg = np.max(np.abs(arr[:, :, :3].astype(np.int16) - corner_rgb[None, None, :]), axis=2) <= int(
+            bg_tol
+        )
+        bg_mask = _border_connected_mask(near_bg)
+        if np.any(bg_mask):
+            arr[bg_mask, 3] = 0
+
+    if tight_crop and arr.ndim == 3 and arr.shape[2] == 4:
+        ys, xs = np.where(arr[:, :, 3] > 8)
+        if ys.size > 0 and xs.size > 0:
+            y0, y1 = int(ys.min()), int(ys.max()) + 1
+            x0, x1 = int(xs.min()), int(xs.max()) + 1
+            pad_x = max(2, int(round(float(pad_frac) * max(1, x1 - x0))))
+            pad_y = max(2, int(round(float(pad_frac) * max(1, y1 - y0))))
+            y0 = max(0, y0 - pad_y)
+            y1 = min(arr.shape[0], y1 + pad_y)
+            x0 = max(0, x0 - pad_x)
+            x1 = min(arr.shape[1], x1 + pad_x)
+            arr = arr[y0:y1, x0:x1]
+
+    out_buf = io.BytesIO()
+    Image.fromarray(arr, mode="RGBA").save(out_buf, format="PNG")
+    return out_buf.getvalue()
+
+
+def capture_vtk_render_window_png_base64(
+    render_window: Any,
+    force_render_fn: Optional[Callable[[], None]] = None,
+    *,
+    transparent_bg: bool = False,
+    tight_crop: bool = False,
+    pad_frac: float = 0.02,
+) -> Optional[str]:
+    """Capture a VTK renderWindow as a PNG data URI, optionally with transparent RGBA background and tight crop."""
+    if vtk is None or render_window is None:
+        return None
+
+    prev_alpha_bits = (
+        render_window.GetAlphaBitPlanes() if hasattr(render_window, "GetAlphaBitPlanes") else None
+    )
+    saved_renderers: List[Tuple[Any, Any, Any, Any, Any]] = []
+    if transparent_bg and hasattr(render_window, "GetRenderers"):
+        rens = render_window.GetRenderers()
+        if rens is not None and hasattr(rens, "InitTraversal"):
+            rens.InitTraversal()
+            while True:
+                ren = rens.GetNextItem()
+                if ren is None:
+                    break
+                saved_renderers.append(
+                    (
+                        ren,
+                        ren.GetGradientBackground() if hasattr(ren, "GetGradientBackground") else None,
+                        ren.GetBackgroundAlpha() if hasattr(ren, "GetBackgroundAlpha") else None,
+                        ren.GetBackground() if hasattr(ren, "GetBackground") else None,
+                        ren.GetBackground2() if hasattr(ren, "GetBackground2") else None,
+                    )
+                )
+
+    try:
+        if transparent_bg:
+            if hasattr(render_window, "SetAlphaBitPlanes"):
+                render_window.SetAlphaBitPlanes(1)
+            for ren, _grad, _bga, _bg1, _bg2 in saved_renderers:
+                if hasattr(ren, "GradientBackgroundOff"):
+                    ren.GradientBackgroundOff()
+                if hasattr(ren, "SetBackground"):
+                    ren.SetBackground(0.0, 0.0, 0.0)
+                if hasattr(ren, "SetBackgroundAlpha"):
+                    ren.SetBackgroundAlpha(0.0)
+
+        if callable(force_render_fn):
+            force_render_fn()
+        elif hasattr(render_window, "Render"):
+            render_window.Render()
+
+        w2i = vtk.vtkWindowToImageFilter()
+        w2i.SetInput(render_window)
+        if hasattr(w2i, "SetScale"):
+            w2i.SetScale(1)
+        if transparent_bg and hasattr(w2i, "SetInputBufferTypeToRGBA"):
+            w2i.SetInputBufferTypeToRGBA()
+        elif hasattr(w2i, "SetInputBufferTypeToRGB"):
+            w2i.SetInputBufferTypeToRGB()
+        w2i.ReadFrontBufferOff()
+        w2i.Update()
+
+        writer = vtk.vtkPNGWriter()
+        writer.WriteToMemoryOn()
+        writer.SetInputConnection(w2i.GetOutputPort())
+        writer.Write()
+        result = writer.GetResult()
+        if result is None or result.GetNumberOfTuples() == 0:
+            return None
+        try:
+            from vtk.util.numpy_support import vtk_to_numpy  # type: ignore
+
+            raw_bytes = bytes(vtk_to_numpy(result))
+        except Exception:
+            raw_bytes = bytes(result.GetValue(i) for i in range(result.GetNumberOfValues()))
+        if len(raw_bytes) <= 16:
+            return None
+        final_bytes = finalize_transparent_png_bytes(
+            raw_bytes,
+            transparent_bg=transparent_bg,
+            tight_crop=tight_crop,
+            pad_frac=pad_frac,
+        )
+        return "data:image/png;base64," + base64.b64encode(final_bytes).decode("ascii")
+    finally:
+        if transparent_bg:
+            if prev_alpha_bits is not None and hasattr(render_window, "SetAlphaBitPlanes"):
+                render_window.SetAlphaBitPlanes(prev_alpha_bits)
+            for ren, grad, bga, bg1, bg2 in saved_renderers:
+                if bg1 is not None and hasattr(ren, "SetBackground"):
+                    ren.SetBackground(*bg1)
+                if bg2 is not None and hasattr(ren, "SetBackground2"):
+                    ren.SetBackground2(*bg2)
+                if grad is not None and hasattr(ren, "SetGradientBackground"):
+                    ren.SetGradientBackground(grad)
+                if bga is not None and hasattr(ren, "SetBackgroundAlpha"):
+                    ren.SetBackgroundAlpha(bga)
+            if callable(force_render_fn):
+                try:
+                    force_render_fn()
+                except Exception:
+                    logger.debug("Restore force_render_fn skipped", exc_info=True)
+
+
+def capture_slice_view_png_base64(
+    slice_name: str,
+    slice_widget: Any = None,
+    transparent_bg: bool = False,
+    tight_crop: bool = False,
+) -> Optional[str]:
     """B21: Capture a slice view using `vtkWindowToImageFilter` on `sliceView().renderWindow()` (with ScreenCapture fallback)."""
     if slice_widget is None and slicer is not None and getattr(slicer, "app", None) is not None:
         lm = slicer.app.layoutManager()
@@ -452,34 +650,16 @@ def capture_slice_view_png_base64(slice_name: str, slice_widget: Any = None) -> 
         rw = sv.renderWindow() if (sv and hasattr(sv, "renderWindow")) else None
         if rw is not None:
             try:
-                if hasattr(sv, "forceRender"):
-                    sv.forceRender()
-                elif hasattr(rw, "Render"):
-                    rw.Render()
-                w2i = vtk.vtkWindowToImageFilter()
-                w2i.SetInput(rw)
-                if hasattr(w2i, "SetInputBufferTypeToRGB"):
-                    w2i.SetInputBufferTypeToRGB()
-                w2i.ReadFrontBufferOff()
-                w2i.Update()
-
-                writer = vtk.vtkPNGWriter()
-                writer.WriteToMemoryOn()
-                writer.SetInputConnection(w2i.GetOutputPort())
-                writer.Write()
-                result = writer.GetResult()
-                if result is not None and result.GetNumberOfTuples() > 0:
-                    try:
-                        from vtk.util.numpy_support import vtk_to_numpy  # type: ignore
-
-                        raw_bytes = bytes(vtk_to_numpy(result))
-                    except Exception:
-                        raw_bytes = bytes(result.GetValue(i) for i in range(result.GetNumberOfValues()))
-                    if len(raw_bytes) > 16:
-                        b64 = base64.b64encode(raw_bytes).decode("ascii")
-                        return f"data:image/png;base64,{b64}"
+                uri = capture_vtk_render_window_png_base64(
+                    rw,
+                    force_render_fn=getattr(sv, "forceRender", None),
+                    transparent_bg=transparent_bg,
+                    tight_crop=tight_crop,
+                )
+                if uri:
+                    return uri
             except Exception:
-                pass
+                logger.debug("VTK slice renderWindow capture failed; falling back to QPixmap", exc_info=True)
 
     # 2. Fallback: QPixmap grab if renderWindow memory writer is unavailable in mock harness
     if qt is not None and hasattr(slice_widget, "sliceView"):
@@ -491,10 +671,13 @@ def capture_slice_view_png_base64(slice_name: str, slice_widget: Any = None) -> 
             pixmap.save(buf, "PNG")
             raw = bytes(ba.data())
             if len(raw) > 16:
+                raw = finalize_transparent_png_bytes(
+                    raw, transparent_bg=transparent_bg, tight_crop=tight_crop
+                )
                 b64 = base64.b64encode(raw).decode("ascii")
                 return f"data:image/png;base64,{b64}"
         except Exception:
-            pass
+            logger.debug("QPixmap slice fallback capture failed", exc_info=True)
     return None
 
 
