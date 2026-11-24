@@ -2,8 +2,11 @@
 Clinical Dental CBCT Measurement Engine — Single Source of Truth.
 
 Performs millimeter-precise calculations in the arch-frame cross-section plane from real
-volume & segmentation masks ONLY. Never returns fabricated or hardcoded fallback clinical values,
-and never substitutes arbitrary image-intensity thresholds for missing jaw segmentation.
+volume & segmentation masks ONLY. The alveolar crest, `W0` and every buccolingual width come
+from jaw-bone voxels only; the ridge envelope (jaw bone plus the in-socket root within
+`ENVELOPE_HALF_WIDTH_MM`) is used solely for the available-bone-height ray. Never returns
+fabricated or hardcoded fallback clinical values, and never substitutes arbitrary
+image-intensity thresholds for missing jaw segmentation.
 All Misch bone density classifications are explicitly labeled approximate because CBCT gray values
 are not calibrated Hounsfield Units.
 """
@@ -67,7 +70,8 @@ _CS_BORDER_TOL_MM = 0.75
 _MAX_RIDGE_WIDTH_FRACTION = 0.80
 _MAX_RIDGE_HEIGHT_FRACTION = 0.90
 
-# The alveolar ridge envelope adds the in-socket root inside this buccolingual window.
+# The height-ray envelope adds the in-socket root inside this buccolingual window.
+# Crest, W0 and the buccolingual widths must use the jaw-bone-only mask instead.
 ENVELOPE_HALF_WIDTH_MM = 6.0
 
 # An osteotomy entry (alveolar crest) that moves further than this between neighbouring
@@ -168,7 +172,12 @@ def _ridge_envelope_mask(
     tooth_id: Optional[int],
     is_mandible: bool,
 ) -> np.ndarray:
-    """Jawbone label mask plus the in-socket root inside `|u| <= 6 mm` apical to jaw crest.
+    """Height-ray envelope: jawbone label mask plus the in-socket root inside `|u| <= 6 mm` apical to jaw crest.
+
+    Only the available-bone-height ray may use this mask. The alveolar crest, `W0` and every
+    buccolingual width must be derived from `mask_cs == jaw_id` (see `_detect_alveolar_crest_and_axis`
+    with `bone_mask=` and the bone-only widths), otherwise the tooth crown/root is measured
+    instead of the ridge.
 
     Never falls back to arbitrary image-intensity thresholds when jawbone segmentation is
     missing: returns an empty boolean mask so callers explicitly withhold measurements.
@@ -1258,7 +1267,9 @@ class MeasurementEngine:
 
         Samples along the local buccolingual caliper `d_bl` perpendicular to the ridge axis `d_apical`,
         isolating the single contiguous bone segment around the ridge axis so disconnected islands
-        never inflate bone widths. Applies subvoxel 0.5-isosurface refinement at both cortical edges.
+        never inflate bone widths. `bone_mask` must be the jaw-bone-only mask (`mask_cs == jaw_id`),
+        never the height-ray envelope, so an in-socket root or crown cannot be measured as bone.
+        Applies subvoxel 0.5-isosurface refinement at both cortical edges.
 
         Returns `(width_segments_u, width_endpoints_uv)` where:
           - `width_segments_u[d] = (u_lingual, u_buccal)` for backward compatibility

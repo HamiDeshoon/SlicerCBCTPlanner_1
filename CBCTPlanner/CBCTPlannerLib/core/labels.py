@@ -673,10 +673,10 @@ def infer_mask_is_5class(mask: np.ndarray) -> bool:
     """Infer whether a combined label array uses 5-class DentalSegmentator IDs vs ToothFairy3.
 
     A value range of 1..5 alone is not enough: ToothFairy3 also uses 1/2 for the jaws and
-    3/4/5 for canal/sinus labels. FDI tooth or pulp ids prove the canonical scheme, and the
-    ToothFairy3 sinus pair (5 and 6) does too. Otherwise the grouped 5-class scheme needs
-    both grouped tooth classes (3 = upper teeth, 4 = lower teeth), the one unambiguous
-    signature of a DentalSegmentator mask.
+    3/4/5 for canal/sinus labels. Any FDI tooth id (11-48) or ToothFairy3 canal/pulp id
+    (100+) proves the canonical scheme, as does the ToothFairy3 sinus pair (5 and 6).
+    Everything else — including jaw-only 1/2, which is inherently ambiguous — keeps the
+    historical grouped 5-class default.
     """
     arr = np.asarray(mask)
     if arr.size == 0:
@@ -684,9 +684,7 @@ def infer_mask_is_5class(mask: np.ndarray) -> bool:
     values = {int(v) for v in np.unique(arr) if int(v) > 0}
     if not values:
         return False
-    if any(
-        v >= 11 or v in (LINGUAL_CANAL_ID, LEFT_INCISIVE_CANAL_ID, RIGHT_INCISIVE_CANAL_ID) for v in values
-    ):
+    if any(v >= 11 for v in values):
         return False
     if 5 in values and 6 in values:
         return False
