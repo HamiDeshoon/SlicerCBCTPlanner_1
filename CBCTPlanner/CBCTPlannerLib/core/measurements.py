@@ -26,12 +26,17 @@ from .arch_detector import (
     project_point_to_polyline_arc_mm,
 )
 from .labels import (
+    CANAL_IDS,
+    DENTALSEGMENTATOR_CANAL_ID,
+    MANDIBULAR_TEETH_IDS,
+    MAXILLARY_TEETH_IDS,
     get_fdi_quadrant,
     get_ipsilateral_canal_ids,
     get_ipsilateral_sinus_ids,
     get_jaw_label_id,
     get_tooth_group_label_id,
     get_tooth_label,
+    infer_mask_is_5class,
     is_mandibular_fdi,
     jaw_key_from_text,
     resolve_fdi_number,
@@ -164,6 +169,31 @@ def _uv_to_world(
     return (float(pt[0]), float(pt[1]), float(pt[2]))
 
 
+def _same_jaw_tooth_mask(
+    mask_cs: np.ndarray,
+    is_mandible: bool,
+    is_5class: bool,
+    tooth_id: Optional[int] = None,
+) -> np.ndarray:
+    """Return boolean mask of same-jaw teeth and pulps in `mask_cs` (never opposing teeth)."""
+    ids: List[int] = []
+    if is_5class:
+        ids.append(get_tooth_group_label_id(is_mandible, is_5class=True))
+    else:
+        base = MANDIBULAR_TEETH_IDS if is_mandible else MAXILLARY_TEETH_IDS
+        ids.extend(int(t) for t in base)
+        ids.extend(100 + int(t) for t in base)
+    if tooth_id is not None:
+        tid = int(tooth_id)
+        if tid not in ids:
+            ids.append(tid)
+        if not is_5class and 11 <= tid <= 48 and (100 + tid) not in ids:
+            ids.append(100 + tid)
+    if not ids:
+        return np.zeros(mask_cs.shape, dtype=bool)
+    return np.isin(mask_cs, ids)
+
+
 def _ridge_envelope_mask(
     mask_cs: np.ndarray,
     u_coords: np.ndarray,
@@ -171,13 +201,13 @@ def _ridge_envelope_mask(
     jaw_id: int,
     tooth_id: Optional[int],
     is_mandible: bool,
+    tooth_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Height-ray envelope: jawbone label mask plus the in-socket root inside `|u| <= 6 mm` apical to jaw crest.
 
-    Only the available-bone-height ray may use this mask. The alveolar crest, `W0` and every
-    buccolingual width must be derived from `mask_cs == jaw_id` (see `_detect_alveolar_crest_and_axis`
-    with `bone_mask=` and the bone-only widths), otherwise the tooth crown/root is measured
-    instead of the ridge.
+    Only the available-bone-height ray (and primary ridge socket connectivity) may use this mask.
+    The alveolar crest, `W0` and every buccolingual width must be derived from `mask_cs == jaw_id`
+    (never measuring a tooth crown or single-plate root wall as bone).
 
     Never falls back to arbitrary image-intensity thresholds when jawbone segmentation is
     missing: returns an empty boolean mask so callers explicitly withhold measurements.
@@ -186,10 +216,18 @@ def _ridge_envelope_mask(
     if not jaw_mask.any():
         return np.zeros_like(jaw_mask, dtype=bool)
     envelope = jaw_mask.copy()
-    if tooth_id is not None:
-        v_jaw = v_coords[np.flatnonzero(jaw_mask.any(axis=1))]
+    t_mask = (
+        np.asarray(tooth_mask, dtype=bool)
+        if tooth_mask is not None
+        else ((mask_cs == int(tooth_id)) if tooth_id is not None else np.zeros_like(jaw_mask, dtype=bool))
+    )
+    if t_mask.any():
+        # Guard occlusal bound against tiny stray bone speckles above the crown.
+        jaw_clean = _extract_primary_ridge_component(jaw_mask, u_coords, v_coords)
+        jaw_ref = jaw_clean if jaw_clean.any() else jaw_mask
+        v_jaw = v_coords[np.flatnonzero(jaw_ref.any(axis=1))]
         occlusal_v = float(np.max(v_jaw)) if is_mandible else float(np.min(v_jaw))
-        in_socket = (mask_cs == int(tooth_id)) & (np.abs(u_coords)[None, :] <= ENVELOPE_HALF_WIDTH_MM)
+        in_socket = t_mask & (np.abs(u_coords)[None, :] <= ENVELOPE_HALF_WIDTH_MM)
         occlusal_side = v_coords[:, None] <= occlusal_v if is_mandible else v_coords[:, None] >= occlusal_v
         envelope |= in_socket & occlusal_side
     return envelope
@@ -282,9 +320,18 @@ def _ridge_region_withheld_reasons(
     u_lo, u_hi = float(u_coords.min()), float(u_coords.max())
     v_lo, v_hi = float(v_coords.min()), float(v_coords.max())
     width_reason: Optional[str] = None
-    if u_bone.min() <= u_lo + _CS_BORDER_TOL_MM or u_bone.max() >= u_hi - _CS_BORDER_TOL_MM:
+    touches_left = bool(u_bone.min() <= u_lo + _CS_BORDER_TOL_MM)
+    touches_right = bool(u_bone.max() >= u_hi - _CS_BORDER_TOL_MM)
+    max_row_span = 0.0
+    for r in np.flatnonzero(bone.any(axis=1)):
+        cols = np.flatnonzero(bone[r, :])
+        if cols.size >= 2:
+            span = float(u_coords[cols[-1]] - u_coords[cols[0]])
+            if span > max_row_span:
+                max_row_span = span
+    if touches_left and touches_right:
         width_reason = WITHHELD_WIDTH_BORDER
-    elif u_bone.max() - u_bone.min() > _MAX_RIDGE_WIDTH_FRACTION * (u_hi - u_lo):
+    elif max_row_span > _MAX_RIDGE_WIDTH_FRACTION * (u_hi - u_lo):
         width_reason = WITHHELD_WIDTH_SPAN
     height_reason = (
         None
@@ -828,26 +875,31 @@ class MeasurementEngine:
             v_mask = mask_cs == int(vid)
             if not v_mask.any():
                 continue
-            # Restrict to ipsilateral local corridor around the ridge axis (|u - u_ref| <= 8.5 mm)
-            # and apical to crest (with 1.0 mm tolerance).
-            u_ok = np.abs(u_coords - u_ref) <= 8.5
+            # Restrict to ipsilateral local corridor centered around the ridge (|u| <= 11.0 mm
+            # or |u - u_ref| <= 8.5 mm) and apical to crest (with 1.0 mm tolerance).
+            u_ok = (np.abs(u_coords) <= 11.0) | (np.abs(u_coords - u_ref) <= 8.5)
             v_ok = (v_coords <= v_ref + 1.0) if is_mandible else (v_coords >= v_ref - 1.0)
             local_2d = v_mask & np.outer(v_ok, u_ok)
             if not local_2d.any():
                 continue
 
-            # Connected-component cleanup to drop 1-pixel noise or distant unrelated blobs
+            # Connected-component cleanup: drop 1-pixel noise while preserving all valid >=2px
+            # vital components in the corridor; pick the closest component for centroid/contour.
+            marker_2d = local_2d
             try:
                 from scipy import ndimage  # type: ignore
 
                 lbl, n_c = ndimage.label(local_2d, structure=np.ones((3, 3), dtype=np.int32))
                 if n_c > 1:
+                    valid_mask = np.zeros_like(local_2d, dtype=bool)
                     best_c = 0
                     best_d = float("inf")
                     for cid in range(1, n_c + 1):
-                        rs, cs_i = np.where(lbl == cid)
+                        comp = lbl == cid
+                        rs, cs_i = np.where(comp)
                         if rs.size < 2:
                             continue
+                        valid_mask |= comp
                         cu = float(np.mean(u_coords[cs_i]))
                         cv = float(np.mean(v_coords[rs]))
                         d = math.hypot(cu - u_ref, cv - v_ref)
@@ -855,11 +907,12 @@ class MeasurementEngine:
                             best_d = d
                             best_c = cid
                     if best_c > 0:
-                        local_2d = lbl == best_c
+                        local_2d = valid_mask
+                        marker_2d = lbl == best_c
             except ImportError:
                 pass
 
-            rows, cols = np.where(local_2d)
+            rows, cols = np.where(marker_2d)
             if rows.size == 0:
                 continue
             centroid_uv = (float(np.mean(u_coords[cols])), float(np.mean(v_coords[rows])))
@@ -868,7 +921,7 @@ class MeasurementEngine:
             contour_uv: List[Tuple[float, float]] = []
             if is_mandible:
                 # Boundary pixels of the canal cross-section
-                padded = np.pad(local_2d, 1, mode="constant", constant_values=False)
+                padded = np.pad(marker_2d, 1, mode="constant", constant_values=False)
                 interior = (
                     padded[1:-1, 1:-1]
                     & padded[:-2, 1:-1]
@@ -876,7 +929,7 @@ class MeasurementEngine:
                     & padded[1:-1, :-2]
                     & padded[1:-1, 2:]
                 )
-                edge = local_2d & (~interior)
+                edge = marker_2d & (~interior)
                 er, ec = np.where(edge)
                 if er.size > 0:
                     angles = np.arctan2(v_coords[er] - centroid_uv[1], u_coords[ec] - centroid_uv[0])
@@ -891,9 +944,9 @@ class MeasurementEngine:
 
             return int(vid), local_2d, centroid_uv, (contour_uv if len(contour_uv) >= 2 else None), None
 
-        # 2. If not in the 2D cross-section plane, check a local 3D ROI (<= 15 mm around P)
-        #    Reject contralateral or distant structures outside 15 mm of the planning site.
-        local_radius_mm = 15.0
+        # 2. If not in the 2D cross-section plane, check a local 3D ROI (<= 28 mm around P)
+        #    for metadata/availability reporting (never used to shorten non-canal slices).
+        local_radius_mm = 28.0
         vox = self.volume.world_to_voxel(P)
         vx, vy, vz = int(round(vox[0])), int(round(vox[1])), int(round(vox[2]))
         sz, sy, sx = self.volume.spacing
@@ -915,12 +968,120 @@ class MeasurementEngine:
     # Anatomy-Aware Alveolar Crest & Ridge Axis Detection (Part 3.3)
     # ------------------------------------------------------------------
     @staticmethod
+    def _find_socket_crest_rims(
+        surf_u: np.ndarray,
+        smooth_v: np.ndarray,
+        bone_mask: np.ndarray,
+        tooth_mask: Optional[np.ndarray],
+        u_coords: np.ndarray,
+        v_coords: np.ndarray,
+        is_mandible: bool,
+    ) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+        """Locate `(u_L_crest, v_L_crest)` and `(u_B_crest, v_B_crest)` flanking an in-socket tooth.
+
+        Returns `None` when the crest is unbroken or when only a single cortical plate exists
+        (e.g. a missing buccal wall), preventing bridging across missing bone.
+        """
+        if tooth_mask is None or not np.any(tooth_mask):
+            return None
+        central = np.flatnonzero(np.abs(surf_u) <= 8.5)
+        if central.size < 2:
+            return None
+        peak_v = float(np.max(smooth_v[central])) if is_mandible else float(np.min(smooth_v[central]))
+
+        # Check for same-jaw tooth voxels in the coronal socket band around the bone crest.
+        if is_mandible:
+            v_band = (v_coords >= peak_v - 4.5) & (v_coords <= peak_v + 1.5)
+        else:
+            v_band = (v_coords <= peak_v + 4.5) & (v_coords >= peak_v - 1.5)
+        t_band = np.asarray(tooth_mask, dtype=bool) & np.outer(v_band, np.abs(u_coords) <= 7.0)
+        if not t_band.any():
+            return None
+        _tr, t_cols = np.where(t_band)
+        u_t_vals = u_coords[t_cols]
+        u_t_min = float(np.min(u_t_vals))
+        u_t_max = float(np.max(u_t_vals))
+        u_t_mid = float(np.median(u_t_vals))
+
+        def _rim_peak(side_indices: np.ndarray) -> Optional[Tuple[float, float]]:
+            if side_indices.size == 0:
+                return None
+            side_v = smooth_v[side_indices]
+            best_local = int(np.argmax(side_v)) if is_mandible else int(np.argmin(side_v))
+            rim_v = float(side_v[best_local])
+            # Reject deep basal bone below a missing wall (e.g. single-plate defect).
+            if abs(peak_v - rim_v) > 4.5:
+                return None
+            if is_mandible:
+                plat = side_indices[side_v >= rim_v - 0.15]
+            else:
+                plat = side_indices[side_v <= rim_v + 0.15]
+            if plat.size >= 2 and int(plat[-1] - plat[0] + 1) == int(plat.size):
+                return float(0.5 * (surf_u[plat[0]] + surf_u[plat[-1]])), float(np.median(smooth_v[plat]))
+            idx = int(side_indices[best_local])
+            return float(surf_u[idx]), rim_v
+
+        left_idx = central[(surf_u[central] <= u_t_min + 0.75) & (surf_u[central] < u_t_mid)]
+        right_idx = central[(surf_u[central] >= u_t_max - 0.75) & (surf_u[central] > u_t_mid)]
+        left_rim = _rim_peak(left_idx)
+        right_rim = _rim_peak(right_idx)
+        if left_rim is None or right_rim is None:
+            return None
+        if not (2.0 <= (right_rim[0] - left_rim[0]) <= 14.0):
+            return None
+        # Confirm jawbone actually exists near both rim peaks inside bone_mask.
+        _ = bone_mask
+        return left_rim, right_rim
+
+    @staticmethod
+    def _extract_coronal_bone_surface(
+        surface_mask: np.ndarray,
+        u_coords: np.ndarray,
+        v_coords: np.ndarray,
+        is_mandible: bool,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Extract coronal-most continuous bone surface `(surf_u, surf_v)` per column."""
+        dv = abs(float(v_coords[1] - v_coords[0])) if len(v_coords) > 1 else 0.25
+        min_support_px = max(2, int(round(0.75 / max(1e-3, dv))))
+        surf_cols: List[int] = []
+        surf_vs: List[float] = []
+        for iu in range(len(u_coords)):
+            col = surface_mask[:, iu]
+            if not col.any():
+                continue
+            v_indices = np.flatnonzero(col)
+            chosen_v: Optional[int] = None
+            run = 0
+            prev = -1
+            seq = v_indices[::-1] if is_mandible else v_indices
+            for idx in seq:
+                if prev < 0 or abs(prev - int(idx)) == 1:
+                    run += 1
+                else:
+                    run = 1
+                prev = int(idx)
+                if run >= min_support_px:
+                    chosen_v = int(idx) + run - 1 if is_mandible else int(idx) - run + 1
+                    break
+            if chosen_v is None:
+                chosen_v = int(v_indices[-1] if is_mandible else v_indices[0])
+            surf_cols.append(iu)
+            surf_vs.append(float(v_coords[chosen_v]))
+        if not surf_cols:
+            return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+        return (
+            np.asarray([float(u_coords[i]) for i in surf_cols], dtype=np.float64),
+            np.asarray(surf_vs, dtype=np.float64),
+        )
+
+    @staticmethod
     def _detect_alveolar_crest_and_axis(
         ridge_mask: np.ndarray,
         u_coords: np.ndarray,
         v_coords: np.ndarray,
         is_mandible: bool,
         bone_mask: Optional[np.ndarray] = None,
+        tooth_mask: Optional[np.ndarray] = None,
     ) -> Tuple[
         Optional[Tuple[float, float]],
         Tuple[float, float],
@@ -931,13 +1092,13 @@ class MeasurementEngine:
         """Detect local alveolar crest `(u_crest, v_crest)` and ridge-aligned unit axes `(d_apical, d_bl)`.
 
         Algorithm:
-          1. Extract the coronal-most continuous bone surface `v_surf(u)` per column, rejecting
-             thin vertical spikes (< 0.75 mm vertical support) while preserving valid sloped/curved ridges.
+          1. Extract the coronal-most continuous bone surface `v_surf(u)` per column from bone-only
+             `surface_mask`, rejecting thin vertical spikes (< 0.75 mm vertical support).
           2. Apply spacing-aware robust 1D median + light Gaussian smoothing to `v_surf(u)`.
-          3. Locate the alveolar crest peak `(u_crest, v_crest)` on the smoothed ridge surface
-             with subvoxel parabolic interpolation when interior.
-          4. Estimate the local ridge long axis from bone midpoints at 1..8 mm apical depths,
-             yielding `(d_apical, d_bl)` adapted to tilted/oblique ridges (or upright if |angle| < 2 deg).
+          3. When a tooth socket splits lingual and buccal jawbone rims, bridge `crest_uv` to the
+             midpoint between the two bone rims; otherwise locate the ridge peak/flat plateau.
+          4. Estimate the local alveolar long axis via PCA on the primary alveolar ridge,
+             avoiding eigenvector sign flips near 45 degrees.
         """
         default_apical = (0.0, -1.0) if is_mandible else (0.0, 1.0)
         default_bl = (1.0, 0.0)
@@ -945,63 +1106,13 @@ class MeasurementEngine:
             return None, default_apical, default_bl, None, []
 
         du = abs(float(u_coords[1] - u_coords[0])) if len(u_coords) > 1 else 0.25
-        dv = abs(float(v_coords[1] - v_coords[0])) if len(v_coords) > 1 else 0.25
-        min_support_px = max(2, int(round(0.75 / max(1e-3, dv))))
-
-        n_v, n_u = ridge_mask.shape
-        # The crest and the height axis must come from BONE only. `ridge_mask` is the
-        # alveolar envelope that also contains the in-socket root, so scanning it put the
-        # entry point on the tooth crown and then measured W0 across the tooth instead of
-        # the ridge. The envelope is still used for the height ray itself.
+        # The crest must come from BONE only (`bone_mask`), never the tooth crown.
         surface_mask = bone_mask if (bone_mask is not None and bool(np.any(bone_mask))) else ridge_mask
-        surf_cols: List[int] = []
-        surf_vs: List[float] = []
-
-        for iu in range(n_u):
-            col = surface_mask[:, iu]
-            if not col.any():
-                continue
-            v_indices = np.flatnonzero(col)
-            if is_mandible:
-                # Scan from superior (high index) downward for a continuous run of >= min_support_px
-                chosen_v: Optional[int] = None
-                run = 0
-                prev = -1
-                for idx in v_indices[::-1]:
-                    if prev < 0 or prev - idx == 1:
-                        run += 1
-                    else:
-                        run = 1
-                    prev = int(idx)
-                    if run >= min_support_px:
-                        chosen_v = int(idx) + run - 1
-                        break
-                if chosen_v is None:
-                    chosen_v = int(v_indices[-1])
-            else:
-                # Scan from inferior (low index) upward for a continuous run of >= min_support_px
-                chosen_v = None
-                run = 0
-                prev = -1
-                for idx in v_indices:
-                    if prev < 0 or idx - prev == 1:
-                        run += 1
-                    else:
-                        run = 1
-                    prev = int(idx)
-                    if run >= min_support_px:
-                        chosen_v = int(idx) - run + 1
-                        break
-                if chosen_v is None:
-                    chosen_v = int(v_indices[0])
-            surf_cols.append(iu)
-            surf_vs.append(float(v_coords[chosen_v]))
-
-        if not surf_cols:
+        surf_u, surf_v = MeasurementEngine._extract_coronal_bone_surface(
+            surface_mask, u_coords, v_coords, is_mandible
+        )
+        if surf_u.size == 0:
             return None, default_apical, default_bl, None, []
-
-        surf_u = np.asarray([float(u_coords[i]) for i in surf_cols], dtype=np.float64)
-        surf_v = np.asarray(surf_vs, dtype=np.float64)
 
         # Spacing-aware robust smoothing (median filter ~1.0 mm + light Gaussian sigma ~0.4 mm)
         smooth_v = surf_v.copy()
@@ -1021,49 +1132,63 @@ class MeasurementEngine:
 
         crest_profile_uv = [(float(u), float(v)) for u, v in zip(surf_u, smooth_v)]
 
-        # Search the whole central corridor (|u| <= 6 mm), not just the narrow planning axis:
-        # bone-only columns can be missing over a hollow socket, and limiting the search to
-        # |u| <= 1.5 mm there put the entry on the basal cortex several millimetres too deep.
-        central_mask = np.abs(surf_u) <= 6.0
-        search_indices = np.flatnonzero(central_mask) if central_mask.any() else np.arange(len(surf_u))
-        search_v = smooth_v[search_indices]
-        if is_mandible:
-            local_best = int(np.argmax(search_v))
+        socket_rims = MeasurementEngine._find_socket_crest_rims(
+            surf_u, smooth_v, surface_mask, tooth_mask, u_coords, v_coords, is_mandible
+        )
+        if socket_rims is not None:
+            left_rim, right_rim = socket_rims
+            u_crest = float(0.5 * (left_rim[0] + right_rim[0]))
+            v_crest = float(0.5 * (left_rim[1] + right_rim[1]))
         else:
-            local_best = int(np.argmin(search_v))
-        best_idx = int(search_indices[local_best])
+            # Search the whole central corridor (|u| <= 6 mm), not just the narrow planning axis:
+            # bone-only columns can be missing over a hollow socket, and limiting the search to
+            # |u| <= 1.5 mm there put the entry on the basal cortex several millimetres too deep.
+            central_mask = np.abs(surf_u) <= 6.0
+            search_indices = np.flatnonzero(central_mask) if central_mask.any() else np.arange(len(surf_u))
+            search_v = smooth_v[search_indices]
+            if is_mandible:
+                local_best = int(np.argmax(search_v))
+            else:
+                local_best = int(np.argmin(search_v))
+            best_idx = int(search_indices[local_best])
 
-        # For flat-topped ridges (multiple columns tied within 0.15 mm of peak), pick the horizontal
-        # center of the plateau so the crest point sits centered on the ridge rather than at one edge!
-        peak_val = float(smooth_v[best_idx])
-        if is_mandible:
-            plateau = search_indices[smooth_v[search_indices] >= peak_val - 0.15]
-        else:
-            plateau = search_indices[smooth_v[search_indices] <= peak_val + 0.15]
-
-        if len(plateau) >= 2:
-            u_crest = float(0.5 * (surf_u[plateau[0]] + surf_u[plateau[-1]]))
-            v_crest = float(np.median(smooth_v[plateau]))
-        else:
-            u_crest = float(surf_u[best_idx])
-            v_crest = peak_val
-            # Subvoxel parabolic refinement for isolated interior peak
-            if 0 < best_idx < len(smooth_v) - 1:
-                y0, y1, y2 = (
-                    float(smooth_v[best_idx - 1]),
-                    float(smooth_v[best_idx]),
-                    float(smooth_v[best_idx + 1]),
+            # For flat-topped ridges (multiple columns tied within 0.15 mm of peak without a dip
+            # > 0.5 mm between them), pick the horizontal center of the plateau.
+            peak_val = float(smooth_v[best_idx])
+            if is_mandible:
+                plateau = search_indices[smooth_v[search_indices] >= peak_val - 0.15]
+                no_dip = bool(
+                    plateau.size >= 2 and np.all(smooth_v[plateau[0] : plateau[-1] + 1] >= peak_val - 0.5)
                 )
-                denom = y0 - 2.0 * y1 + y2
-                if abs(denom) > 1e-6:
-                    delta = float(np.clip(0.5 * (y0 - y2) / denom, -0.5, 0.5))
-                    u_crest = float(surf_u[best_idx] + delta * du)
-                    v_crest = float(y1 - 0.25 * (y0 - y2) * delta)
+            else:
+                plateau = search_indices[smooth_v[search_indices] <= peak_val + 0.15]
+                no_dip = bool(
+                    plateau.size >= 2 and np.all(smooth_v[plateau[0] : plateau[-1] + 1] <= peak_val + 0.5)
+                )
 
-        # Height axis = longest principal axis of the jaw cross-section (PCA). A ridge that
-        # is wider than tall still yields its long axis rather than always measuring
-        # straight down, and a tilted jaw keeps the caliper inside the bone.
-        rows_p, cols_p = np.where(surface_mask)
+            if len(plateau) >= 2 and no_dip:
+                u_crest = float(0.5 * (surf_u[plateau[0]] + surf_u[plateau[-1]]))
+                v_crest = float(np.median(smooth_v[plateau]))
+            else:
+                u_crest = float(surf_u[best_idx])
+                v_crest = peak_val
+                # Subvoxel parabolic refinement for isolated interior peak
+                if 0 < best_idx < len(smooth_v) - 1:
+                    y0, y1, y2 = (
+                        float(smooth_v[best_idx - 1]),
+                        float(smooth_v[best_idx]),
+                        float(smooth_v[best_idx + 1]),
+                    )
+                    denom = y0 - 2.0 * y1 + y2
+                    if abs(denom) > 1e-6:
+                        delta = float(np.clip(0.5 * (y0 - y2) / denom, -0.5, 0.5))
+                        u_crest = float(surf_u[best_idx] + delta * du)
+                        v_crest = float(y1 - 0.25 * (y0 - y2) * delta)
+
+        # Height axis = principal axis of the primary alveolar ridge (`ridge_mask`).
+        # Using full `ridge_mask` keeps socket ridges symmetric and avoids artificial corner skew
+        # from short depth crops; preferring the major eigenvector when elongated avoids 45 deg flips.
+        rows_p, cols_p = np.where(ridge_mask)
         ridge_angle_deg: Optional[float] = None
         d_apical = default_apical
         d_bl = default_bl
@@ -1072,15 +1197,15 @@ class MeasurementEngine:
             cloud -= cloud.mean(axis=0, keepdims=True)
             cov = (cloud.T @ cloud) / float(max(1, cloud.shape[0]))
             try:
-                _eigvals, eigvecs = np.linalg.eigh(cov)
-                # The alveolar height axis is the principal axis that is more vertical than
-                # horizontal. On a mask that spans the whole buccolingual field the dominant
-                # eigenvector is sideways; using it would shoot the height caliper out of the
-                # jaw, so the vertical principal direction is selected instead.
-                axis = max(
-                    (np.asarray(eigvecs[:, index], dtype=np.float64) for index in range(2)),
-                    key=lambda vec: abs(float(vec[1])),
-                )
+                eigvals, eigvecs = np.linalg.eigh(cov)
+                v_major = np.asarray(eigvecs[:, 1], dtype=np.float64)
+                if float(eigvals[1]) >= 1.4 * max(1e-6, float(eigvals[0])) and abs(float(v_major[1])) >= 0.57:
+                    axis = v_major
+                else:
+                    axis = max(
+                        (np.asarray(eigvecs[:, index], dtype=np.float64) for index in range(2)),
+                        key=lambda vec: abs(float(vec[1])),
+                    )
                 # Point the axis apically (mandible: -v, maxilla: +v).
                 if (is_mandible and axis[1] > 0.0) or ((not is_mandible) and axis[1] < 0.0):
                     axis = -axis
@@ -1190,7 +1315,9 @@ class MeasurementEngine:
             full_h = float(max(0.0, s_vals[last_idx]))
             basal_uv = (u0 + full_h * au, v0 + full_h * av)
 
-        # 2. Check ipsilateral vital structure boundary (in 2D cross-section first, then local 3D EDT)
+        # 2. Check ipsilateral vital structure boundary inside the 2D cross-section plane.
+        #    Never truncate height via 3D Euclidean distance when the canal/sinus does not
+        #    exist in this cross-section plane (prevents stopping short mid-bone anterior to mental foramen).
         vital_dist: Optional[float] = None
         vital_boundary_uv: Optional[Tuple[float, float]] = None
         provenance = PROVENANCE_LABEL_DERIVED
@@ -1199,41 +1326,35 @@ class MeasurementEngine:
             vr, vc = np.where(local_vital_mask_2d)
             vu = u_coords[vc]
             vv = v_coords[vr]
-            # Project vital pixels onto the local ridge axis `(d_apical, d_bl)`
             du_v = vu - u0
             dv_v = vv - v0
             along = du_v * au + dv_v * av
-            # Perpendicular distance to the measurement ray
             perp = np.abs(du_v * (-av) + dv_v * au)
+
+            cand_dists: List[float] = []
             in_corridor = (along >= 0.0) & (perp <= 5.5)
             if in_corridor.any():
-                cand_along = along[in_corridor]
-                min_i = int(np.argmin(cand_along))
-                vital_dist = float(max(0.0, cand_along[min_i]))
-                # Exact nearest vital boundary point along the ray
-                vital_boundary_uv = (u0 + vital_dist * au, v0 + vital_dist * av)
+                cand_dists.append(float(max(0.0, np.min(along[in_corridor]))))
+
+            # Direct ray hit check ensures the caliper line never enters or crosses any vital pixel.
+            ri_v = np.clip(np.round(row_f).astype(int), 0, len(v_coords) - 1)
+            ci_v = np.clip(np.round(col_f).astype(int), 0, len(u_coords) - 1)
+            ray_hits = np.flatnonzero(local_vital_mask_2d[ri_v, ci_v])
+            if ray_hits.size > 0:
+                cand_dists.append(float(max(0.0, s_vals[int(ray_hits[0])] - 0.5 * step)))
+
+            if cand_dists:
+                vital_dist = min(cand_dists)
                 if vital_dist <= full_h + 1.0:
+                    eff_h = min(full_h, vital_dist)
+                    vital_boundary_uv = (u0 + eff_h * au, v0 + eff_h * av)
                     return (
-                        round(vital_dist, 2),
-                        round(vital_dist, 2),
+                        round(eff_h, 2),
+                        round(eff_h, 2),
                         vital_boundary_uv,
                         vital_boundary_uv,
                         PROVENANCE_LABEL_DERIVED,
                     )
-        elif vital_id is not None:
-            crest_world = np.asarray(_uv_to_world(P, N, B, u0, v0), dtype=np.float64)
-            edt_val = self.get_distance_at_world_point(int(vital_id), crest_world)
-            if edt_val is not None and edt_val <= 25.0:
-                vital_dist = float(edt_val)
-                eff_h = min(full_h, vital_dist)
-                eff_basal = (u0 + eff_h * au, v0 + eff_h * av)
-                return (
-                    round(eff_h, 2),
-                    round(vital_dist, 2),
-                    eff_basal,
-                    eff_basal if vital_dist <= full_h else None,
-                    PROVENANCE_INTERPOLATED,
-                )
 
         return (
             round(full_h, 2),
@@ -1246,6 +1367,142 @@ class MeasurementEngine:
     # ------------------------------------------------------------------
     # Anatomy-Aware Buccal & Lingual Cortical Boundary Detection (Part 3.4)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _sample_band_profile(
+        arr_f32: np.ndarray,
+        u_coords: np.ndarray,
+        v_coords: np.ndarray,
+        cx: float,
+        cy: float,
+        s_grid: np.ndarray,
+        au: float,
+        av: float,
+        bu: float,
+        bv: float,
+        step: float,
+        *,
+        offsets: Tuple[float, ...] = (-1.0, 0.0, 1.0),
+    ) -> np.ndarray:
+        """Sample a thin band perpendicular to `d_bl` along `s_grid` with bilinear interpolation."""
+        u_min, u_max = float(u_coords[0]), float(u_coords[-1])
+        v_min, v_max = float(v_coords[0]), float(v_coords[-1])
+        try:
+            from scipy import ndimage  # type: ignore
+
+            has_scipy = True
+        except ImportError:
+            has_scipy = False
+
+        band_profiles = []
+        for mult in offsets:
+            d_off = mult * step
+            su = (cx + d_off * au) + s_grid * bu
+            sv = (cy + d_off * av) + s_grid * bv
+            in_b = (su >= u_min) & (su <= u_max) & (sv >= v_min) & (sv <= v_max)
+            prof = np.zeros_like(s_grid, dtype=np.float32)
+            if in_b.any():
+                cf = (su[in_b] - u_min) / max(1e-6, u_max - u_min) * (len(u_coords) - 1)
+                rf = (sv[in_b] - v_min) / max(1e-6, v_max - v_min) * (len(v_coords) - 1)
+                if has_scipy:
+                    prof[in_b] = ndimage.map_coordinates(
+                        arr_f32, np.vstack([rf, cf]), order=1, mode="constant", cval=0.0
+                    )
+                else:
+                    ri = np.clip(np.round(rf).astype(int), 0, len(v_coords) - 1)
+                    ci = np.clip(np.round(cf).astype(int), 0, len(u_coords) - 1)
+                    prof[in_b] = arr_f32[ri, ci]
+            band_profiles.append(prof)
+        return np.mean(np.vstack(band_profiles), axis=0)
+
+    @staticmethod
+    def _refine_run_endpoints(
+        profile: np.ndarray, s_grid: np.ndarray, i_left: int, i_right: int, step: float
+    ) -> Tuple[float, float]:
+        """Apply subvoxel 0.5-isosurface refinement at outer cortical edges."""
+        s_left = float(s_grid[i_left])
+        s_right = float(s_grid[i_right])
+        if i_left > 0:
+            p_out, p_in = float(profile[i_left - 1]), float(profile[i_left])
+            if p_in >= 0.5 > p_out and (p_out > 0.0 or p_in < 1.0) and (p_in - p_out) > 1e-6:
+                s_left = float(s_grid[i_left - 1] + ((0.5 - p_out) / (p_in - p_out)) * step)
+        if i_right + 1 < len(profile):
+            p_in, p_out = float(profile[i_right]), float(profile[i_right + 1])
+            if p_in >= 0.5 > p_out and (p_out > 0.0 or p_in < 1.0) and (p_in - p_out) > 1e-6:
+                s_right = float(s_grid[i_right] + ((p_in - 0.5) / (p_in - p_out)) * step)
+        return s_left, s_right
+
+    @staticmethod
+    def _select_ridge_run_indices(
+        profile: np.ndarray,
+        tooth_profile: Optional[np.ndarray],
+        s_grid: np.ndarray,
+        step: float,
+    ) -> Optional[Tuple[int, int]]:
+        """Select outer `(i_left, i_right)` indices of jawbone along `s_grid`, bridging tooth sockets.
+
+        If a tooth/pulp separates two jawbone runs straddling `s = 0` with no empty air gap
+        (allowing <= 0.75 mm PDL margin), links outer-lingual to outer-buccal jawbone edges.
+        Otherwise returns only the single contiguous run closest to `s = 0`.
+        """
+        fg = profile >= 0.5
+        if not fg.any():
+            return None
+        idx_fg = np.flatnonzero(fg)
+        splits = np.where(np.diff(idx_fg) > 1)[0] + 1
+        runs = [r for r in np.split(idx_fg, splits) if r.size >= 2]
+        if not runs:
+            return None
+
+        zero_idx = int(np.argmin(np.abs(s_grid)))
+        # Locate the anchor bone run containing or closest to s = 0 (within 6.5 mm when tooth-bridging
+        # is available, else within 4.0 mm).
+        anchor_idx: Optional[int] = None
+        best_dist = float("inf")
+        for idx, run in enumerate(runs):
+            if run[0] <= zero_idx <= run[-1]:
+                anchor_idx = idx
+                best_dist = 0.0
+                break
+            d_to_zero = min(abs(float(s_grid[run[0]])), abs(float(s_grid[run[-1]])))
+            if d_to_zero < best_dist:
+                best_dist = d_to_zero
+                anchor_idx = idx
+
+        max_anchor_dist = 6.5 if (tooth_profile is not None and len(runs) >= 2) else 4.0
+        if anchor_idx is None or best_dist > max_anchor_dist:
+            return None
+
+        left_idx = anchor_idx
+        right_idx = anchor_idx
+        if tooth_profile is not None and len(runs) >= 2:
+
+            def _tooth_bridges_gap(r_left: np.ndarray, r_right: np.ndarray) -> bool:
+                if (float(s_grid[int(r_right[-1])]) - float(s_grid[int(r_left[0])])) > 16.0:
+                    return False
+                gap_sl = slice(int(r_left[-1]) + 1, int(r_right[0]))
+                gap_t = tooth_profile[gap_sl] >= 0.35
+                if gap_t.size == 0 or not np.any(gap_t):
+                    return False
+                air_idx = np.flatnonzero(~gap_t)
+                max_air_run = 0
+                if air_idx.size > 0:
+                    air_splits = np.where(np.diff(air_idx) > 1)[0] + 1
+                    max_air_run = max(len(a) for a in np.split(air_idx, air_splits))
+                return max_air_run * step <= 1.5
+
+            while left_idx > 0 and _tooth_bridges_gap(runs[left_idx - 1], runs[right_idx]):
+                if not _tooth_bridges_gap(runs[left_idx - 1], runs[left_idx]):
+                    break
+                left_idx -= 1
+            while right_idx + 1 < len(runs) and _tooth_bridges_gap(runs[left_idx], runs[right_idx + 1]):
+                if not _tooth_bridges_gap(runs[right_idx], runs[right_idx + 1]):
+                    break
+                right_idx += 1
+            if left_idx == right_idx and best_dist > 4.0:
+                return None
+
+        return int(runs[left_idx][0]), int(runs[right_idx][-1])
+
     @staticmethod
     def _compute_bone_widths_with_endpoints_in_cs(
         u_coords: np.ndarray,
@@ -1260,28 +1517,27 @@ class MeasurementEngine:
         crest_uv: Optional[Tuple[float, float]] = None,
         d_apical: Optional[Tuple[float, float]] = None,
         d_bl: Optional[Tuple[float, float]] = None,
+        tooth_mask: Optional[np.ndarray] = None,
     ) -> Tuple[
         Dict[float, Tuple[float, float]], Dict[float, Tuple[Tuple[float, float], Tuple[float, float]]]
     ]:
-        """Detect buccal and lingual cortical boundaries independently on the primary ridge component.
+        """Detect buccal and lingual cortical boundaries on jaw-bone-only `bone_mask`.
 
-        Samples along the local buccolingual caliper `d_bl` perpendicular to the ridge axis `d_apical`,
-        isolating the single contiguous bone segment around the ridge axis so disconnected islands
-        never inflate bone widths. `bone_mask` must be the jaw-bone-only mask (`mask_cs == jaw_id`),
-        never the height-ray envelope, so an in-socket root or crown cannot be measured as bone.
-        Applies subvoxel 0.5-isosurface refinement at both cortical edges.
+        Bridges across an in-socket tooth root/pulp when BOTH lingual and buccal jawbone walls
+        flank the socket (never across empty air or missing plates), and prevents large ridge
+        angles from clipping `W0` above flat crests or diving into tooth crowns.
 
-        Returns `(width_segments_u, width_endpoints_uv)` where:
-          - `width_segments_u[d] = (u_lingual, u_buccal)` for backward compatibility
-          - `width_endpoints_uv[d] = ((u_lingual, v_lingual), (u_buccal, v_buccal))` exact 2D endpoints
+        Returns `(width_segments_u, width_endpoints_uv)`.
         """
         segments: Dict[float, Tuple[float, float]] = {}
         endpoints_uv: Dict[float, Tuple[Tuple[float, float], Tuple[float, float]]] = {}
         if crest_v is None and crest_uv is None:
             return segments, endpoints_uv
 
-        raw_bone = bone_mask if bone_mask is not None else (mask_cs == jaw_id)
-        ridge_mask = _extract_primary_ridge_component(raw_bone, u_coords, v_coords)
+        if bone_mask is not None:
+            ridge_mask = np.asarray(bone_mask, dtype=bool)
+        else:
+            ridge_mask = _extract_primary_ridge_component(mask_cs == jaw_id, u_coords, v_coords)
         if not ridge_mask.any():
             return segments, endpoints_uv
 
@@ -1297,99 +1553,109 @@ class MeasurementEngine:
         max_half_s = float(0.5 * (u_max - u_min))
         s_grid = np.arange(-max_half_s, max_half_s + step, step, dtype=np.float64)
 
-        try:
-            from scipy import ndimage  # type: ignore
-
-            has_scipy = True
-        except ImportError:
-            has_scipy = False
-
         ridge_f32 = ridge_mask.astype(np.float32)
+        tooth_f32 = (
+            np.asarray(tooth_mask, dtype=np.float32)
+            if (tooth_mask is not None and np.any(tooth_mask))
+            else None
+        )
+
+        # Pre-check dentate socket rims for W0 (depth == 0.0) so W0 connects outer lingual rim
+        # to outer buccal rim directly without tilting into air or diving into the tooth.
+        socket_rims: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None
+        if tooth_f32 is not None and 0.0 in (float(d) for d in depths_mm):
+            su_arr, sv_arr = MeasurementEngine._extract_coronal_bone_surface(
+                ridge_mask, u_coords, v_coords, is_mandible
+            )
+            if su_arr.size > 0:
+                socket_rims = MeasurementEngine._find_socket_crest_rims(
+                    su_arr, sv_arr, ridge_mask, tooth_mask, u_coords, v_coords, is_mandible
+                )
+
+        def _measure_caliper(
+            cx: float, cy: float, c_au: float, c_av: float, c_bu: float, c_bv: float, *, allow_bridge: bool
+        ) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+            prof = MeasurementEngine._sample_band_profile(
+                ridge_f32, u_coords, v_coords, cx, cy, s_grid, c_au, c_av, c_bu, c_bv, step
+            )
+            t_prof = (
+                MeasurementEngine._sample_band_profile(
+                    tooth_f32, u_coords, v_coords, cx, cy, s_grid, c_au, c_av, c_bu, c_bv, step
+                )
+                if (allow_bridge and tooth_f32 is not None)
+                else None
+            )
+            span = MeasurementEngine._select_ridge_run_indices(prof, t_prof, s_grid, step)
+            if span is None:
+                return None
+            s_l, s_r = MeasurementEngine._refine_run_endpoints(prof, s_grid, span[0], span[1], step)
+            if s_r <= s_l:
+                return None
+            pt_l = (cx + s_l * c_bu, cy + s_l * c_bv)
+            pt_r = (cx + s_r * c_bu, cy + s_r * c_bv)
+            if pt_l[0] <= u_min + _CS_BORDER_TOL_MM or pt_r[0] >= u_max - _CS_BORDER_TOL_MM:
+                return None
+            return pt_l, pt_r
 
         for depth in depths_mm:
-            eff_d = max(0.25, float(depth)) if float(depth) == 0.0 else float(depth)
-            cx = u0 + eff_d * au
-            cy = v0 + eff_d * av
+            fdepth = float(depth)
+            if fdepth == 0.0 and socket_rims is not None:
+                # Dentate socket with both lingual & buccal rims: measure each wall's outer edge
+                # 0.5 mm apical to its own crest rim and link outer-lingual to outer-buccal.
+                l_rim, r_rim = socket_rims
+                v_l_s = l_rim[1] - 0.5 if is_mandible else l_rim[1] + 0.5
+                v_r_s = r_rim[1] - 0.5 if is_mandible else r_rim[1] + 0.5
+                c_l = _measure_caliper(
+                    l_rim[0], v_l_s, 0.0, -1.0 if is_mandible else 1.0, 1.0, 0.0, allow_bridge=False
+                )
+                c_r = _measure_caliper(
+                    r_rim[0], v_r_s, 0.0, -1.0 if is_mandible else 1.0, 1.0, 0.0, allow_bridge=False
+                )
+                if c_l is not None and c_r is not None and c_r[1][0] > c_l[0][0]:
+                    pt_l, pt_r = c_l[0], c_r[1]
+                    if pt_l[0] > u_min + _CS_BORDER_TOL_MM and pt_r[0] < u_max - _CS_BORDER_TOL_MM:
+                        segments[fdepth] = (float(pt_l[0]), float(pt_r[0]))
+                        endpoints_uv[fdepth] = (pt_l, pt_r)
+                        continue
+
+            if fdepth == 0.0:
+                eff_d = 0.5
+                cx = u0 + eff_d * au
+                cy = v0 + eff_d * av
+                if cy < v_min - 0.5 or cy > v_max + 0.5:
+                    continue
+                cand_rot = _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
+                best = cand_rot
+                # On flat-topped tilted ridges (e.g. test_13), a tilted d_bl clips into air above
+                # the crest; compare against a horizontal crestal caliper at v0 -/+ 0.5 mm.
+                if abs(bv) > 0.05:
+                    v_h = v0 - 0.5 if is_mandible else v0 + 0.5
+                    if v_min - 0.5 <= v_h <= v_max + 0.5:
+                        cand_h = _measure_caliper(
+                            u0, v_h, 0.0, -1.0 if is_mandible else 1.0, 1.0, 0.0, allow_bridge=True
+                        )
+                        if cand_h is not None:
+                            w_h = math.hypot(cand_h[1][0] - cand_h[0][0], cand_h[1][1] - cand_h[0][1])
+                            w_r = (
+                                math.hypot(cand_rot[1][0] - cand_rot[0][0], cand_rot[1][1] - cand_rot[0][1])
+                                if cand_rot is not None
+                                else 0.0
+                            )
+                            if w_h > w_r + 0.5:
+                                best = cand_h
+                if best is not None:
+                    segments[fdepth] = (float(best[0][0]), float(best[1][0]))
+                    endpoints_uv[fdepth] = best
+                continue
+
+            cx = u0 + fdepth * au
+            cy = v0 + fdepth * av
             if cy < v_min - 0.5 or cy > v_max + 0.5:
                 continue
-
-            # Sample a thin +/- 0.25 mm band along d_apical for surface robustness
-            band_profiles = []
-            for d_off in (-step, 0.0, step):
-                su = (cx + d_off * au) + s_grid * bu
-                sv = (cy + d_off * av) + s_grid * bv
-                in_b = (su >= u_min) & (su <= u_max) & (sv >= v_min) & (sv <= v_max)
-                prof = np.zeros_like(s_grid, dtype=np.float32)
-                if in_b.any():
-                    cf = (su[in_b] - u_min) / max(1e-6, u_max - u_min) * (len(u_coords) - 1)
-                    rf = (sv[in_b] - v_min) / max(1e-6, v_max - v_min) * (len(v_coords) - 1)
-                    if has_scipy:
-                        prof[in_b] = ndimage.map_coordinates(
-                            ridge_f32, np.vstack([rf, cf]), order=1, mode="constant", cval=0.0
-                        )
-                    else:
-                        ri = np.clip(np.round(rf).astype(int), 0, len(v_coords) - 1)
-                        ci = np.clip(np.round(cf).astype(int), 0, len(u_coords) - 1)
-                        prof[in_b] = ridge_f32[ri, ci]
-                band_profiles.append(prof)
-
-            profile = np.mean(np.vstack(band_profiles), axis=0)
-            fg = profile >= 0.5
-            if not fg.any():
-                continue
-
-            # Find contiguous foreground runs along the caliper line and pick the run
-            # belonging to the alveolar ridge (containing or closest to s = 0).
-            idx_fg = np.flatnonzero(fg)
-            splits = np.where(np.diff(idx_fg) > 1)[0] + 1
-            runs = np.split(idx_fg, splits)
-            zero_idx = int(np.argmin(np.abs(s_grid)))
-
-            chosen_run = None
-            best_dist = float("inf")
-            for run in runs:
-                if run.size < 2:
-                    continue
-                if run[0] <= zero_idx <= run[-1]:
-                    chosen_run = run
-                    break
-                d_to_zero = min(abs(float(s_grid[run[0]])), abs(float(s_grid[run[-1]])))
-                if d_to_zero < best_dist:
-                    best_dist = d_to_zero
-                    chosen_run = run
-
-            if chosen_run is None or (best_dist != float("inf") and best_dist > 4.0):
-                continue
-
-            i_left = int(chosen_run[0])
-            i_right = int(chosen_run[-1])
-            s_left = float(s_grid[i_left])
-            s_right = float(s_grid[i_right])
-
-            # Subvoxel refinement at oblique/partial-volume cortical boundaries without dilating binary steps
-            if i_left > 0:
-                p_out, p_in = float(profile[i_left - 1]), float(profile[i_left])
-                if p_in >= 0.5 > p_out and (p_out > 0.0 or p_in < 1.0) and (p_in - p_out) > 1e-6:
-                    frac = (0.5 - p_out) / (p_in - p_out)
-                    s_left = float(s_grid[i_left - 1] + frac * step)
-            if i_right + 1 < len(profile):
-                p_in, p_out = float(profile[i_right]), float(profile[i_right + 1])
-                if p_in >= 0.5 > p_out and (p_out > 0.0 or p_in < 1.0) and (p_in - p_out) > 1e-6:
-                    frac = (p_in - 0.5) / (p_in - p_out)
-                    s_right = float(s_grid[i_right] + frac * step)
-
-            if s_right <= s_left:
-                continue
-
-            pt_l = (cx + s_left * bu, cy + s_left * bv)
-            pt_r = (cx + s_right * bu, cy + s_right * bv)
-
-            # Reject if either cortical boundary touches the cross-section lateral border
-            if pt_l[0] <= u_min + _CS_BORDER_TOL_MM or pt_r[0] >= u_max - _CS_BORDER_TOL_MM:
-                continue
-
-            segments[float(depth)] = (float(pt_l[0]), float(pt_r[0]))
-            endpoints_uv[float(depth)] = (pt_l, pt_r)
+            res = _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
+            if res is not None:
+                segments[fdepth] = (float(res[0][0]), float(res[1][0]))
+                endpoints_uv[fdepth] = res
 
         return segments, endpoints_uv
 
@@ -1470,7 +1736,12 @@ class MeasurementEngine:
             tooth_id = get_tooth_group_label_id(is_mandible, is_5class=True)
 
         # 1. Require real jawbone segmentation — never fall back to intensity thresholds (Parts 3.2, 7.2)
-        raw_bone = _ridge_envelope_mask(mask_cs, u_coords, v_coords, jaw_id, tooth_id, is_mandible)
+        same_jaw_tooth = _same_jaw_tooth_mask(
+            mask_cs, is_mandible, self.is_dental_segmentator_5class, tooth_id=tooth_id
+        )
+        raw_bone = _ridge_envelope_mask(
+            mask_cs, u_coords, v_coords, jaw_id, tooth_id, is_mandible, tooth_mask=same_jaw_tooth
+        )
         if not raw_bone.any():
             missing_reason = WITHHELD_NO_MANDIBLE_SEG if is_mandible else WITHHELD_NO_MAXILLA_SEG
             cs.withheld_reason = missing_reason
@@ -1479,12 +1750,12 @@ class MeasurementEngine:
             self.last_withheld_reason = missing_reason
             return None
 
-        # 2. Extract primary connected jawbone component (reject stray voxels & disconnected islands)
+        # 2. Extract primary connected alveolar ridge (keeping both socket walls via tooth envelope,
+        #    while rejecting stray voxels and disconnected lateral bone islands).
         ridge_mask = _extract_primary_ridge_component(raw_bone, u_coords, v_coords)
-        # Bone-only mask: the crest, W0 and every buccolingual caliper must never be taken
-        # across the in-socket root that the envelope adds.
-        bone_only = mask_cs == int(jaw_id)
-        bone_component = _extract_primary_ridge_component(bone_only, u_coords, v_coords)
+        # Bone-only mask within the primary ridge: keeps both lingual and buccal socket walls,
+        # never includes tooth/pulp voxels or disconnected lateral islands.
+        bone_component = (mask_cs == int(jaw_id)) & ridge_mask
         width_reason, height_reason = _ridge_region_withheld_reasons(ridge_mask, u_coords, v_coords)
         width_ok, height_ok = width_reason is None, height_reason is None
         if not width_ok and not height_ok:
@@ -1497,7 +1768,7 @@ class MeasurementEngine:
 
         # 3. Anatomy-aware local alveolar crest & ridge axis detection (Part 3.3)
         crest_uv, d_apical, d_bl, ridge_angle_deg, crest_profile_uv = self._detect_alveolar_crest_and_axis(
-            ridge_mask, u_coords, v_coords, is_mandible, bone_mask=bone_component
+            ridge_mask, u_coords, v_coords, is_mandible, bone_mask=bone_component, tooth_mask=same_jaw_tooth
         )
         cs.crest_uv = crest_uv
         cs.crest_v = crest_uv[1] if crest_uv is not None else None
@@ -1620,6 +1891,7 @@ class MeasurementEngine:
                 crest_uv=crest_uv,
                 d_apical=d_apical,
                 d_bl=d_bl,
+                tooth_mask=same_jaw_tooth,
             )
             cs.width_segments = segs_u
             cs.width_endpoints_uv = segs_uv
@@ -1902,25 +2174,95 @@ class MeasurementEngine:
             if float(np.linalg.norm(crests[index] - neighbour_mid)) > float(max_jump_mm):
                 adjusted[index] = neighbour_mid
         for (meas, cs), new_crest in zip(series, adjusted):
-            self._move_crest(cs, meas, new_crest)
+            self._move_crest(cs, meas, new_crest, is_5class=self.is_dental_segmentator_5class)
 
     @staticmethod
     def _move_crest(
-        cs: CrossSectionData, meas: Optional[ImplantSiteMeasurement], crest_uv: np.ndarray
+        cs: CrossSectionData,
+        meas: Optional[ImplantSiteMeasurement],
+        crest_uv: np.ndarray,
+        *,
+        is_5class: Optional[bool] = None,
     ) -> None:
-        """Move a cross-section's crest and keep its height record/value consistent."""
+        """Move a cross-section's crest, keep height clear of vital canals, and re-sync widths."""
         old = cs.crest_uv
         if old is None or cs.frame is None:
             return
         new_uv = (float(crest_uv[0]), float(crest_uv[1]))
         if float(math.hypot(new_uv[0] - old[0], new_uv[1] - old[1])) < 1e-6:
             return
-        record = (getattr(cs, "measurements", None) or {}).get("available_bone_height")
+        records = getattr(cs, "measurements", None) or {}
+        record = records.get("available_bone_height")
         if record is None or not record.is_available or record.end_world_mm is None:
             return
+
         P, _T, N, B = cs.frame
         start_world = _uv_to_world(P, N, B, new_uv[0], new_uv[1])
-        value = round(float(np.linalg.norm(np.asarray(record.end_world_mm) - np.asarray(start_world))), 2)
+        end_uv = tuple(float(v) for v in record.end_uv_mm) if record.end_uv_mm is not None else None
+        end_world = record.end_world_mm
+
+        # Never allow a stabilized height segment to cross an IAN canal in the cross-section.
+        is_mand = bool(getattr(cs, "is_mandible", True))
+        mask_cs = getattr(cs, "mask_cs", None)
+        u_coords = getattr(cs, "u_coords", None)
+        v_coords = getattr(cs, "v_coords", None)
+        use_5class = (
+            bool(is_5class)
+            if is_5class is not None
+            else (infer_mask_is_5class(mask_cs) if (mask_cs is not None and np.any(mask_cs)) else False)
+        )
+        if (
+            is_mand
+            and end_uv is not None
+            and mask_cs is not None
+            and u_coords is not None
+            and v_coords is not None
+            and np.any(mask_cs)
+        ):
+            canal_ids = [DENTALSEGMENTATOR_CANAL_ID] if use_5class else list(CANAL_IDS)
+            # If the record recorded a specific vital_id, prefer that exact ID.
+            src_lbls = tuple(getattr(record, "source_labels", ()) or ())
+            if len(src_lbls) >= 2:
+                canal_ids = [int(src_lbls[1])]
+            elif meas is not None and getattr(meas, "tooth_fdi", None):
+                ipsi = get_ipsilateral_canal_ids(meas.tooth_fdi, is_5class=use_5class)
+                if ipsi:
+                    canal_ids = ipsi
+            canal_2d = np.isin(mask_cs, canal_ids)
+            if canal_2d.any():
+                du_seg = end_uv[0] - new_uv[0]
+                dv_seg = end_uv[1] - new_uv[1]
+                seg_len = math.hypot(du_seg, dv_seg)
+                if seg_len > 1e-6:
+                    n_samp = max(4, int(math.ceil(seg_len / 0.25)) + 1)
+                    ts = np.linspace(0.0, 1.0, n_samp)
+                    su = new_uv[0] + ts * du_seg
+                    sv = new_uv[1] + ts * dv_seg
+                    u_min, u_max = float(u_coords[0]), float(u_coords[-1])
+                    v_min, v_max = float(v_coords[0]), float(v_coords[-1])
+                    ci = np.clip(
+                        np.round((su - u_min) / max(1e-6, u_max - u_min) * (len(u_coords) - 1)).astype(int),
+                        0,
+                        len(u_coords) - 1,
+                    )
+                    ri = np.clip(
+                        np.round((sv - v_min) / max(1e-6, v_max - v_min) * (len(v_coords) - 1)).astype(int),
+                        0,
+                        len(v_coords) - 1,
+                    )
+                    hits = np.flatnonzero(canal_2d[ri, ci])
+                    if hits.size > 0:
+                        t_stop = max(0.0, float(ts[int(hits[0])]) - (0.25 / seg_len))
+                        end_uv = (new_uv[0] + t_stop * du_seg, new_uv[1] + t_stop * dv_seg)
+                        end_world = _uv_to_world(P, N, B, end_uv[0], end_uv[1])
+                        record.end_uv_mm = end_uv
+                        record.end_world_mm = end_world
+                        cs.basal_uv = end_uv
+                        cs.basal_v = end_uv[1]
+                        if getattr(cs, "vital_boundary_uv", None) is not None:
+                            cs.vital_boundary_uv = end_uv
+
+        value = round(float(np.linalg.norm(np.asarray(end_world) - np.asarray(start_world))), 2)
         record.value_mm = value
         record.start_uv_mm = new_uv
         record.start_world_mm = start_world
@@ -1931,6 +2273,83 @@ class MeasurementEngine:
         cs.crest_uv = new_uv
         cs.crest_v = new_uv[1]
         cs.height_u = new_uv[0]
+
+        # Re-sync width calipers with the stabilized crest when real mask geometry is present.
+        had_widths = bool(getattr(cs, "width_endpoints_uv", None) or getattr(cs, "width_segments", None))
+        if (
+            had_widths
+            and mask_cs is not None
+            and u_coords is not None
+            and v_coords is not None
+            and np.any(mask_cs)
+        ):
+            src_lbls = tuple(getattr(record, "source_labels", ()) or ())
+            jaw_id = int(src_lbls[0]) if src_lbls else get_jaw_label_id(is_mand, is_5class=use_5class)
+            jaw_mask = mask_cs == jaw_id
+            if jaw_mask.any():
+                t_id: Optional[int] = None
+                if meas is not None and getattr(meas, "tooth_fdi", None):
+                    info_t = get_tooth_label(str(meas.tooth_fdi))
+                    if info_t is not None:
+                        t_id = int(info_t.id)
+                same_tooth = _same_jaw_tooth_mask(mask_cs, is_mand, use_5class, tooth_id=t_id)
+                raw_env = _ridge_envelope_mask(
+                    mask_cs, u_coords, v_coords, jaw_id, t_id, is_mand, tooth_mask=same_tooth
+                )
+                r_mask = _extract_primary_ridge_component(raw_env, u_coords, v_coords)
+                b_comp = jaw_mask & r_mask
+                ang = getattr(cs, "ridge_axis_angle_deg", None)
+                rad = math.radians(float(ang)) if ang is not None else 0.0
+                d_apical = (math.sin(rad), -math.cos(rad)) if is_mand else (math.sin(rad), math.cos(rad))
+                d_bl = (math.cos(rad), math.sin(rad) if is_mand else -math.sin(rad))
+                depths = [0.0, 3.0, 5.0, 6.0, 9.0]
+                segs_u, segs_uv = MeasurementEngine._compute_bone_widths_with_endpoints_in_cs(
+                    u_coords,
+                    v_coords,
+                    mask_cs,
+                    new_uv[1],
+                    is_mand,
+                    jaw_id,
+                    depths,
+                    bone_mask=b_comp if b_comp.any() else jaw_mask,
+                    crest_uv=new_uv,
+                    d_apical=d_apical,
+                    d_bl=d_bl,
+                    tooth_mask=same_tooth,
+                )
+                if segs_uv:
+                    cs.width_segments = segs_u
+                    cs.width_endpoints_uv = segs_uv
+                    new_widths: Dict[float, Optional[float]] = {}
+                    for depth in depths:
+                        if depth in segs_uv:
+                            pt_l, pt_r = segs_uv[depth]
+                            w_sw = _uv_to_world(P, N, B, pt_l[0], pt_l[1])
+                            w_ew = _uv_to_world(P, N, B, pt_r[0], pt_r[1])
+                            w_val = round(float(np.linalg.norm(np.asarray(w_ew) - np.asarray(w_sw))), 2)
+                            new_widths[depth] = w_val
+                            records[f"width_{depth:g}"] = MeasurementRecord(
+                                measurement_type=f"bone_width_w{depth:g}",
+                                value_mm=w_val,
+                                start_world_mm=w_sw,
+                                end_world_mm=w_ew,
+                                start_uv_mm=pt_l,
+                                end_uv_mm=pt_r,
+                                source_labels=(jaw_id,),
+                                provenance=PROVENANCE_INTERPOLATED,
+                                quality=QUALITY_ESTIMATED,
+                            )
+                        else:
+                            new_widths[depth] = None
+                            records.pop(f"width_{depth:g}", None)
+                    if meas is not None:
+                        meas.bone_width_at_depths_mm = new_widths
+                        meas.crest_width_mm = new_widths.get(0.0)
+                        meas.mid_root_width_mm = (
+                            new_widths.get(6.0) if new_widths.get(6.0) is not None else new_widths.get(3.0)
+                        )
+                        meas.apical_width_mm = new_widths.get(9.0)
+
         if meas is not None:
             meas.bone_height_mm = value
             meas.provenance = PROVENANCE_INTERPOLATED

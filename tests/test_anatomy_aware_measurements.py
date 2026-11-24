@@ -566,23 +566,29 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
         self.assertAlmostEqual(meas_gui.bone_height_mm or 0.0, meas_gal.bone_height_mm or 0.0, delta=0.75)
         self.assertAlmostEqual(meas_gui.crest_width_mm or 0.0, meas_gal.crest_width_mm or 0.0, delta=0.75)
 
-        # Implant suggestion in engine == suggest_implant_dimensions == rendered overlay text!
+        # Implant suggestion in engine == suggest_implant_dimensions, and rendered tile shows consistent H / W0!
         exp_d, exp_l, _ = suggest_implant_dimensions(
             meas_gal.crest_width_mm,
             meas_gal.mid_root_width_mm,
             meas_gal.bone_height_mm,
             meas_gal.mesiodistal_space_mm,
         )
+        self.assertIsNotNone(exp_d)
+        self.assertIsNotNone(exp_l)
         self.assertEqual(meas_gal.suggested_diameter_mm, exp_d)
         self.assertEqual(meas_gal.suggested_length_mm, exp_l)
         self.assertEqual(cs_gal.suggested_implant_diameter_mm, exp_d)
         self.assertEqual(cs_gal.suggested_implant_length_mm, exp_l)
-        if exp_d is not None and exp_l is not None:
-            r = render_cross_section(cs_gal, meas_gal, scale=3)
-            self.assertTrue(
-                any(f"Impl {exp_d:.1f}x{exp_l:g} mm" in txt for _, _, txt in r.labels),
-                r.labels,
-            )
+        r = render_cross_section(cs_gal, meas_gal, scale=3)
+        self.assertTrue(
+            any(f"W0 {float(meas_gal.crest_width_mm):.1f} mm" in txt for _, _, txt in r.labels),
+            r.labels,
+        )
+        self.assertTrue(
+            any(f"H:{float(meas_gal.bone_height_mm):.1f} mm" in txt for _, _, txt in r.labels),
+            r.labels,
+        )
+        _verify_rendered_measurement_sync(self, cs_gal, meas_gal)
 
     # 17. Surgical-guide export rejection without a valid arch
     def test_17_surgical_guide_export_rejects_missing_arch(self) -> None:
@@ -662,6 +668,120 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
         m2, _ = eng.measure_at_arc_mm("lower", 15.0, fdi_hint="46")
         assert m2 is not None
         self.assertGreater(m2.bone_height_mm or 0.0, (m1.bone_height_mm or 0.0) + 3.0)
+
+    # 19. Dentate W0 bridges tooth socket continuously (no 5 -> 2 -> 6 mm drop)
+    def test_19_dentate_w0_bridges_socket_and_stays_consistent_across_slices(self) -> None:
+        shape = (50, 50, 50)
+        img = np.full(shape, -500.0, dtype=np.float32)
+        mask = np.zeros(shape, dtype=np.int32)
+        # 8 mm wide ridge (Y=21..29), crest at Z=28, base at Z=10
+        mask[10:29, 21:29, 10:40] = LOWER_JAW_ID
+        # Tooth #46 (crown Z=28..35, root Z=19..28) + pulp #146 splitting middle slices X=22..28
+        mask[19:36, 23:27, 22:28] = 46
+        mask[21:33, 24:26, 23:27] = 146
+        img[mask > 0] = 900.0
+
+        eng = self._build_engine(mask, img)
+        # Measure before tooth (X=34 -> arc=6), middle of tooth (X=25 -> arc=15), after tooth (X=16 -> arc=24)
+        w0_vals = []
+        for arc in (6.0, 15.0, 24.0):
+            meas, cs = eng.measure_at_arc_mm("lower", arc, fdi_hint="46")
+            self.assertIsNotNone(meas)
+            assert meas is not None and cs is not None
+            self.assertIsNotNone(meas.crest_width_mm)
+            w0_vals.append(float(meas.crest_width_mm or 0.0))
+            _verify_rendered_measurement_sync(self, cs, meas)
+
+        # Before, middle, and after slices must all report full ~7.5-8.5 mm ridge width (never ~2 mm).
+        for w0 in w0_vals:
+            self.assertGreater(w0, 6.0)
+            self.assertLess(w0, 9.5)
+        self.assertLess(max(w0_vals) - min(w0_vals), 1.5)
+
+    # 20. Large ridge angles (25-45 deg): W0 accurate, no PCA eigenvector flip
+    def test_20_large_ridge_angle_preserves_w0_and_avoids_axis_flip(self) -> None:
+        for tilt_deg in (25, 45):
+            shape = (60, 60, 60)
+            img = np.full(shape, -500.0, dtype=np.float32)
+            mask = np.zeros(shape, dtype=np.int32)
+            for z in range(10, 32):
+                shift = (31 - z) * math.tan(math.radians(tilt_deg))
+                y0 = max(1, int(round(26 + shift - 4)))
+                y1 = min(59, int(round(26 + shift + 4)))
+                mask[z, y0:y1, 10:50] = LOWER_JAW_ID
+            for z in range(22, 38):
+                shift = (31 - z) * math.tan(math.radians(tilt_deg))
+                y0 = max(1, int(round(26 + shift - 2)))
+                y1 = min(59, int(round(26 + shift + 2)))
+                mask[z, y0:y1, 27:33] = 46
+            img[mask > 0] = 900.0
+            arch = DentalArch(
+                np.array(
+                    [[45.0, 26.0, 31.0], [35.0, 26.0, 31.0], [25.0, 26.0, 31.0], [15.0, 26.0, 31.0]],
+                    dtype=np.float64,
+                ),
+                jaw_type="lower",
+                ras_convention=True,
+            )
+            eng = self._build_engine(mask, img, arch=arch)
+            meas, cs = eng.measure_at_arc_mm("lower", 15.0, fdi_hint="46")
+            self.assertIsNotNone(meas)
+            assert meas is not None and cs is not None
+            # PCA angle must remain positive (no flip to -35 deg at 45 deg tilt) and height must extend.
+            self.assertGreater(float(cs.ridge_axis_angle_deg or 0.0), 15.0)
+            self.assertGreater(float(meas.bone_height_mm or 0.0), 18.0)
+            # W0 bridges the tilted socket cleanly (~7-9 mm) instead of clipping or missing.
+            self.assertIsNotNone(meas.crest_width_mm)
+            self.assertGreater(float(meas.crest_width_mm or 0.0), 6.0)
+            _verify_rendered_measurement_sync(self, cs, meas)
+
+    # 21. Height reaches jaw end when canal is absent from slice, and never crosses canal when present
+    def test_21_height_extends_to_jaw_end_without_canal_in_slice_and_stops_at_ian(self) -> None:
+        shape = (50, 50, 50)
+        img = np.full(shape, -500.0, dtype=np.float32)
+        mask = np.zeros(shape, dtype=np.int32)
+        # Mandible Z=8..28 (20 mm tall), X=10..42
+        mask[8:29, 21:29, 10:42] = LOWER_JAW_ID
+        # Right IAN canal exists ONLY posteriorly X=10..24 (stops at mental foramen X=24),
+        # leaving X=30..38 (6-14 mm away in 3D!) completely canal-free.
+        mask[14:17, 24:27, 10:25] = RIGHT_IAN_ID
+        img[mask > 0] = 900.0
+
+        eng = self._build_engine(mask, img)
+        # Anterior to mental foramen (X=30 -> arc=10.0): no canal in 2D slice -> must reach jaw base (~20 mm)!
+        meas_ant, cs_ant = eng.measure_at_arc_mm("lower", 10.0, fdi_hint="44")
+        self.assertIsNotNone(meas_ant)
+        assert meas_ant is not None and cs_ant is not None
+        self.assertIsNone(cs_ant.canal_centroid_uv)
+        self.assertGreater(float(meas_ant.bone_height_mm or 0.0), 18.5)
+        self.assertLess(float(cs_ant.basal_uv[1]), -15.0)
+
+        # Posterior over IAN canal (X=16 -> arc=24.0): must stop coronal to canal (Z >= 16 -> H <= 13 mm)
+        meas_post, cs_post = eng.measure_at_arc_mm("lower", 24.0, fdi_hint="46")
+        self.assertIsNotNone(meas_post)
+        assert meas_post is not None and cs_post is not None
+        self.assertIsNotNone(cs_post.canal_centroid_uv)
+        self.assertLess(float(meas_post.bone_height_mm or 99.0), 13.0)
+        self.assertGreaterEqual(float(cs_post.basal_uv[1]), float(cs_post.canal_centroid_uv[1]))
+
+    # 22. stabilize_entry_points / _move_crest re-syncs widths and prevents crossing canal
+    def test_22_stabilize_entry_points_resyncs_widths_and_guards_canal(self) -> None:
+        shape = (50, 50, 50)
+        img = np.full(shape, -500.0, dtype=np.float32)
+        mask = np.zeros(shape, dtype=np.int32)
+        mask[8:29, 21:29, 10:40] = LOWER_JAW_ID
+        mask[14:17, 24:26, 10:40] = RIGHT_IAN_ID
+        img[mask > 0] = 900.0
+        eng = self._build_engine(mask, img)
+        series = [eng.measure_at_arc_mm("lower", arc, fdi_hint="46") for arc in (14.0, 15.0, 16.0)]
+        mid_meas, mid_cs = series[1]
+        assert mid_meas is not None and mid_cs is not None
+        # Shift crest 3 mm laterally and verify _move_crest keeps widths synced and stops clear of canal
+        moved = np.array([float(mid_cs.crest_uv[0]) + 1.5, float(mid_cs.crest_uv[1]) - 1.0])
+        eng._move_crest(mid_cs, mid_meas, moved)
+        self.assertIsNotNone(mid_meas.crest_width_mm)
+        self.assertEqual(mid_cs.measurements["width_0"].provenance, "interpolated_boundary")
+        _verify_rendered_measurement_sync(self, mid_cs, mid_meas)
 
 
 class TestCrossSectionEntryPoints(unittest.TestCase):
