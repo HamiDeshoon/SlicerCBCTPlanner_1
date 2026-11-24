@@ -552,8 +552,8 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertIn("W0 --", footer[0])
         self.assertNotIn("0.0 mm", footer[0])
 
-    def test_ridge_envelope_includes_in_socket_root_on_partially_dentate_phantom(self) -> None:
-        """RC-01: a partially dentate ridge measures jawbone plus the in-socket root wall."""
+    def test_partially_dentate_crest_comes_from_jaw_bone_not_the_root(self) -> None:
+        """The entry point and W0 come from jaw bone, never from the in-socket root."""
         img = np.full((50, 50, 50), -500.0, dtype=np.float32)
         mask = np.zeros((50, 50, 50), dtype=np.uint16)
         # ToothFairy3 mandible: lingual plate only (buccal plate missing) plus basal bone.
@@ -568,11 +568,11 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertIsNotNone(meas)
         assert meas is not None
         self.assertIsNone(meas.withheld_reason)
-        # The crest resolves from the root where the jaw mask is hollow; jawbone alone
-        # would stop at the basal block (~3 mm of height).
-        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 16.0, delta=1.0)
-        # Crest width spans the lingual plate plus the root wall; jawbone alone is ~1 mm.
-        self.assertAlmostEqual(meas.crest_width_mm or 0.0, 6.0, delta=0.75)
+        # The crest sits on the lingual plate (Z~27.5) and the caliper continues to the jaw
+        # end (Z=10) because there is no canal in this region.
+        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 18.5, delta=1.5)
+        # W0 is the bone plate itself (~2 mm), not plate + root wall (which used to read ~6 mm).
+        self.assertAlmostEqual(meas.crest_width_mm or 0.0, 2.0, delta=1.0)
 
     def test_ridge_envelope_hu_fallback_when_segmentation_covers_only_teeth(self) -> None:
         """Clinical safety: a teeth-only segmentation withholds bone metrics instead of using HU thresholds."""

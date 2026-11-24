@@ -136,7 +136,8 @@ class TestPanoramicAndCrossSectionRender(unittest.TestCase):
         self.assertEqual(len(r1.overlay_px), 0)
         self.assertTrue(any("not measurable" in t for _, _, t in r1.labels))
 
-        # Full measured site renders engine-supplied H, W0, Impl suggestion, and Misch density verbatim
+        # Full measured site renders engine-supplied H, W0 and Misch density verbatim; the
+        # implant envelope, root line and 2 mm barrier are deliberately not drawn any more.
         cs_full = SimpleNamespace(
             img_cs=img,
             mask_cs=mask,
@@ -160,7 +161,9 @@ class TestPanoramicAndCrossSectionRender(unittest.TestCase):
         texts = [t for _, _, t in r2.labels]
         self.assertTrue(any("H 14.0 mm" in t for t in texts), texts)
         self.assertTrue(any("W0 7.6 mm" in t for t in texts), texts)
-        self.assertTrue(any("Impl 4.5x11.5 mm" in t for t in texts), texts)
+        self.assertFalse(any(t.startswith("Impl ") for t in texts), texts)
+        self.assertFalse(any(t.startswith("Root ") for t in texts), texts)
+        self.assertFalse(any("2mm SAFE" in t for t in texts), texts)
         self.assertTrue(any("D2" in t for t in texts), texts)
 
 

@@ -30,3 +30,6 @@ Makefile
 *.pt
 *.onnx
 Resources/ML/
+
+# Small labelled regression fixture (522 KB labelmap, no image data)
+!tests/data/ToothFairy3S_0021_seg.nii.gz

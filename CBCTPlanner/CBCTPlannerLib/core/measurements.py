@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import logging
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from . import ensure_optional_package
@@ -69,6 +69,10 @@ _MAX_RIDGE_HEIGHT_FRACTION = 0.90
 
 # The alveolar ridge envelope adds the in-socket root inside this buccolingual window.
 ENVELOPE_HALF_WIDTH_MM = 6.0
+
+# An osteotomy entry (alveolar crest) that moves further than this between neighbouring
+# slices is interpolated from its stable neighbours instead of being drawn as a step.
+MAX_ENTRY_JUMP_MM = 2.5
 
 # Recorded whenever a gate withholds a metric, so a rendered `--` stays distinguishable
 # from missing segmentation and from a metric that failed outright.
@@ -907,6 +911,7 @@ class MeasurementEngine:
         u_coords: np.ndarray,
         v_coords: np.ndarray,
         is_mandible: bool,
+        bone_mask: Optional[np.ndarray] = None,
     ) -> Tuple[
         Optional[Tuple[float, float]],
         Tuple[float, float],
@@ -935,11 +940,16 @@ class MeasurementEngine:
         min_support_px = max(2, int(round(0.75 / max(1e-3, dv))))
 
         n_v, n_u = ridge_mask.shape
+        # The crest and the height axis must come from BONE only. `ridge_mask` is the
+        # alveolar envelope that also contains the in-socket root, so scanning it put the
+        # entry point on the tooth crown and then measured W0 across the tooth instead of
+        # the ridge. The envelope is still used for the height ray itself.
+        surface_mask = bone_mask if (bone_mask is not None and bool(np.any(bone_mask))) else ridge_mask
         surf_cols: List[int] = []
         surf_vs: List[float] = []
 
         for iu in range(n_u):
-            col = ridge_mask[:, iu]
+            col = surface_mask[:, iu]
             if not col.any():
                 continue
             v_indices = np.flatnonzero(col)
@@ -1002,15 +1012,11 @@ class MeasurementEngine:
 
         crest_profile_uv = [(float(u), float(v)) for u, v in zip(surf_u, smooth_v)]
 
-        # Prefer central planning corridor (|u| <= 2.5 mm) when bone exists there, else |u| <= 6.0 mm
-        inner_mask = np.abs(surf_u) <= 1.5
+        # Search the whole central corridor (|u| <= 6 mm), not just the narrow planning axis:
+        # bone-only columns can be missing over a hollow socket, and limiting the search to
+        # |u| <= 1.5 mm there put the entry on the basal cortex several millimetres too deep.
         central_mask = np.abs(surf_u) <= 6.0
-        if inner_mask.any():
-            search_indices = np.flatnonzero(inner_mask)
-        elif central_mask.any():
-            search_indices = np.flatnonzero(central_mask)
-        else:
-            search_indices = np.arange(len(surf_u))
+        search_indices = np.flatnonzero(central_mask) if central_mask.any() else np.arange(len(surf_u))
         search_v = smooth_v[search_indices]
         if is_mandible:
             local_best = int(np.argmax(search_v))
@@ -1045,45 +1051,47 @@ class MeasurementEngine:
                     u_crest = float(surf_u[best_idx] + delta * du)
                     v_crest = float(y1 - 0.25 * (y0 - y2) * delta)
 
-        # Estimate local anatomical ridge long axis from horizontal ridge midpoints at depths 1..8 mm
-        mid_depths: List[float] = []
-        mid_us: List[float] = []
-        for d in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0):
-            tv = v_crest - d if is_mandible else v_crest + d
-            r_idx = int(np.argmin(np.abs(v_coords - tv)))
-            if abs(float(v_coords[r_idx]) - tv) > 0.75:
-                continue
-            row_hits = np.flatnonzero(ridge_mask[r_idx, :])
-            if row_hits.size >= 2:
-                mid_depths.append(float(d))
-                mid_us.append(0.5 * (float(u_coords[int(row_hits[0])]) + float(u_coords[int(row_hits[-1])])))
-
+        # Height axis = longest principal axis of the jaw cross-section (PCA). A ridge that
+        # is wider than tall still yields its long axis rather than always measuring
+        # straight down, and a tilted jaw keeps the caliper inside the bone.
+        rows_p, cols_p = np.where(surface_mask)
         ridge_angle_deg: Optional[float] = None
         d_apical = default_apical
         d_bl = default_bl
-
-        if len(mid_depths) >= 3 and (max(mid_depths) - min(mid_depths)) >= 3.0:
-            d_arr = np.asarray(mid_depths, dtype=np.float64)
-            u_arr = np.asarray(mid_us, dtype=np.float64)
-            # Linear fit: u(depth) = slope * depth + intercept
-            d_mean = float(np.mean(d_arr))
-            u_mean = float(np.mean(u_arr))
-            var_d = float(np.sum((d_arr - d_mean) ** 2))
-            if var_d > 1e-6:
-                slope = float(np.sum((d_arr - d_mean) * (u_arr - u_mean)) / var_d)
-                raw_deg = math.degrees(math.atan(slope))
-                clamped_deg = float(np.clip(raw_deg, -35.0, 35.0))
-                ridge_angle_deg = round(clamped_deg, 1)
-                if abs(clamped_deg) >= 2.0:
+        if rows_p.size >= 8:
+            cloud = np.column_stack([u_coords[cols_p], v_coords[rows_p]]).astype(np.float64)
+            cloud -= cloud.mean(axis=0, keepdims=True)
+            cov = (cloud.T @ cloud) / float(max(1, cloud.shape[0]))
+            try:
+                _eigvals, eigvecs = np.linalg.eigh(cov)
+                # The alveolar height axis is the principal axis that is more vertical than
+                # horizontal. On a mask that spans the whole buccolingual field the dominant
+                # eigenvector is sideways; using it would shoot the height caliper out of the
+                # jaw, so the vertical principal direction is selected instead.
+                axis = max(
+                    (np.asarray(eigvecs[:, index], dtype=np.float64) for index in range(2)),
+                    key=lambda vec: abs(float(vec[1])),
+                )
+                # Point the axis apically (mandible: -v, maxilla: +v).
+                if (is_mandible and axis[1] > 0.0) or ((not is_mandible) and axis[1] < 0.0):
+                    axis = -axis
+                norm = float(math.hypot(float(axis[0]), float(axis[1])))
+                if norm > 1e-6:
+                    axis = axis / norm
+                    raw_deg = math.degrees(
+                        math.atan2(float(axis[0]), -float(axis[1]))
+                        if is_mandible
+                        else math.atan2(float(axis[0]), float(axis[1]))
+                    )
+                    clamped_deg = float(np.clip(raw_deg, -35.0, 35.0))
+                    ridge_angle_deg = round(clamped_deg, 1)
                     rad = math.radians(clamped_deg)
-                    if is_mandible:
-                        d_apical = (math.sin(rad), -math.cos(rad))
-                        d_bl = (math.cos(rad), math.sin(rad))
-                    else:
-                        d_apical = (math.sin(rad), math.cos(rad))
-                        d_bl = (math.cos(rad), -math.sin(rad))
-                else:
-                    ridge_angle_deg = round(raw_deg, 1)
+                    d_apical = (
+                        (math.sin(rad), -math.cos(rad)) if is_mandible else (math.sin(rad), math.cos(rad))
+                    )
+                    d_bl = (math.cos(rad), math.sin(rad) if is_mandible else -math.sin(rad))
+            except Exception:  # pragma: no cover - degenerate covariance only
+                logger.debug("PCA height axis unavailable", exc_info=True)
 
         return (u_crest, v_crest), d_apical, d_bl, ridge_angle_deg, crest_profile_uv
 
@@ -1167,10 +1175,10 @@ class MeasurementEngine:
             basal_uv = (u0 + full_h * au, v0 + full_h * av)
         else:
             bone_indices = np.flatnonzero(in_bone)
-            first_idx = int(bone_indices[0])
             last_idx = int(bone_indices[-1])
-            # Use symmetric span between entry and exit of the ridge component along d_apical
-            full_h = float(max(0.0, s_vals[last_idx] - s_vals[first_idx]))
+            # When no nerve/sinus bounds the site, the caliper continues to the far end of the
+            # jaw along the PCA axis instead of stopping at the ridge component's entry point.
+            full_h = float(max(0.0, s_vals[last_idx]))
             basal_uv = (u0 + full_h * au, v0 + full_h * av)
 
         # 2. Check ipsilateral vital structure boundary (in 2D cross-section first, then local 3D EDT)
@@ -1462,6 +1470,10 @@ class MeasurementEngine:
 
         # 2. Extract primary connected jawbone component (reject stray voxels & disconnected islands)
         ridge_mask = _extract_primary_ridge_component(raw_bone, u_coords, v_coords)
+        # Bone-only mask: the crest, W0 and every buccolingual caliper must never be taken
+        # across the in-socket root that the envelope adds.
+        bone_only = mask_cs == int(jaw_id)
+        bone_component = _extract_primary_ridge_component(bone_only, u_coords, v_coords)
         width_reason, height_reason = _ridge_region_withheld_reasons(ridge_mask, u_coords, v_coords)
         width_ok, height_ok = width_reason is None, height_reason is None
         if not width_ok and not height_ok:
@@ -1474,7 +1486,7 @@ class MeasurementEngine:
 
         # 3. Anatomy-aware local alveolar crest & ridge axis detection (Part 3.3)
         crest_uv, d_apical, d_bl, ridge_angle_deg, crest_profile_uv = self._detect_alveolar_crest_and_axis(
-            ridge_mask, u_coords, v_coords, is_mandible
+            ridge_mask, u_coords, v_coords, is_mandible, bone_mask=bone_component
         )
         cs.crest_uv = crest_uv
         cs.crest_v = crest_uv[1] if crest_uv is not None else None
@@ -1593,7 +1605,7 @@ class MeasurementEngine:
                 is_mandible,
                 jaw_id,
                 depths,
-                bone_mask=ridge_mask,
+                bone_mask=bone_component,
                 crest_uv=crest_uv,
                 d_apical=d_apical,
                 d_bl=d_bl,
@@ -1849,6 +1861,76 @@ class MeasurementEngine:
             meas = None
         self._arc_cache[cache_key] = (meas, cs)
         return meas, cs
+
+    # ------------------------------------------------------------------
+    # Entry (crest) continuity across a slice series
+    # ------------------------------------------------------------------
+    def stabilize_entry_points(
+        self,
+        items: Sequence[Tuple[Optional[ImplantSiteMeasurement], Optional[CrossSectionData]]],
+        *,
+        max_jump_mm: float = MAX_ENTRY_JUMP_MM,
+    ) -> Sequence[Tuple[Optional[ImplantSiteMeasurement], Optional[CrossSectionData]]]:
+        """Interpolate entry (crest) points that jump between adjacent slices.
+
+        Each slice is resampled independently, so one noisy cut can move the osteotomy entry
+        (and therefore the height caliper) several millimetres sideways. Crests that differ
+        from both neighbours by more than ``max_jump_mm`` are replaced by the midpoint of
+        those neighbours, and the available-bone-height record is recomputed from the moved
+        crest so the drawn line still equals the printed value.
+        """
+        series = [
+            (meas, cs) for meas, cs in items if cs is not None and getattr(cs, "crest_uv", None) is not None
+        ]
+        if len(series) < 3 or float(max_jump_mm) <= 0.0:
+            return items
+        crests = [np.asarray(cs.crest_uv, dtype=np.float64) for _meas, cs in series]
+        adjusted = [crest.copy() for crest in crests]
+        for index in range(1, len(crests) - 1):
+            neighbour_mid = 0.5 * (crests[index - 1] + crests[index + 1])
+            if float(np.linalg.norm(crests[index] - neighbour_mid)) > float(max_jump_mm):
+                adjusted[index] = neighbour_mid
+        for (meas, cs), new_crest in zip(series, adjusted):
+            self._move_crest(cs, meas, new_crest)
+        return items
+
+    @staticmethod
+    def _move_crest(
+        cs: CrossSectionData, meas: Optional[ImplantSiteMeasurement], crest_uv: np.ndarray
+    ) -> None:
+        """Move a cross-section's crest and keep its height record/value consistent."""
+        old = cs.crest_uv
+        if old is None or cs.frame is None:
+            return
+        new_uv = (float(crest_uv[0]), float(crest_uv[1]))
+        if float(math.hypot(new_uv[0] - old[0], new_uv[1] - old[1])) < 1e-6:
+            return
+        record = (getattr(cs, "measurements", None) or {}).get("available_bone_height")
+        if record is None or not record.is_available or record.end_world_mm is None:
+            return
+        P, _T, N, B = cs.frame
+        start_world = _uv_to_world(P, N, B, new_uv[0], new_uv[1])
+        value = round(float(np.linalg.norm(np.asarray(record.end_world_mm) - np.asarray(start_world))), 2)
+        record.value_mm = value
+        record.start_uv_mm = new_uv
+        record.start_world_mm = start_world
+        cs.crest_uv = new_uv
+        cs.crest_v = new_uv[1]
+        cs.height_u = new_uv[0]
+        if meas is not None:
+            meas.bone_height_mm = value
+            if value is not None:
+                meas.safety_margin_mm = (
+                    round(float(max(0.0, value - meas.suggested_length_mm)), 2)
+                    if meas.suggested_length_mm is not None
+                    else None
+                )
+                diameter, length, angulation = suggest_implant_dimensions(
+                    meas.crest_width_mm, meas.mid_root_width_mm, value, meas.mesiodistal_space_mm
+                )
+                meas.suggested_diameter_mm = diameter
+                meas.suggested_length_mm = length
+                meas.suggested_angulation_deg = angulation
 
     @staticmethod
     def _compute_cortical_plates_in_cs(

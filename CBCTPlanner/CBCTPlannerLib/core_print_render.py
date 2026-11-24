@@ -49,6 +49,12 @@ COLOR_VITAL_SINUS = (244, 114, 182)  # Pink: maxillary sinus floor
 COLOR_IMPLANT = (56, 189, 248)  # Sky blue: suggested implant (planning aid)
 COLOR_UNAVAILABLE = (148, 163, 184)  # Muted slate: unavailable/withheld
 
+# Width caliper opacity: W0 is the primary crest measurement, W3/W5 are context and are
+# drawn semi-transparent so they never compete with the bone surface underneath.
+WIDTH_ALPHA_W0 = 255
+WIDTH_ALPHA_W3 = 120
+WIDTH_ALPHA_W5 = 95
+
 _FONT_CANDIDATES_REGULAR = (
     "C:/Windows/Fonts/segoeui.ttf",
     "C:/Windows/Fonts/arial.ttf",
@@ -437,11 +443,17 @@ def render_cross_section(
     show_masks: bool = False,
     show_implant_guides: bool = True,
     enhance_bone_edges: bool = True,
+    monochrome: bool = False,
 ) -> CrossSectionRender:
     """Render one arch cross-section strictly from engine-supplied measurement endpoints.
 
     Never detects anatomy, modifies endpoints, or fabricates missing measurements.
+
+    ``monochrome=True`` renders a plain grayscale film tile (no implant envelope, root line,
+    safety barrier, density or angle badges) for printing.
     """
+    if monochrome:
+        show_implant_guides = False
     if not _PIL_AVAILABLE:
         return CrossSectionRender(None, available=False, reason="Pillow is not installed")
     if cs is None:
@@ -475,7 +487,11 @@ def render_cross_section(
     height = max(1, (len(v_coords) - 1) * scale)
     resampling = getattr(Image, "Resampling", Image)
     image = image.resize((width, height), getattr(resampling, "BICUBIC", Image.BILINEAR))
-    draw = ImageDraw.Draw(image)
+    # Draw every overlay on an RGBA layer so W3/W5 can be genuinely semi-transparent and
+    # still read over bright cortical bone; the layer is composited once at the end.
+    base_image = image.convert("RGBA")
+    layer = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
 
     font_sm = _load_font(max(11, int(round(4.6 * scale))), bold=True)
     font_md = _load_font(max(13, int(round(5.4 * scale))), bold=True)
@@ -586,47 +602,6 @@ def render_cross_section(
     height_prov = geom["height_prov"]
     width_endpoints = geom["width_endpoints"]
     is_mand = bool(geom["is_mand"])
-    imp_diam = geom["imp_diam"]
-    imp_len = geom["imp_len"]
-
-    # Local alveolar ridge axis unit vector in (u, v) from actual endpoints
-    if crest_uv is not None and basal_uv is not None:
-        du_h = float(basal_uv[0] - crest_uv[0])
-        dv_h = float(basal_uv[1] - crest_uv[1])
-        h_len = math.hypot(du_h, dv_h)
-        if h_len > 1e-6:
-            d_apical = (du_h / h_len, dv_h / h_len)
-        else:
-            d_apical = (0.0, -1.0) if is_mand else (0.0, 1.0)
-    else:
-        d_apical = (0.0, -1.0) if is_mand else (0.0, 1.0)
-    # Perpendicular buccolingual unit vector pointing toward +u
-    d_bl = (-d_apical[1], d_apical[0])
-    if d_bl[0] < 0:
-        d_bl = (-d_bl[0], -d_bl[1])
-
-    # Suggested implant envelope (exclusively from engine-supplied dimensions)
-    if show_implant_guides and imp_diam is not None and imp_len is not None and crest_uv is not None:
-        half_d = 0.5 * imp_diam
-        c_l = (crest_uv[0] - half_d * d_bl[0], crest_uv[1] - half_d * d_bl[1])
-        c_r = (crest_uv[0] + half_d * d_bl[0], crest_uv[1] + half_d * d_bl[1])
-        a_l = (c_l[0] + imp_len * d_apical[0], c_l[1] + imp_len * d_apical[1])
-        a_r = (c_r[0] + imp_len * d_apical[0], c_r[1] + imp_len * d_apical[1])
-        p_cl = _px(c_l[0], c_l[1], u_coords, v_coords, scale)
-        p_cr = _px(c_r[0], c_r[1], u_coords, v_coords, scale)
-        p_al = _px(a_l[0], a_l[1], u_coords, v_coords, scale)
-        p_ar = _px(a_r[0], a_r[1], u_coords, v_coords, scale)
-        _draw_dashed_segment(draw, p_cl, p_al, fill=COLOR_IMPLANT, dash=5, gap=4, width=max(1, scale - 1))
-        _draw_dashed_segment(draw, p_cr, p_ar, fill=COLOR_IMPLANT, dash=5, gap=4, width=max(1, scale - 1))
-        _draw_dashed_segment(draw, p_al, p_ar, fill=COLOR_IMPLANT, dash=4, gap=3, width=max(1, scale - 1))
-        _place_non_overlapping_pill(
-            3.0,
-            26.0,
-            f"Impl {imp_diam:.1f}x{imp_len:g} mm",
-            fg=(125, 211, 252),
-            border=COLOR_IMPLANT,
-            font=font_sm,
-        )
 
     # 1. Alveolar crest marker & detected ridge crest contour (when supplied by engine)
     if crest_uv is not None:
@@ -688,53 +663,6 @@ def render_cross_section(
                 font=font_sm,
             )
 
-        # 2.0 mm Apical Safety Margin barrier coronal to basal/vital boundary
-        if show_implant_guides and height_mm_val > SAFETY_MARGIN_MM + 1.0:
-            safe_center = (
-                basal_uv[0] - SAFETY_MARGIN_MM * d_apical[0],
-                basal_uv[1] - SAFETY_MARGIN_MM * d_apical[1],
-            )
-            s0 = _px(
-                safe_center[0] - 4.5 * d_bl[0], safe_center[1] - 4.5 * d_bl[1], u_coords, v_coords, scale
-            )
-            s1 = _px(
-                safe_center[0] + 4.5 * d_bl[0], safe_center[1] + 4.5 * d_bl[1], u_coords, v_coords, scale
-            )
-            _draw_dashed_segment(draw, s0, s1, fill=(248, 113, 113), dash=5, gap=3, width=max(2, scale - 1))
-            _place_non_overlapping_pill(
-                min(s0[0], s1[0]) - 52.0,
-                0.5 * (s0[1] + s1[1]) - 8,
-                "2mm SAFE",
-                fg=(252, 165, 165),
-                border=(239, 68, 68),
-                font=font_sm,
-            )
-
-    # 3. Separate Root Extent line (visually distinct violet; never replaces bone height)
-    root_start_uv = geom["root_start_uv"]
-    root_apex_uv = geom["root_apex_uv"]
-    root_extent_mm = geom["root_extent_mm"]
-    if (
-        root_start_uv is not None
-        and root_apex_uv is not None
-        and root_extent_mm is not None
-        and root_extent_mm > 0.0
-    ):
-        rp0 = _px(root_start_uv[0], root_start_uv[1], u_coords, v_coords, scale)
-        rp1 = _px(root_apex_uv[0], root_apex_uv[1], u_coords, v_coords, scale)
-        _draw_dashed_segment(draw, rp0, rp1, fill=COLOR_ROOT_EXTENT, dash=4, gap=3, width=max(1, scale - 1))
-        r_r = max(2, scale)
-        draw.ellipse([rp1[0] - r_r, rp1[1] - r_r, rp1[0] + r_r, rp1[1] + r_r], fill=COLOR_ROOT_EXTENT)
-        overlay.append((rp0, rp1))
-        _place_non_overlapping_pill(
-            min(rp0[0], rp1[0]) - 68.0,
-            0.5 * (rp0[1] + rp1[1]) - 8,
-            f"Root {root_extent_mm:.1f} mm",
-            fg=COLOR_ROOT_EXTENT,
-            border=(168, 85, 247),
-            font=font_sm,
-        )
-
     # 4. Buccolingual Width calipers strictly from engine endpoints (ridge-aligned)
     has_w5 = 5.0 in width_endpoints
     for depth in sorted(width_endpoints.keys()):
@@ -742,25 +670,27 @@ def render_cross_section(
         start = _px(pt_l[0], pt_l[1], u_coords, v_coords, scale)
         end = _px(pt_r[0], pt_r[1], u_coords, v_coords, scale)
         is_primary = depth in (0.0, 3.0, 5.0) or (depth == 6.0 and not has_w5)
+        # W3/W5 are context, not the primary crest measurement: draw them semi-transparent.
         if depth == 0.0:
-            colour = COLOR_WIDTH_W0
+            colour, alpha = COLOR_WIDTH_W0, WIDTH_ALPHA_W0
         elif depth <= 3.5:
-            colour = COLOR_WIDTH_W3
+            colour, alpha = COLOR_WIDTH_W3, WIDTH_ALPHA_W3
         else:
-            colour = COLOR_WIDTH_DEEP
+            colour, alpha = COLOR_WIDTH_DEEP, WIDTH_ALPHA_W5
+        stroke = (int(colour[0]), int(colour[1]), int(colour[2]), int(alpha))
 
         w_line = max(2, scale) if is_primary else 1
         tick_r = max(4, int(round(1.8 * scale))) if is_primary else 2
         if w_prov in (PROVENANCE_ESTIMATED, PROVENANCE_INTERPOLATED):
-            _draw_dashed_segment(draw, start, end, fill=colour, dash=5, gap=3, width=w_line)
+            _draw_dashed_segment(draw, start, end, fill=stroke, dash=5, gap=3, width=w_line)
         else:
-            draw.line([start, end], fill=colour, width=w_line)
+            draw.line([start, end], fill=stroke, width=w_line)
 
         wdx, wdy = end[0] - start[0], end[1] - start[1]
         wl = max(1e-6, math.hypot(wdx, wdy))
         w_perp = (-wdy / wl, wdx / wl)
-        _draw_endcap(draw, start, w_perp, tick_r, fill=colour, width=max(2, w_line - 1))
-        _draw_endcap(draw, end, w_perp, tick_r, fill=colour, width=max(2, w_line - 1))
+        _draw_endcap(draw, start, w_perp, tick_r, fill=stroke, width=max(2, w_line - 1))
+        _draw_endcap(draw, end, w_perp, tick_r, fill=stroke, width=max(2, w_line - 1))
         overlay.append((start, end))
 
         if is_primary and w_val is not None:
@@ -847,6 +777,11 @@ def render_cross_section(
         draw.text((6, height - footer_h + 4), text, fill=(248, 250, 252), font=font_md)
         labels.append((6.0, float(height - footer_h + 4), text))
 
+    image = Image.alpha_composite(base_image, layer).convert("RGB")
+    if monochrome:
+        gray = image.convert("L")
+        image = Image.merge("RGB", (gray, gray, gray))
+
     return CrossSectionRender(
         image=image,
         overlay_px=overlay,
@@ -869,6 +804,7 @@ def render_panoramic_strip(
     flip_vertical: bool = True,
     show_cross_section_lines: bool = True,
     highlight_indices: Optional[Sequence[int]] = None,
+    monochrome: bool = False,
 ) -> CrossSectionRender:
     """Render a large, upright panoramic strip with full-height cross-section reference lines."""
     if not _PIL_AVAILABLE:
@@ -953,6 +889,9 @@ def render_panoramic_strip(
             last_label_right = x + 3 + tw
         ticks.append((x, float(img_h - tick_bar_h + 4), lbl_str))
 
+    if monochrome:
+        gray = image.convert("L")
+        image = Image.merge("RGB", (gray, gray, gray))
     return CrossSectionRender(image=image, overlay_px=overlay, labels=ticks, available=True)
 
 

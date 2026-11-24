@@ -9,8 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 import numpy as np
+
+# The only two arch keys the measurement engine accepts. Display names ("Mandible",
+# "Maxilla & Upper Skull") are normalized by `jaw_key_from_text` before they reach an engine.
+JawKey = Literal["lower", "upper"]
+JAW_KEYS: Tuple[JawKey, JawKey] = ("lower", "upper")
 
 
 @dataclass(frozen=True)
@@ -580,6 +585,19 @@ def jaw_key_from_text(jaw: Any) -> Optional[str]:
     return None
 
 
+def parse_jaw_key(jaw: Any, *, strict: bool = False) -> Optional[JawKey]:
+    """Return a canonical `JawKey`; with ``strict=True`` raise instead of returning `None`.
+
+    Engines and arch helpers accept only ``"lower"``/``"upper"`` so a display name can
+    never be silently read as the other jaw: ``"Mandible"`` used to start with neither
+    ``"low"`` nor ``"up"`` and became the maxilla.
+    """
+    key = jaw_key_from_text(jaw)
+    if key is None and strict:
+        raise ValueError(f"jaw must be one of {JAW_KEYS}, got {jaw!r}")
+    return key  # type: ignore[return-value]
+
+
 def get_tooth_group_label_id(is_mandible: bool, is_5class: bool = True) -> int:
     """Return the grouped teeth label ID for 5-class DentalSegmentator masks."""
     if not is_5class:
@@ -652,12 +670,28 @@ def is_sinus_label_id(label_id: int, is_5class: bool = False) -> bool:
 
 
 def infer_mask_is_5class(mask: np.ndarray) -> bool:
-    """Infer whether a combined label array uses 5-class DentalSegmentator IDs vs ToothFairy3."""
+    """Infer whether a combined label array uses 5-class DentalSegmentator IDs vs ToothFairy3.
+
+    A value range of 1..5 alone is not enough: ToothFairy3 also uses 1/2 for the jaws and
+    3/4/5 for canal/sinus labels. FDI tooth or pulp ids prove the canonical scheme, and the
+    ToothFairy3 sinus pair (5 and 6) does too. Otherwise the grouped 5-class scheme needs
+    both grouped tooth classes (3 = upper teeth, 4 = lower teeth), the one unambiguous
+    signature of a DentalSegmentator mask.
+    """
     arr = np.asarray(mask)
     if arr.size == 0:
         return False
-    max_val = int(arr.max())
-    return 0 < max_val <= 5
+    values = {int(v) for v in np.unique(arr) if int(v) > 0}
+    if not values:
+        return False
+    if any(
+        v >= 11 or v in (LINGUAL_CANAL_ID, LEFT_INCISIVE_CANAL_ID, RIGHT_INCISIVE_CANAL_ID) for v in values
+    ):
+        return False
+    if 5 in values and 6 in values:
+        return False
+    # Jaw-only masks (1/2) are inherently ambiguous; the grouped scheme remains the default.
+    return True
 
 
 def tooth_mask_from_labels(mask: np.ndarray, is_5class: Optional[bool] = None) -> np.ndarray:

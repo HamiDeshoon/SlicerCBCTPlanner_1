@@ -252,7 +252,8 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
         assert meas is not None and cs is not None
         self.assertIsNotNone(cs.crest_profile_uv)
         self.assertGreaterEqual(len(cs.crest_profile_uv or []), 4)
-        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 16.0, delta=2.5)
+        # Without a canal the caliper continues to the end of the jaw (base at Z=10).
+        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 18.5, delta=2.5)
         # At the sloped peak W0 is narrower than W5 (full ridge width 5 mm apically)
         self.assertIsNotNone(meas.crest_width_mm)
         w5 = meas.bone_width_at_depths_mm.get(5.0)
