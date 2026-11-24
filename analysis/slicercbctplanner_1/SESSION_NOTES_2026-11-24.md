@@ -144,3 +144,50 @@ AdvancedTools         → (AdvancedTools self-contained for VTK/RGBA capture)
 
 **Session record (ECC-style)** — verified: 167 tests OK (`unittest discover -s tests`), Ruff check & format clean (`42 files already formatted`), merged onto `main` (`92c9e20`).
 Open threads: Slicer visual check (`3D Slicer 5.12.3` + `ToothFairy3S_0021`), `OPT-01..OPT-05` performance/data-pipeline optimizations, `BL-01..BL-11` backlog (`diagnostics.py` trim, brittle-test refactor, dynamic `half_v_mm`, PDL gap validation).
+
+## 8. Real-CT / Slicer-Python verification (closes §4 item 1, BL-10)
+
+Harness: `analysis/slicercbctplanner_1/verify_real_ct.py`, run headlessly with
+`"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe"` (Python 3.12.10, VTK 9.6.2,
+NumPy 2.4.6, SciPy 1.17.1) on `ToothFairy3S_0021_0000.nii.gz` + `ToothFairy3S_0021.nii.gz`
+(370×370×169 @ 0.30 mm; tooth labels are FDI, canals `3/4`, lingual canal `103`).
+**19/19 checks pass, 205 cross-sections measured** (1 mm sweep, both jaws).
+
+| Check | Result |
+|-------|--------|
+| `CBCTPlannerLib` + `PanoramicCurveLogic` / `core_print_render` / `PrintLayoutEngine` import in Slicer's Python | PASS |
+| Anatomical inversion detected and auto-corrected (`standardize_orientation` order) | PASS — this scan is **S-I and L-R inverted** in voxel space; `canonicalize_to_ras` alone leaves the mandible above the maxilla, so the app's `auto_fix_anatomical_orientation` step is mandatory. Without it every crest/H result is nonsense (H ran upward into the maxillary teeth). |
+| Dentate `W0` bridges buccal↔lingual across the socket | PASS — 20/20 sections that show two cortical walls at the crest; W0 min 5.1 / median 9.0 / max 10.2 mm; **12/12 molars ≥ 6 mm**; zero sub-3 mm plates |
+| `W0` rims land on jaw bone | PASS — 205/205 |
+| Tilted ridges keep `W0` on bone (|ridge axis| ≥ 15°) | PASS — 79/79 sites, max tilt 31.8°, W0 7.3–11.1 mm |
+| `H` reaches the basal jaw end (non-canal slices) | PASS — 61/68 within 1.5 mm of an independently measured jaw border; median H 24.4 mm |
+| `H` stops strictly before the IAN | PASS — 137/137 canal slices: no IAN voxel under the caliper corridor; min lateral clearance 0.09 mm |
+| RaySum panoramic on the real volume | PASS — 240×206 columns, 0.16–0.27 s (≈0.8 ms/column, 25 mm slab), std 835, all finite |
+| Panoramic strip RGBA + transparent air + isotropic tight-fill | PASS — 814×560 RGBA, `alpha_min=0`, limiting axis filled 100% |
+| 3D MIP/VR card RGBA + transparent air | PASS — 613×280 RGBA, `alpha_min=0`, 0.64–0.95 s on the full volume |
+| 8×10 film export | PASS — PNG 2400×3000 @ 300 DPI (585 KiB), PDF `/MediaBox` exactly 8.0×10.0 in (361 KiB), HTML keeps `background: transparent` on pano/VR |
+
+### Findings / caveats
+
+1. **The S-I/L-R flip is data-level, not a code defect** — but it means a scan whose header claims RAS while the voxels
+   are inverted *silently* produces an inverted crest/H unless the auto-fix runs. `standardize_orientation(auto_fix_anatomy=True)`
+   handles it (verified), so the load path is correct; any headless/batch path must call `auto_fix_anatomical_orientation` too.
+2. **Single-wall sections** — 185/205 sections cut interproximally/obliquely and clip only one cortical plate; `W0` there is
+   a plate measurement (1–3 mm), not a bridge. It is reported as a number rather than withheld. Candidate follow-up:
+   withhold `W0` when the opposite cortex is not in the section (same class of honesty as `H~`).
+3. **Mental-foramen region** — 1 of 68 non-canal slices (FDI 43, arc 41.5 mm) ends 2.04 mm short of the jaw border (no canal
+   reported). All other outliers (FDI 45/35) turned out to be canal-stopped slices that a plane-restricted canal test misread.
+4. Slicer GUI panes (Green view RaySum, 3D viewport framing, print preview dialog) were **not** rendered — this harness is
+   headless; it exercises the same functions the GUI calls, but the VTK viewport/Qt dialog themselves are unverified.
+
+### Profiling numbers (OPT-01 / OPT-03)
+
+| Path | Cost on 370×370×169 |
+|------|---------------------|
+| `sample_panoramic_slab_array` (RaySum, 207 arcs × 240 rows, 25 mm slab) | 0.16–0.27 s (0.8–1.3 ms/column) |
+| `render_panoramic_strip` (RGBA, tight-fill, 300 DPI tile) | 0.01–0.04 s |
+| `render_3d_mip_card` (full-volume MIP, RGBA, tight crop) | 0.64–0.95 s |
+| 8×10 page compose | 0.1–0.2 s |
+
+The panoramic sampler is already interactive on a full-FOV CBCT; the 3D MIP card is the only second-scale path
+(one downward `max` over 169 slices + PIL mask composition), so OPT-01 caching is not currently warranted.

@@ -80,7 +80,8 @@
 | BL-07 | Move `test_clinical_delivery.py` NIfTI parser to `tests/helpers/nifti_reader.py` | Low |
 | BL-08 | Phase 7 batch report: consume RaySum pano array in HTML report (currently stores only `.npy`) | Low |
 | BL-09 | Trim unused `core/diagnostics.py` code (~180 lines of `provenance_hash` + report writer) | Low |
-| BL-10 | Visual Slicer smoke test with `ToothFairy3S_0021_0000.nii.gz` real CT fixture | High |
+| BL-10 | Real-CT smoke test with `ToothFairy3S_0021_0000.nii.gz` — **done 2026-11-24**: `verify_real_ct.py` headless in Slicer's Python, 19/19 checks, 205 sections (see §6) | Closed |
+| BL-12 | Withhold `W0` when the opposite cortex is not in the section (185/205 real-CT sections cut interproximally) instead of reporting a 1–3 mm plate as a crest width | Medium |
 | BL-11 | Decide grayscale default in `generate_8x10_layout(grayscale=...)` for CLI/batch callers | Medium |
 
 ---
@@ -123,9 +124,31 @@ DICOM / NIfTI Volume
 ### Optimization & Engineering Backlog (`OPT-01` – `OPT-05`)
 | ID | Target | Optimization / Follow-Up | Impact |
 |---|---|---|---|
-| `OPT-01` | `PanoramicCurveLogic.py` | Cache `map_coordinates` 3D slab grid per `(arch_hash, spacing_mm, height_mm, offset_mm)` so toggling `RaySum`/`MIP`/`MinIP`/`Mean` avoids re-interpolating the CBCT volume | High (interactive FPS) |
+| `OPT-01` | `PanoramicCurveLogic.py` | Cache `map_coordinates` 3D slab grid per `(arch_hash, spacing_mm, height_mm, offset_mm)` so toggling `RaySum`/`MIP`/`MinIP`/`Mean` avoids re-interpolating the CBCT volume. **Measured 2026-11-24: 0.16–0.27 s for 207 arcs × 240 rows at 0.30 mm (0.8–1.3 ms/column)** — already interactive, so only the 3D MIP card (0.64–0.95 s) is worth caching | High (interactive FPS) |
 | `OPT-02` | `core/measurements.py` | Pre-index `local_vital_mask` bounding boxes and batch-vectorize `measure_all_sites` across adjacent slices (`-2 / 0 / +2 mm`) | Medium (multi-site speed) |
 | `OPT-03` | `core_print_render.py` / `PrintLayoutEngine.py` | Pass `PIL.Image` / `ndarray` directly instead of `RGBA -> base64 -> PIL.Image` round-trips when composing 8×10″ film sheets | Medium (export latency) |
 | `OPT-04` | `AdvancedTools.py` | Vectorize `finalize_transparent_png_bytes` border-connected flood-fill with `scipy.ndimage.label` on background mask instead of Python pixel BFS | Medium (high-DPI capture) |
 | `OPT-05` | `Phase7Tools.py` / `cli_batch.py` | Emit structured JSON/Parquet-ready batch run manifest (`provenance_hash`, `calibration_stamp`, `withheld_reason`, site `H`/`W0`/`W3`/`W5`) for cohort QA | Medium (data pipeline QA) |
+
+---
+
+## 6. Real-CT Verification Record (2026-11-24)
+
+Harness: `analysis/slicercbctplanner_1/verify_real_ct.py`, run with
+`"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe"` (Python 3.12.10, VTK 9.6.2, NumPy 2.4.6, SciPy 1.17.1).
+Data: `ToothFairy3S_0021_0000.nii.gz` + `ToothFairy3S_0021.nii.gz`, 370×370×169 @ 0.30 mm.
+**19/19 checks pass over 205 cross-sections** (1 mm arc sweep, mandible + maxilla).
+
+| Rule Card | What was verified | Result |
+|---|---|---|
+| RC-05 | Anatomical inversion auto-correction (`canonicalize_to_ras` → `auto_fix_anatomical_orientation`) | This scan is S-I **and** L-R inverted in voxel space; both axes corrected, post-fix report clean |
+| RC-01.1 | Dentate `W0` bridges across the socket | 20/20 two-wall sections bridged, W0 5.1–10.2 mm (median 9.0), **12/12 molars ≥ 6 mm**, no sub-3 mm plate |
+| RC-01.2 | Tilted ridges keep `W0` on bone | 79/79 sites (|axis| ≥ 15°, max 31.8°), both rims on cortex |
+| RC-01.3/4 | `H` reaches the basal jaw end; stops before the IAN | 61/68 non-canal slices within 1.5 mm of the jaw border (median H 24.4 mm); 137/137 canal slices keep the caliper out of the canal (min lateral clearance 0.09 mm) |
+| RC-06 | `RaySum` pano + RGBA transparent isotropic pano/VR | 240×206 RaySum in 0.16–0.27 s; strip 814×560 RGBA `alpha_min=0`, tight-filled; 3D MIP 613×280 RGBA in 0.64–0.95 s |
+| RC-02 | 8×10 film export | PNG 2400×3000 @ 300 DPI, PDF `/MediaBox` 8.0×10.0 in, HTML `background: transparent` on pano/VR panels |
+
+**Caveat:** the harness is headless — Slicer's Green view, 3D viewport and print-preview dialog were not rendered; only
+the functions they call were exercised. See `SESSION_NOTES_2026-11-24.md` §8 for the full table and caveats
+(incl. BL-12: 185/205 sections clip a single cortex, where `W0` is a plate rather than a bridge).
 
