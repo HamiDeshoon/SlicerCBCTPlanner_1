@@ -181,10 +181,15 @@ class TestEntryPointAndW0(unittest.TestCase):
         frame_p, _tangent, _normal, binormal = cs.frame
         crest_world = np.asarray(frame_p) + float(cs.crest_uv[1]) * np.asarray(binormal)
         self.assertAlmostEqual(float(crest_world[2]), 27.0, delta=1.5)
-        # W0 is bone only: the two cortical plates around the socket, never the 5 mm tooth.
+        # W0 bridges the buccal-to-lingual jawbone walls across the socket (~8.0 mm on the
+        # 8 mm phantom ridge) at the jawbone crest (Z=27), never on the tooth crown (Z=31-34).
         self.assertIsNotNone(meas.crest_width_mm)
-        self.assertLess(float(meas.crest_width_mm or 0.0), 3.5)
-        self.assertGreater(float(meas.crest_width_mm or 0.0), 0.0)
+        self.assertGreaterEqual(float(meas.crest_width_mm or 0.0), 6.0)
+        self.assertLessEqual(float(meas.crest_width_mm or 0.0), 9.5)
+        w0_rec = cs.measurements.get("width_0")
+        if w0_rec is not None and w0_rec.start_world_mm is not None and w0_rec.end_world_mm is not None:
+            self.assertLessEqual(float(w0_rec.start_world_mm[2]), 28.5)
+            self.assertLessEqual(float(w0_rec.end_world_mm[2]), 28.5)
 
     def test_height_continues_to_jaw_end_without_a_nerve(self) -> None:
         with_canal, _arch = _dentate_phantom(with_canal=True)
@@ -397,6 +402,57 @@ class TestGrayscaleFilm(unittest.TestCase):
         self.assertEqual(span["sites"], 1)
         self.assertIsNotNone(span["min_height_mm"])
         self.assertEqual(span["limiting_height_site"], "46")
+
+    def test_clamped_pills_and_visible_basal_endcap_over_footer(self) -> None:
+        u = np.linspace(-15.0, 15.0, 121)
+        v = np.linspace(-25.0, 25.0, 201)
+        img = np.full((len(v), len(u)), -500.0, dtype=np.float32)
+        cs = SimpleNamespace(
+            u_coords=u,
+            v_coords=v,
+            mask_cs=np.zeros_like(img, dtype=np.int32),
+            img_cs=img,
+            is_mandible=True,
+            crest_uv=(0.0, 8.0),
+            basal_uv=(0.0, -24.0),
+            ridge_axis_angle_deg=35.0,
+            canal_centroid_uv=(-11.5, -18.0),
+            width_endpoints_uv={
+                0.0: ((-13.0, 8.0), (13.0, 8.0)),
+                3.0: ((-14.0, 5.0), (13.0, 5.0)),
+                5.0: ((-13.5, 3.0), (13.5, 3.0)),
+            },
+        )
+        meas = SimpleNamespace(
+            bone_height_mm=32.0,
+            crest_width_mm=26.0,
+            misch_density_class="D2",
+            withheld_reason=None,
+        )
+        render = render_cross_section(cs, meas, scale=3, show_implant_guides=True)
+        self.assertTrue(render.available)
+        assert render.image is not None
+        w, h = render.image.size
+        footer_h = max(24, int(round(9.5 * 3)))
+        # Every overlay pill (after L/B/10 mm) stays inside the safe margin away from ruler and footer.
+        for lx, ly, text in render.labels:
+            if text in ("L", "B") or text.startswith("H "):
+                continue
+            self.assertGreaterEqual(lx, 18.0, text)
+            self.assertGreaterEqual(ly, 24.0, text)
+            self.assertLess(lx, float(w - 4), text)
+            self.assertLess(ly, float(h - footer_h), text)
+        # Basal end-cap at v=-24 mm lies in the bottom footer zone yet remains vivid green (not occluded).
+        _, cap_y = _px(0.0, -24.0, u, v, 3)
+        cap_x, _ = _px(0.0, -24.0, u, v, 3)
+        arr = np.asarray(render.image)
+        iy = min(h - 1, max(0, int(round(cap_y))))
+        ix = min(w - 1, max(0, int(round(cap_x))))
+        patch = arr[max(0, iy - 1) : min(h, iy + 2), max(0, ix - 4) : min(w, ix + 5)]
+        self.assertTrue(
+            np.any((patch[:, :, 1] > 180) & (patch[:, :, 1] > patch[:, :, 0].astype(int) + 80)),
+            "Basal green height end-cap should not be painted over by the footer bar",
+        )
 
 
 # ---------------------------------------------------------------------------

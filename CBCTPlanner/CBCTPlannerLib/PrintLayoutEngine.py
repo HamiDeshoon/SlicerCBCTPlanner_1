@@ -49,12 +49,12 @@ except ImportError:
     ImageFont = None
 
 from .core.diagnostics import calibration_stamp, summarize_span_worst_case
-from .core.labels import tooth_mask_from_labels
 from .core.measurements import withheld_badge
 from .core_print_render import (
     _load_font,
-    hu_window_to_rgb,
+    _resize_rgba_clean,
     is_estimated_provenance,
+    render_3d_mip_card,
     render_cross_section,
     render_panoramic_strip,
     unavailable_tile,
@@ -108,7 +108,10 @@ def _data_uri_to_image(uri: str) -> Optional[Any]:
         return None
     try:
         raw = base64.b64decode(uri.split(",", 1)[1])
-        return Image.open(io.BytesIO(raw)).convert("RGB")
+        img = Image.open(io.BytesIO(raw))
+        if img.mode in ("RGBA", "LA") or ("transparency" in img.info):
+            return img.convert("RGBA")
+        return img.convert("RGB")
     except Exception:
         logger.exception("Could not decode layout image")
         return None
@@ -121,7 +124,7 @@ def _paste_contain(
     *,
     bg: Tuple[int, int, int] = (2, 6, 23),
 ) -> None:
-    """Paste ``img`` centered inside ``box=(x, y, w, h)`` while preserving aspect ratio."""
+    """Paste ``img`` centered inside ``box=(x, y, w, h)`` while preserving aspect ratio and alpha."""
     if img is None or Image is None:
         return
     x, y, w, h = box
@@ -133,10 +136,19 @@ def _paste_contain(
     nw = max(1, int(round(img.width * scale)))
     nh = max(1, int(round(img.height * scale)))
     resampling = getattr(Image, "Resampling", Image)
-    resized = img.resize((nw, nh), getattr(resampling, "LANCZOS", Image.BILINEAR))
+    resized = _resize_rgba_clean(img, (nw, nh), getattr(resampling, "LANCZOS", Image.BILINEAR))
     ox = x + (w - nw) // 2
     oy = y + (h - nh) // 2
-    canvas.paste(resized, (ox, oy))
+    if resized.mode == "RGBA":
+        if canvas.mode == "RGBA":
+            overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+            overlay.paste(resized, (ox, oy))
+            composited = Image.alpha_composite(canvas, overlay)
+            canvas.paste(composited)
+        else:
+            canvas.paste(resized, (ox, oy), mask=resized.split()[3])
+    else:
+        canvas.paste(resized, (ox, oy))
 
 
 class PrintLayoutEngine:
@@ -461,29 +473,50 @@ class PrintLayoutEngine:
         monochrome: bool = False,
     ) -> Optional[str]:
         """Render the panoramic strip from `PanoramicVolume`, or synthesize it in-process from `engine`."""
-        # 1. Try existing Slicer PanoramicVolume node first
-        if self.logic is not None and slicer is not None:
+        pNode = None
+        if self.logic is not None and hasattr(self.logic, "getParameterNode"):
             try:
-                pNode = self.logic.getParameterNode() if hasattr(self.logic, "getParameterNode") else None
+                pNode = self.logic.getParameterNode()
+            except Exception:
+                pNode = None
+
+        proj_mode = "RaySum"
+        if pNode is not None and hasattr(pNode, "GetParameter"):
+            raw_mode = str(pNode.GetParameter("PanoProjectionMode") or "").strip()
+            if raw_mode:
+                proj_mode = raw_mode
+
+        pano_target = (2256, 552)
+
+        # 1. Try existing Slicer PanoramicVolume node first
+        if pNode is not None and slicer is not None:
+            try:
                 panoNode = (
-                    pNode.GetNodeReference("PanoramicVolume")
-                    if (pNode and hasattr(pNode, "GetNodeReference"))
-                    else None
+                    pNode.GetNodeReference("PanoramicVolume") if hasattr(pNode, "GetNodeReference") else None
                 )
                 if panoNode is not None:
                     arr = slicer.util.arrayFromVolume(panoNode)
-                    spacing = float(pNode.GetParameter("PanoSpacingMm") or 0.5) if pNode else 0.5
+                    attr_sp = (
+                        panoNode.GetAttribute("CBCTPlanner.SpacingMm")
+                        if hasattr(panoNode, "GetAttribute")
+                        else None
+                    )
+                    spacing = float(attr_sp or pNode.GetParameter("PanoSpacingMm") or 0.5)
+                    spacing = max(1e-3, spacing)
                     render = render_panoramic_strip(
                         arr,
-                        column_spacing_mm=max(1e-3, spacing),
+                        column_spacing_mm=spacing,
+                        row_spacing_mm=spacing,
                         tick_arcs_mm=arcs,
                         labels=[str(label) for label in labels],
-                        strip_height=460,
-                        scale=2,
+                        target_size=pano_target,
                         flip_vertical=True,
                         show_cross_section_lines=True,
                         highlight_indices=highlight_indices,
                         monochrome=monochrome,
+                        transparent_bg=True,
+                        crop_empty_vertical=True,
+                        preserve_aspect=True,
                     )
                     if render.available and render.image is not None:
                         return _image_to_data_uri(render.image)
@@ -513,29 +546,33 @@ class PrintLayoutEngine:
                     if np.any((binormals @ up) < 0):
                         binormals[(binormals @ up) < 0] *= -1.0
 
+                    synth_spacing = 0.5
                     pano_arr = PanoramicCurveLogic.sample_panoramic_slab_array(
                         cbct_volume=vol,
                         pts_arch=pts_dense,
                         tangents=tangents,
                         normals=normals,
                         binormals=binormals,
-                        slab_thickness_mm=20.0,
-                        height_mm=70.0,
-                        spacing_mm=0.75,
-                        projection_mode="Mean",
+                        slab_thickness_mm=22.0,
+                        height_mm=80.0,
+                        spacing_mm=synth_spacing,
+                        projection_mode=proj_mode,
                         flip_vertical=False,
                     )
                     render = render_panoramic_strip(
                         pano_arr,
-                        column_spacing_mm=0.75,
+                        column_spacing_mm=synth_spacing,
+                        row_spacing_mm=synth_spacing,
                         tick_arcs_mm=arcs,
                         labels=[str(label) for label in labels],
-                        strip_height=460,
-                        scale=2,
+                        target_size=pano_target,
                         flip_vertical=True,
                         show_cross_section_lines=True,
                         highlight_indices=highlight_indices,
                         monochrome=monochrome,
+                        transparent_bg=True,
+                        crop_empty_vertical=True,
+                        preserve_aspect=True,
                     )
                     if render.available and render.image is not None:
                         return _image_to_data_uri(render.image)
@@ -557,30 +594,20 @@ class PrintLayoutEngine:
         # Fallback: synthesize a 3D vivid MIP / segmentation projection card from engine.volume & mask
         vol = getattr(engine, "volume", None) if engine is not None else None
         mask = getattr(engine, "mask", None) if engine is not None else None
-        if vol is not None and Image is not None and getattr(vol, "image", None) is not None:
+        if vol is not None and getattr(vol, "image", None) is not None:
             try:
-                img_3d = np.asarray(vol.image, dtype=np.float32)
-                # Coronal MIP projection (Z, X)
-                mip = np.max(img_3d, axis=1)[::-1, :]
-                gray = hu_window_to_rgb(mip)
-                rgb = np.repeat(gray[:, :, None], 3, axis=2).astype(np.float32)
-                if mask is not None and mask.shape == img_3d.shape:
-                    m_proj = np.max(mask, axis=1)[::-1, :]
-                    teeth_m = tooth_mask_from_labels(m_proj)
-                    rgb[teeth_m] = 0.35 * rgb[teeth_m] + 0.65 * np.array([255.0, 220.0, 120.0])
-                    if np.any(m_proj == 5):
-                        rgb[m_proj == 5] = np.array([255.0, 60.0, 50.0])
-                pil_img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), mode="RGB").resize(
-                    (400, 220), Image.BILINEAR
+                spacing = getattr(vol, "spacing", (1.0, 1.0, 1.0))
+                render = render_3d_mip_card(
+                    vol.image,
+                    mask=mask,
+                    spacing_zyx=spacing,
+                    quadrant=quadrant,
+                    target_size=(772, 272),
+                    transparent_bg=True,
+                    show_title=True,
                 )
-                draw = ImageDraw.Draw(pil_img)
-                draw.text(
-                    (8, 6),
-                    f"3D Vivid MIP Projection (Q{quadrant})",
-                    fill=(56, 189, 248),
-                    font=_load_font(13, bold=True),
-                )
-                return _image_to_data_uri(pil_img)
+                if render.available and render.image is not None:
+                    return _image_to_data_uri(render.image)
             except Exception:
                 logger.debug("Fallback MIP projection card failed", exc_info=True)
         return None
@@ -813,6 +840,7 @@ class PrintLayoutEngine:
         grayscale_css = (
             "body { background: #ffffff !important; color: #000000 !important; }\n"
             ".page-container { filter: grayscale(1); }\n"
+            ".pano-section, .pano-img, .vr-card, .vr-img { background: transparent !important; }\n"
             ".bottom-section { display: none !important; }\n"
             ".grid-section { flex: 1; }\n"
             if grayscale
@@ -910,10 +938,9 @@ body {{
 }}
 .pano-section {{
     border: 1px solid #334155;
-    background: #020617;
+    background: transparent;
     border-radius: 4px;
     overflow: hidden;
-    max-height: 244px;
     display: flex;
     flex-direction: column;
 }}
@@ -924,7 +951,7 @@ body {{
     background: #1e293b;
     color: #94a3b8;
 }}
-.pano-img {{ width: 100%; max-height: 220px; object-fit: contain; background: #020617; }}
+.pano-img {{ width: 100%; height: auto; display: block; object-fit: contain; background: transparent; }}
 .grid-section {{
     display: grid;
     grid-template-columns: repeat({cols}, 1fr);
@@ -967,14 +994,14 @@ body {{
 }}
 .vr-card {{
     flex: 1.2;
-    background: #020617;
+    background: transparent;
     border: 1px solid #334155;
     border-radius: 4px;
     overflow: hidden;
     display: flex;
     flex-direction: column;
 }}
-.vr-img {{ width: 100%; height: 118px; object-fit: contain; }}
+.vr-img {{ width: 100%; height: auto; max-height: 150px; display: block; object-fit: contain; background: transparent; }}
 .summary-card {{
     flex: 1.8;
     background: #020617;
