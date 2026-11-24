@@ -1,6 +1,6 @@
-# SlicerCBCTPlanner v3.0 — Dental Radiology, Implantology & AI Suite for 3D Slicer
+# SlicerCBCTPlanner v3.1 — Dental Radiology, Implantology & AI Suite for 3D Slicer
 
-**SlicerCBCTPlanner v3.0** is a full-stack 3D Slicer scripted extension for automated pre-implant CBCT bone morphometry, 3D vivid tooth/root visualization, cephalometric & orthodontic analysis, and deep-learning Metal Artifact Reduction (MAR).
+**SlicerCBCTPlanner v3.1** is a full-stack 3D Slicer scripted extension for automated pre-implant CBCT bone morphometry, 3D vivid tooth/root visualization, cephalometric & orthodontic analysis, and deep-learning Metal Artifact Reduction (MAR).
 
 ## Key Upgrades in v3.0
 

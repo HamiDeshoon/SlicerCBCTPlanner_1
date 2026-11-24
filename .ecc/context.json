@@ -1,7 +1,7 @@
 {
-  "session_id": "slicer-cbct-planner-v3-upgrade",
-  "updated_at": "2026-11-17T11:48:00-05:00",
-  "active_milestone": "Milestone 2: Architectural Blueprint, Modernization Analysis & Full Upgrade Implementation",
+  "session_id": "slicer-cbct-planner-v3.1-fixes",
+  "updated_at": "2026-11-25T00:00:00+03:30",
+  "active_milestone": "Phase 2 complete: W0/height/IAN + RaySum pano/VR + 167 tests merged to main (92c9e20)",
   "decisions": [
     {
       "topic": "Print File & Measured Image Bug Fixes",
@@ -22,6 +22,41 @@
       "topic": "SlicerAutomatedDentalTools Native Feature Integration",
       "chosen": "Native implementations of ASO (Standardized Cranial/Occlusal Orientation), ALI (3D Dental & Cephalometric Landmark Identification), CLI-C (Impacted Canine/Molar Localization), VFACE (Bilateral Mandibular Asymmetry), and AutoCrop3D/AutoMatrix",
       "reason": "Provides immediate clinical value for orthodontists, oral surgeons, and radiologists without requiring external Conda/WSL2 setup."
+    },
+    {
+      "topic": "W0 socket-bridging on dentate ridges",
+      "chosen": "W0 bridges outer-lingual to outer-buccal bone crest across the socket (expected 6.0-9.5 mm at molar) via _same_jaw_tooth_mask, _find_socket_crest_rims, _select_ridge_run_indices, _sample_band_profile; PDL gap tolerance ≤ 1.5 mm",
+      "reason": "Single cortical plate measurement (2 mm) is clinically wrong on dentate sites; bridging both walls reflects true available bone width for implant planning."
+    },
+    {
+      "topic": "Large-angle crest axis stability",
+      "chosen": "PCA axis constrained via _stabilize_pca_axis to point buccolingually (small |u| component); prevents minor eigenvector flip at arch angles > 45 degrees",
+      "reason": "Previous flip caused wrong bone segment to be identified as W0 at posterior molar sites where arch curvature is high."
+    },
+    {
+      "topic": "Height line endpoint guards",
+      "chosen": "Height ray extends to inferior jaw boundary on non-canal slices; stops at IAN only when a confirmed canal is present in ROI. IAN search radius expanded to u_ok=±12 mm, 3D ROI=20 mm",
+      "reason": "Height line was stopping short on anterior mandible (no canal) and missing posterior canals > 15 mm from crest."
+    },
+    {
+      "topic": "RaySum panoramic default",
+      "chosen": "PanoProjectionMode defaults to 'RaySum' in CBCTPlanner, Phase7Tools, AdvancedTools, PrintLayoutEngine, PanoramicCurveLogic; never hardcode 'Mean'. Scale: accum / max(1, n_layers) * 1.25 with percentile W/L mapping.",
+      "reason": "RaySum matches clinical panoramic film appearance (pseudo-DPR); Mean produced a washed-out averaged image."
+    },
+    {
+      "topic": "Transparent RGBA pano/VR",
+      "chosen": "Air transparent via SetApplyThreshold(True) in display; RGBA PNG capture uses SetAlphaBitPlanes(1), GradientBackgroundOff(), SetBackgroundAlpha(0.0), SetInputBufferTypeToRGBA(); _data_uri_to_image preserves RGBA; _paste_contain alpha-composites over film",
+      "reason": "Previous opaque black pano/VR panels on the 8x10 film looked unprofessional and obscured the film background."
+    },
+    {
+      "topic": "Isotropic tight-fill panoramic display",
+      "chosen": "Panoramic viewport crops empty air margins isotropically; no pillarbox/letterbox black bars, no stretch. Green Foreground and Label layers cleared before pano display.",
+      "reason": "Previous display had ~83% wasted side margins and 2.5x vertical stretch from uncropped 120 mm sampling height."
+    },
+    {
+      "topic": "half_v_mm kept at 25.0 mm",
+      "chosen": "half_v_mm = 25.0 mm (not 30.0); 30.0 broke test_core_math.py 50x50x50 plausibility tests",
+      "reason": "30 mm exceeds the phantom volume, causing EDT boundary artifacts in unit test geometry."
     }
   ],
   "modified_files": [
@@ -34,16 +69,45 @@
     "CBCTPlanner/CBCTPlannerLib/AutomatedDentalToolsEngine.py",
     "CBCTPlanner/CBCTPlannerLib/AdvancedTools.py",
     "CBCTPlanner/CBCTPlannerLib/__init__.py",
-    "CBCTPlanner/CBCTPlanner.py"
+    "CBCTPlanner/CBCTPlanner.py",
+    "CBCTPlanner/CBCTPlannerLib/PanoramicCurveLogic.py",
+    "CBCTPlanner/CBCTPlannerLib/Phase7Tools.py",
+    "tests/test_anatomy_aware_measurements.py",
+    "tests/test_print_layout.py",
+    "tests/test_clinical_delivery.py",
+    "tests/test_slicer_integration.py"
   ],
   "completed_tasks": [
     "Inspect SlicerCBCTPlanner_1 codebase",
     "Diagnose print layout and measured image display bugs",
-    "Research SlicerAutomatedDentalTools, SlicerDentalSegmentator, and RISE-MAR"
+    "Research SlicerAutomatedDentalTools, SlicerDentalSegmentator, and RISE-MAR",
+    "Implement core fixes and new modules (v3.0)",
+    "Upgrade CBCTPlanner UI/UX with Radiologist & Dentist workspaces",
+    "Verify 100% unit test pass rate and package deliverables (v3.0: 79 tests -> 167 tests)",
+    "W0 socket-bridging on dentate ridges (dc7591d)",
+    "Large-angle crest axis stability via _stabilize_pca_axis (dc7591d)",
+    "Height line reaches jaw boundary on non-canal slices (dc7591d)",
+    "IAN canal search radius expanded to u_ok=±12 mm (dc7591d)",
+    "Width-crest resynchronization after _move_crest (dc7591d)",
+    "RaySum default in PrintLayoutEngine + pano RGBA transparent (15e1bbb)",
+    "Safe pill/footer overlay placement in print layout (15e1bbb)",
+    "RaySum default in CBCTPlanner, Phase7Tools, AdvancedTools (6ece4e1)",
+    "Transparent isotropic tight-fill panoramic display (6ece4e1)",
+    "RGBA VR capture with transparent background (6ece4e1)",
+    "Drop legacy autoStandardizeOnLoad Slicer settings key (96ee440)",
+    "Remove root/implant overlays, flag interpolated heights with H~ (5bee833)",
+    "Grayscale clinical film render (54f52f4)",
+    "Merge feat/new_ver_gpt into main (92c9e20)",
+    "Delete local stale branches (feat/autonomous-nerve-sinus-jump-and-quick-edit, feat/optimized-xray-film-and-dental-lines, fix/orientation-and-cross-sections)"
   ],
   "next_tasks": [
-    "Implement core fixes and new modules",
-    "Upgrade CBCTPlanner UI/UX with Radiologist & Dentist workspaces",
-    "Verify 100% unit test pass rate and package deliverables"
+    "Visual Slicer smoke test with ToothFairy3S_0021_0000.nii.gz real CT fixture",
+    "Decide grayscale default for CLI/batch callers in generate_8x10_layout",
+    "Smooth W0/W3/W5 along arch (1-site Gaussian, BL-01)",
+    "PDL gap tolerance validation on real molar CT (BL-06)",
+    "Trim unused core/diagnostics.py code (BL-09)",
+    "Refactor brittle NIfTI parser in test_clinical_delivery.py to tests/helpers/nifti_reader.py (BL-07)",
+    "Delete or PR-close remote origin/feat/new_ver_gpt on GitHub",
+    "Delete local swarm worktree branches (swarm-measurer-a7517b9a, swarm-panoview-b0afd737, swarm-renderer-9da5293b)"
   ]
 }
