@@ -39,7 +39,6 @@ SAFETY_MARGIN_MM = IMPLANT_APICAL_SAFETY_MARGIN_MM
 # Consistent clinical color system (Part 4.3)
 COLOR_BONE_HEIGHT = (34, 222, 94)  # Vivid green: available bone height
 COLOR_BONE_HEIGHT_TEXT = (74, 232, 128)
-COLOR_ROOT_EXTENT = (192, 132, 252)  # Violet: tooth root extent (distinct from bone height)
 COLOR_WIDTH_W0 = (0, 220, 255)  # Cyan: crestal width W0
 COLOR_WIDTH_W3 = (255, 180, 0)  # Gold: width at 3 mm
 COLOR_WIDTH_DEEP = (255, 120, 40)  # Orange: width at >= 5 mm
@@ -299,6 +298,11 @@ def _apply_anatomical_contour_tint(rgb: np.ndarray, mask_cs: Optional[np.ndarray
     return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
 
+def is_estimated_provenance(provenance: Optional[str]) -> bool:
+    """Return True when a record's provenance is not label-exact (drawn/labelled with `~`)."""
+    return str(provenance or "") in (PROVENANCE_ESTIMATED, PROVENANCE_INTERPOLATED)
+
+
 def measurement_footer_text(meas: Optional[Any], bone_density: Optional[str] = None) -> str:
     """Return the tile footer `H ... / W0 ...` caption, printing `--` for a withheld metric."""
     if meas is None:
@@ -353,23 +357,7 @@ def _resolve_engine_overlay_data(cs: Any, meas: Optional[Any]) -> Dict[str, Any]
             if getattr(cs, "basal_v", None) is not None or getattr(cs, "basal_uv", None) is not None:
                 height_mm = round(math.hypot(basal_uv[0] - crest_uv[0], basal_uv[1] - crest_uv[1]), 2)
 
-    # 2. Separate root extent (never substituted for available bone height!)
-    r_rec = records.get("root_extent")
-    root_start_uv = (
-        r_rec.start_uv_mm
-        if (r_rec is not None and r_rec.is_available)
-        else getattr(cs, "root_start_uv", None)
-    )
-    root_apex_uv = (
-        r_rec.end_uv_mm if (r_rec is not None and r_rec.is_available) else getattr(cs, "root_apex_uv", None)
-    )
-    root_extent_mm = (
-        r_rec.value_mm
-        if (r_rec is not None and r_rec.is_available)
-        else (getattr(meas, "root_extent_mm", None) if meas is not None else None)
-    )
-
-    # 3. Width endpoints (prefer exact 2D ridge-aligned endpoints, fallback to legacy width_segments)
+    # 2. Width endpoints (prefer exact 2D ridge-aligned endpoints, fallback to legacy width_segments)
     width_endpoints: Dict[float, Tuple[Tuple[float, float], Tuple[float, float], Optional[float], str]] = {}
     raw_endpoints = dict(getattr(cs, "width_endpoints_uv", None) or {})
     raw_segments = dict(getattr(cs, "width_segments", None) or {})
@@ -389,19 +377,7 @@ def _resolve_engine_overlay_data(cs: Any, meas: Optional[Any]) -> Dict[str, Any]
             val = round(abs(float(u_r) - float(u_l)), 2)
             width_endpoints[float(depth)] = ((float(u_l), v_lvl), (float(u_r), v_lvl), val, prov)
 
-    # 4. Implant suggestion (exclusively from engine — never recalculated here!)
-    imp_diam = (
-        getattr(meas, "suggested_diameter_mm", None)
-        if meas is not None
-        else getattr(cs, "suggested_implant_diameter_mm", None)
-    )
-    imp_len = (
-        getattr(meas, "suggested_length_mm", None)
-        if meas is not None
-        else getattr(cs, "suggested_implant_length_mm", None)
-    )
-
-    # 5. Approximate bone density code (exclusively from engine — never recalculated here!)
+    # 3. Approximate bone density code (exclusively from engine — never recalculated here!)
     misch_code = getattr(cs, "misch_code", None)
     if misch_code is None and meas is not None and getattr(meas, "misch_density_class", None):
         misch_code = str(meas.misch_density_class).split()[0].strip()
@@ -413,15 +389,10 @@ def _resolve_engine_overlay_data(cs: Any, meas: Optional[Any]) -> Dict[str, Any]
         "height_mm": float(height_mm) if height_mm is not None else None,
         "height_prov": height_prov,
         "crest_profile_uv": getattr(cs, "crest_profile_uv", None),
-        "root_start_uv": root_start_uv,
-        "root_apex_uv": root_apex_uv,
-        "root_extent_mm": float(root_extent_mm) if root_extent_mm is not None else None,
         "width_endpoints": width_endpoints,
         "canal_centroid_uv": getattr(cs, "canal_centroid_uv", None),
         "vital_contour_uv": getattr(cs, "vital_contour_uv", None),
         "sinus_floor_uv": getattr(cs, "sinus_floor_uv", None),
-        "imp_diam": float(imp_diam) if imp_diam is not None else None,
-        "imp_len": float(imp_len) if imp_len is not None else None,
         "misch_code": misch_code,
         "ridge_angle": getattr(cs, "ridge_axis_angle_deg", None),
         "withheld_reason": (
@@ -625,7 +596,7 @@ def render_cross_section(
         p1 = _px(basal_uv[0], basal_uv[1], u_coords, v_coords, scale)
         line_w = max(2, scale)
         cap_r = max(5, int(round(2.4 * scale)))
-        is_estimated = height_prov in (PROVENANCE_ESTIMATED, PROVENANCE_INTERPOLATED)
+        is_estimated = is_estimated_provenance(height_prov)
         if is_estimated:
             _draw_dashed_segment(draw, p0, p1, fill=COLOR_BONE_HEIGHT, dash=6, gap=4, width=line_w)
         else:

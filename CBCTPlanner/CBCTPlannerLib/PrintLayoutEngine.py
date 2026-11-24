@@ -54,6 +54,7 @@ from .core.measurements import withheld_badge
 from .core_print_render import (
     _load_font,
     hu_window_to_rgb,
+    is_estimated_provenance,
     render_cross_section,
     render_panoramic_strip,
     unavailable_tile,
@@ -83,6 +84,8 @@ class CrossSectionSliceSpec:
     mean_hu: Optional[float] = None
     is_mandible: bool = True
     image_data_uri: str = ""
+    # Height was interpolated/estimated rather than read from this slice's label boundary.
+    height_estimated: bool = False
     # Why a tile withholds H/W (empty when every metric was measured).
     withheld_reason: Optional[str] = None
     _pil_image: Optional[Any] = field(default=None, repr=False)
@@ -298,12 +301,23 @@ class PrintLayoutEngine:
                 if meas and getattr(meas, "misch_density_class", None):
                     misch_short = str(meas.misch_density_class).split()[0]
 
+                height_estimated = is_estimated_provenance(
+                    getattr(meas, "provenance", None)
+                    if meas is not None
+                    else getattr(
+                        (getattr(cs, "measurements", None) or {}).get("available_bone_height"),
+                        "provenance",
+                        None,
+                    )
+                )
+
                 spec = CrossSectionSliceSpec(
                     slice_index=s_idx + 1,
                     total_slices=n_slices,
                     offset_mm=float(arc_mm - center_arc),
                     fdi=target_fdi,
                     height_mm=meas.bone_height_mm if meas else None,
+                    height_estimated=height_estimated,
                     crest_width_mm=meas.crest_width_mm if meas else None,
                     width_3mm=meas.bone_width_at_depths_mm.get(3.0)
                     if (meas and meas.bone_width_at_depths_mm)
@@ -701,7 +715,8 @@ class PrintLayoutEngine:
             w0_txt = f"{spec.crest_width_mm:.1f}" if spec.crest_width_mm is not None else "--"
             w3_txt = f"{spec.width_3mm:.1f}" if spec.width_3mm is not None else "--"
             w5_txt = f"{spec.width_5mm:.1f}" if spec.width_5mm is not None else "--"
-            draw.text((x + 6, fy), f"H:{h_txt}  W0:{w0_txt}", fill=text, font=font_card_ftr)
+            h_lbl = "H~" if spec.height_estimated else "H"
+            draw.text((x + 6, fy), f"{h_lbl}:{h_txt}  W0:{w0_txt}", fill=text, font=font_card_ftr)
             badge = withheld_badge(spec.withheld_reason)
             if badge:
                 draw.text((x + 6, fy + 20), f"W3:{w3_txt} [{badge}]", fill=muted, font=font_card_ftr)
@@ -758,9 +773,13 @@ class PrintLayoutEngine:
             draw.text((margin, footer_top + 14 + line_idx * 22), line_txt, fill=muted, font=font_disc)
         span = record.get("span_summary") or {}
         if span.get("sites"):
+            h_span, w_span = span.get("min_height_mm"), span.get("min_crest_width_mm")
             worst = (
-                f"worst-case span: H {span.get('min_height_mm')} mm (#{span.get('limiting_height_site')})  "
-                f"W0 {span.get('min_crest_width_mm')} mm (#{span.get('limiting_width_site')})"
+                f"worst-case span: {'H~' if span.get('min_height_estimated') else 'H'} "
+                f"{'--' if h_span is None else f'{float(h_span):.1f}'} mm "
+                f"(#{span.get('limiting_height_site') or '--'})  "
+                f"W0 {'--' if w_span is None else f'{float(w_span):.1f}'} mm "
+                f"(#{span.get('limiting_width_site') or '--'})"
             )
             draw.text((margin, footer_top + 60), worst, fill=muted, font=font_disc)
         draw.text(
@@ -825,7 +844,7 @@ class PrintLayoutEngine:
                 f"<div class='cs-hdr'>#{s.fdi} S{s.slice_index} ({s.offset_mm:+.1f}mm){html.escape(misch_badge)}</div>"
                 f"<img src='{s.image_data_uri}' alt='Slice {s.slice_index}'/>"
                 f"<div class='cs-ftr'>"
-                f"<span class='m-h'>H:{h_txt}</span> "
+                f"<span class='m-h'>{'H~' if s.height_estimated else 'H'}:{h_txt}</span> "
                 f"<span class='m-w0'>W0:{w0_txt}</span> "
                 f"<span class='m-w3'>W3:{w3_txt}</span> "
                 f"<span class='m-w5'>W5:{w5_txt}</span>{ian_html}"

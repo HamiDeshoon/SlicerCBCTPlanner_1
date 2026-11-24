@@ -1881,7 +1881,7 @@ class MeasurementEngine:
         items: Sequence[Tuple[Optional[ImplantSiteMeasurement], Optional[CrossSectionData]]],
         *,
         max_jump_mm: float = MAX_ENTRY_JUMP_MM,
-    ) -> Sequence[Tuple[Optional[ImplantSiteMeasurement], Optional[CrossSectionData]]]:
+    ) -> None:
         """Interpolate entry (crest) points that jump between adjacent slices.
 
         Each slice is resampled independently, so one noisy cut can move the osteotomy entry
@@ -1894,7 +1894,7 @@ class MeasurementEngine:
             (meas, cs) for meas, cs in items if cs is not None and getattr(cs, "crest_uv", None) is not None
         ]
         if len(series) < 3 or float(max_jump_mm) <= 0.0:
-            return items
+            return
         crests = [np.asarray(cs.crest_uv, dtype=np.float64) for _meas, cs in series]
         adjusted = [crest.copy() for crest in crests]
         for index in range(1, len(crests) - 1):
@@ -1903,7 +1903,6 @@ class MeasurementEngine:
                 adjusted[index] = neighbour_mid
         for (meas, cs), new_crest in zip(series, adjusted):
             self._move_crest(cs, meas, new_crest)
-        return items
 
     @staticmethod
     def _move_crest(
@@ -1925,11 +1924,17 @@ class MeasurementEngine:
         record.value_mm = value
         record.start_uv_mm = new_uv
         record.start_world_mm = start_world
+        # The crest no longer comes from this slice's own label boundary, so the height is an
+        # interpolated estimate and must not be reported (or drawn) as label-exact.
+        record.provenance = PROVENANCE_INTERPOLATED
+        record.quality = QUALITY_ESTIMATED
         cs.crest_uv = new_uv
         cs.crest_v = new_uv[1]
         cs.height_u = new_uv[0]
         if meas is not None:
             meas.bone_height_mm = value
+            meas.provenance = PROVENANCE_INTERPOLATED
+            meas.quality_status = QUALITY_ESTIMATED
             if value is not None:
                 meas.safety_margin_mm = (
                     round(float(max(0.0, value - meas.suggested_length_mm)), 2)

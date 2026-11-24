@@ -53,6 +53,9 @@ from CBCTPlannerLib.core.labels import (
 )
 from CBCTPlannerLib.core.measurements import (
     MAX_ENTRY_JUMP_MM,
+    PROVENANCE_INTERPOLATED,
+    PROVENANCE_LABEL_DERIVED,
+    QUALITY_ESTIMATED,
     MeasurementEngine,
     MeasurementRecord,
 )
@@ -253,6 +256,18 @@ class TestEntryPointAndW0(unittest.TestCase):
         self.assertAlmostEqual(float(middle.crest_uv[1]), 5.0, delta=0.01)
         record = middle.measurements["available_bone_height"]
         self.assertAlmostEqual(float(record.value_mm or 0.0), 10.0, delta=0.01)
+        # A moved crest is no longer label-exact: the record must say so (drawn/labelled `H~`).
+        self.assertEqual(record.provenance, PROVENANCE_INTERPOLATED)
+        self.assertEqual(record.quality, QUALITY_ESTIMATED)
+        self.assertAlmostEqual(float(record.start_uv_mm[1]), 5.0, delta=0.01)
+        recomputed = float(
+            np.linalg.norm(np.asarray(record.end_world_mm) - np.asarray(record.start_world_mm))
+        )
+        self.assertAlmostEqual(float(record.value_mm or 0.0), recomputed, delta=0.01)
+        # Unmoved neighbours keep label-derived provenance.
+        self.assertEqual(
+            items[0][1].measurements["available_bone_height"].provenance, PROVENANCE_LABEL_DERIVED
+        )
 
         # A three-slice gallery over the real phantom never steps the entry more than the limit.
         mask3, arch3 = _dentate_phantom()
@@ -263,6 +278,41 @@ class TestEntryPointAndW0(unittest.TestCase):
         crests = [float(cs.crest_uv[1]) for _m, cs in series if cs is not None and cs.crest_uv is not None]
         self.assertEqual(len(crests), 3)
         self.assertLessEqual(max(crests) - min(crests), MAX_ENTRY_JUMP_MM + 0.01)
+
+    def test_interpolated_crest_marks_the_site_and_tile(self) -> None:
+        """A moved crest marks the site measurement and prints/draws the dashed `H~` value."""
+        mask, arch = _dentate_phantom()
+        engine = _engine(mask, arch)
+        meas, cs = engine.measure_at_arc_mm("lower", _arc_of_site(engine, arch, "46"), fdi_hint="46")
+        assert meas is not None and cs is not None
+        self.assertEqual(meas.provenance, PROVENANCE_LABEL_DERIVED)
+        before = render_cross_section(cs, meas, scale=2)
+        self.assertTrue(any(text.startswith("H:") for _x, _y, text in before.labels), before.labels)
+
+        crest = np.asarray(cs.crest_uv, dtype=np.float64)
+        moved = np.asarray((float(crest[0]) + 1.5, float(crest[1]) + 1.0), dtype=np.float64)
+        engine._move_crest(cs, meas, moved)
+
+        record = cs.measurements["available_bone_height"]
+        self.assertEqual(record.provenance, PROVENANCE_INTERPOLATED)
+        self.assertEqual(record.quality, QUALITY_ESTIMATED)
+        self.assertEqual(meas.provenance, PROVENANCE_INTERPOLATED)
+        self.assertEqual(meas.quality_status, QUALITY_ESTIMATED)
+        self.assertAlmostEqual(float(record.start_uv_mm[0]), float(moved[0]), places=6)
+        recomputed = float(
+            np.linalg.norm(np.asarray(record.end_world_mm) - np.asarray(record.start_world_mm))
+        )
+        self.assertAlmostEqual(float(record.value_mm or 0.0), recomputed, delta=0.01)
+        self.assertAlmostEqual(float(meas.bone_height_mm or 0.0), float(record.value_mm or 0.0), places=6)
+
+        after = render_cross_section(cs, meas, scale=2)
+        tags = [text for _x, _y, text in after.labels]
+        self.assertTrue(any(text.startswith("H~:") for text in tags), tags)
+        self.assertFalse(any(text.startswith("H:") for text in tags), tags)
+        exp0 = _px(record.start_uv_mm[0], record.start_uv_mm[1], cs.u_coords, cs.v_coords, 2)
+        exp1 = _px(record.end_uv_mm[0], record.end_uv_mm[1], cs.u_coords, cs.v_coords, 2)
+        drawn_mm = math.hypot(exp1[0] - exp0[0], exp1[1] - exp0[1]) * after.mm_per_px
+        self.assertAlmostEqual(drawn_mm, float(record.value_mm or 0.0), delta=0.15)
 
     def test_printed_height_equals_drawn_height(self) -> None:
         mask, arch = _dentate_phantom()
@@ -524,6 +574,10 @@ class TestClinicalDiagnostics(unittest.TestCase):
         self.assertEqual(span["limiting_height_site"], "47")
         self.assertEqual(span["max_span_diameter_mm"], 3.0)
         self.assertEqual(span["withheld"], [("48", "no bone")])
+        self.assertFalse(span["min_height_estimated"])
+        # The span caption must not claim an exact H when the limiting site is interpolated.
+        rows[1].provenance = "interpolated_boundary"
+        self.assertTrue(summarize_span_worst_case(rows)["min_height_estimated"])
 
     def test_one_click_resample_method_is_wired(self) -> None:
         from CBCTPlanner import CBCTPlannerLogic

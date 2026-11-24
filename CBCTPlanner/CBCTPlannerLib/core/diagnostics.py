@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from .labels import get_tooth_label, is_mandibular_fdi
+from .measurements import PROVENANCE_ESTIMATED, PROVENANCE_INTERPOLATED
 
 # CBCT reconstructions are sub-millimetre; a spacing outside this window means the geometry
 # was lost (or is not millimetres) and every printed distance would be wrong.
@@ -47,7 +48,7 @@ def summarize_span_worst_case(measurements: Iterable[Any]) -> Dict[str, Any]:
     A single restoration spanning several sites is limited by the narrowest / shortest
     site, so the summary reports the minimum values and which tooth limits them.
     """
-    heights: List[Tuple[float, str]] = []
+    heights: List[Tuple[float, str, bool]] = []
     crest_widths: List[Tuple[float, str]] = []
     diameters: List[Tuple[float, str]] = []
     lengths: List[Tuple[float, str]] = []
@@ -63,7 +64,13 @@ def summarize_span_worst_case(measurements: Iterable[Any]) -> Dict[str, Any]:
         diameter = getattr(meas, "suggested_diameter_mm", None)
         length = getattr(meas, "suggested_length_mm", None)
         if height is not None:
-            heights.append((float(height), fdi))
+            heights.append(
+                (
+                    float(height),
+                    fdi,
+                    str(getattr(meas, "provenance", "")) in (PROVENANCE_ESTIMATED, PROVENANCE_INTERPOLATED),
+                )
+            )
         if crest is not None:
             crest_widths.append((float(crest), fdi))
         if diameter is not None:
@@ -73,7 +80,7 @@ def summarize_span_worst_case(measurements: Iterable[Any]) -> Dict[str, Any]:
         reason = getattr(meas, "withheld_reason", None)
         if reason:
             withheld.append((fdi, str(reason)))
-    limiting_height = min(heights) if heights else (None, None)
+    limiting_height = min(heights) if heights else (None, None, False)
     limiting_width = min(crest_widths) if crest_widths else (None, None)
     limiting_diameter = min(diameters) if diameters else (None, None)
     limiting_length = min(lengths) if lengths else (None, None)
@@ -81,6 +88,8 @@ def summarize_span_worst_case(measurements: Iterable[Any]) -> Dict[str, Any]:
         "sites": sites,
         "min_height_mm": limiting_height[0],
         "limiting_height_site": limiting_height[1],
+        # True when the limiting site's height was interpolated/estimated, not label-exact.
+        "min_height_estimated": bool(limiting_height[2]),
         "min_crest_width_mm": limiting_width[0],
         "limiting_width_site": limiting_width[1],
         "max_span_diameter_mm": limiting_diameter[0],
