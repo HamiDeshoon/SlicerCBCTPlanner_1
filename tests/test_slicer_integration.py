@@ -1113,5 +1113,438 @@ class TestPhase7AndCheckpointInference(unittest.TestCase):
             self.assertTrue(Path(summary["dicom_sr"]).is_file())
 
 
+class PanoramicRaySumAndVrFramingTests(unittest.TestCase):
+    def test_raysum_default_signatures_and_parameter_node(self) -> None:
+        import inspect
+        import CBCTPlanner as cbct_mod
+
+        sig_sample = inspect.signature(PanoramicCurveLogic.sample_panoramic_slab_array)
+        sig_gen = inspect.signature(PanoramicCurveLogic.generate_panoramic_volume)
+        self.assertEqual(sig_sample.parameters["projection_mode"].default, "RaySum")
+        self.assertEqual(sig_gen.parameters["projection_mode"].default, "RaySum")
+        self.assertEqual(cbct_mod.DEFAULTS["PanoProjectionMode"], "RaySum")
+
+        mock_slicer = _MockSlicerEnv()
+        with patch("CBCTPlanner.slicer", mock_slicer):
+            logic = CBCTPlannerLogic()
+            pNode = mock_slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScriptedModuleNode", "ParamsRay")
+            logic._setDefaultParameters(pNode)
+            self.assertEqual(pNode.GetParameter("PanoProjectionMode"), "RaySum")
+            self.assertEqual(pNode.GetParameter("SlabMode"), "Mean")
+            self.assertEqual(pNode.GetParameter("VRPreset"), "DentalSegmentator (Teeth & Bone)")
+
+    def test_panoramic_vertical_crop_and_raysum_window_threshold(self) -> None:
+        # 240 rows = 120 mm @ 0.5 mm spacing: top & bottom 60 rows are RaySum out-of-bounds (-1250)
+        pano = np.full((240, 120), -1250.0, dtype=np.float32)
+        pano[70:170, 10:110] = 600.0
+        pano[95:145, 30:90] = 2200.0
+
+        cropped, eff_h = PanoramicCurveLogic._crop_panoramic_vertical_padding(
+            pano, spacing_mm=0.5, height_mm=120.0, projection_mode="RaySum", margin_mm=2.0
+        )
+        self.assertEqual(cropped.shape[1], 120)
+        self.assertLess(cropped.shape[0], 120)
+        self.assertGreaterEqual(cropped.shape[0], 100)
+        self.assertAlmostEqual(eff_h, cropped.shape[0] * 0.5, places=2)
+
+        win, lvl, lo_th, hi_th = PanoramicCurveLogic.compute_panoramic_display_window_threshold(
+            cropped, projection_mode="RaySum", source_is_hu=True
+        )
+        self.assertAlmostEqual(lo_th, -937.5, places=1)
+        self.assertGreater(lvl, 0.0)
+        self.assertGreater(win, 500.0)
+        self.assertGreater(hi_th, 2200.0)
+
+    def test_display_panoramic_clears_layers_and_fits_isotropically(self) -> None:
+        mock_slicer = _MockSlicerEnv()
+        green = mock_slicer.slice_widgets["Green"]
+        green.fg_id = "SomeCBCT"
+        green.lbl_id = "SomeMask"
+        green.fg_opacity = 0.5
+        green.lbl_opacity = 0.5
+        green.SetForegroundVolumeID = lambda vid: setattr(green, "fg_id", vid)
+        green.SetLabelVolumeID = lambda vid: setattr(green, "lbl_id", vid)
+        green.SetForegroundOpacity = lambda op: setattr(green, "fg_opacity", float(op))
+        green.SetLabelOpacity = lambda op: setattr(green, "lbl_opacity", float(op))
+
+        snode = green.GetSliceNode()
+        snode.dims = (1200, 400, 1)
+        snode.fov = [200.0, 200.0, 1.0]
+        snode.bg = (0.5, 0.5, 0.5)
+        snode.GetDimensions = lambda: snode.dims
+        snode.GetFieldOfView = lambda: tuple(snode.fov)
+        snode.SetFieldOfView = lambda x, y, z: setattr(snode, "fov", [float(x), float(y), float(z)])
+        snode.SetBackgroundColor = lambda r, g, b: setattr(snode, "bg", (r, g, b))
+
+        panoNode = mock_slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Test_Panoramic")
+        panoNode.SetAttribute("CBCTPlanner.IsPanoramic", "1")
+        panoNode.SetAttribute("CBCTPlanner.TotalArcMm", "120.0")
+        panoNode.SetAttribute("CBCTPlanner.HeightMm", "60.0")
+
+        with (
+            patch("CBCTPlanner.slicer", mock_slicer),
+            patch("CBCTPlannerLib.PanoramicCurveLogic.slicer", mock_slicer),
+            patch("CBCTPlannerLib.CrossSectionNavigator.slicer", mock_slicer),
+        ):
+            pano_logic = PanoramicCurveLogic()
+            fitted = pano_logic.display_panoramic_in_slice_view(panoNode, "Green")
+            self.assertTrue(fitted)
+            self.assertIsNone(green.fg_id)
+            self.assertIsNone(green.lbl_id)
+            self.assertEqual(green.fg_opacity, 0.0)
+            self.assertEqual(green.lbl_opacity, 0.0)
+            self.assertEqual(snode.bg, (0.0, 0.0, 0.0))
+            # 1200x400 pane (3:1) with 120x60 pano (2:1) -> height limiting = 60, width = 180 (isotropic 1:1)
+            self.assertAlmostEqual(snode.fov[1], 60.0, places=3)
+            self.assertAlmostEqual(snode.fov[0], 180.0, places=3)
+            self.assertEqual(green.fit_calls, 1)
+
+            # Refit when layout switches to narrow square (400x400)
+            snode.dims = (400, 400, 1)
+            logic = CBCTPlannerLogic()
+            logic.panoramic = pano_logic
+            self.assertTrue(logic.refit_panoramic_view("Green"))
+            self.assertAlmostEqual(snode.fov[0], 120.0, places=3)
+            self.assertAlmostEqual(snode.fov[1], 120.0, places=3)
+
+    def test_vr_set_volume_rendering_configures_clean_bg_and_tight_camera(self) -> None:
+        from CBCTPlannerLib.VRVisualization import VRVisualizationLogic
+
+        calls: dict[str, object] = {}
+
+        class _Cam:
+            def Zoom(self, z: float) -> None:
+                calls["zoom"] = z
+
+        class _Ren:
+            def __init__(self) -> None:
+                self._cam = _Cam()
+
+            def ResetCamera(self, bounds=None) -> None:
+                calls["reset_bounds"] = bounds
+
+            def GetActiveCamera(self) -> _Cam:
+                return self._cam
+
+            def ResetCameraClippingRange(self) -> None:
+                calls["clip"] = True
+
+        class _Rens:
+            def GetFirstRenderer(self) -> _Ren:
+                return _Ren()
+
+        class _RW:
+            def GetRenderers(self) -> _Rens:
+                return _Rens()
+
+        class _ThreeDView:
+            def rotateToViewAxis(self, ax: int) -> None:
+                calls["axis"] = ax
+
+            def renderWindow(self) -> _RW:
+                return _RW()
+
+            def forceRender(self) -> None:
+                calls["render"] = True
+
+        class _ViewNode:
+            def __init__(self) -> None:
+                self.bg1 = None
+                self.bg2 = None
+                self.box = True
+                self.labels = True
+
+            def SetBackgroundColor(self, *c) -> None:
+                self.bg1 = c
+
+            def SetBackgroundColor2(self, *c) -> None:
+                self.bg2 = c
+
+            def SetBoxVisible(self, v: bool) -> None:
+                self.box = v
+
+            def SetAxisLabelsVisible(self, v: bool) -> None:
+                self.labels = v
+
+        view_node = _ViewNode()
+
+        class _TF:
+            def RemoveAllPoints(self):
+                pass
+
+            def AddPoint(self, *_a):
+                pass
+
+            def AddRGBPoint(self, *_a):
+                pass
+
+            def GetSize(self):
+                return 0
+
+        class _PropNode:
+            def GetID(self):
+                return "prop1"
+
+            def GetScalarOpacity(self):
+                return _TF()
+
+            def GetColor(self):
+                return _TF()
+
+            def GetGradientOpacity(self):
+                return _TF()
+
+        class _DispNode:
+            def __init__(self):
+                self._vis = False
+
+            def GetVisibility(self):
+                return self._vis
+
+            def SetVisibility(self, v):
+                self._vis = bool(v)
+
+            def GetCroppingEnabled(self):
+                return False
+
+            def SetCroppingEnabled(self, _v):
+                pass
+
+            def GetROINode(self):
+                return None
+
+            def GetVolumePropertyNode(self):
+                return _PropNode()
+
+        disp_node = _DispNode()
+
+        class _VRLogic:
+            def GetFirstVolumeRenderingDisplayNode(self, _v):
+                return None
+
+            def CreateDefaultVolumeRenderingNodes(self, _v):
+                return disp_node
+
+            def GetPresetByName(self, _n):
+                return None
+
+        fake_lm = type(
+            "_LM",
+            (),
+            {
+                "threeDViewCount": 1,
+                "threeDWidget": lambda _s, _i: type("_W", (), {"threeDView": lambda _self: _ThreeDView()})(),
+            },
+        )()
+        fake_slicer = type(
+            "_S",
+            (),
+            {
+                "app": type("_App", (), {"layoutManager": lambda _self: fake_lm})(),
+                "modules": type(
+                    "_M", (), {"volumerendering": type("_VR", (), {"logic": lambda _s: _VRLogic()})()}
+                )(),
+                "util": type(
+                    "_U",
+                    (),
+                    {
+                        "getNodesByClass": staticmethod(lambda _cls: [view_node]),
+                        "arrayFromVolume": staticmethod(
+                            lambda _v: np.linspace(-1000.0, 2500.0, 200, dtype=np.float32)
+                        ),
+                        "resetThreeDViews": staticmethod(lambda: calls.setdefault("fallback_reset", True)),
+                    },
+                )(),
+            },
+        )()
+
+        class _Vol:
+            def GetRASBounds(self, b):
+                b[:] = [-40.0, 40.0, -35.0, 35.0, -30.0, 30.0]
+
+        with (
+            patch("CBCTPlannerLib.VRVisualization.slicer", fake_slicer),
+            patch("CBCTPlannerLib.Utils.slicer", fake_slicer),
+        ):
+            vr = VRVisualizationLogic()
+            vr.set_volume_rendering(_Vol(), visible=True, preset_name="DentalSegmentator (Teeth & Bone)")
+
+        self.assertEqual(view_node.bg1, (1.0, 1.0, 1.0))
+        self.assertEqual(view_node.bg2, (1.0, 1.0, 1.0))
+        self.assertFalse(view_node.box)
+        self.assertFalse(view_node.labels)
+        self.assertEqual(calls["axis"], 3)
+        self.assertEqual(calls["reset_bounds"], (-40.0, 40.0, -35.0, 35.0, -30.0, 30.0))
+        self.assertGreater(float(calls["zoom"]), 1.2)
+
+    def test_finalize_transparent_png_bytes_and_vtk_rgba_state_restore(self) -> None:
+        import base64
+        import io
+        from PIL import Image
+        from CBCTPlannerLib.AdvancedTools import (
+            capture_vtk_render_window_png_base64,
+            finalize_transparent_png_bytes,
+        )
+
+        # 1. Border-connected transparency + tight crop keeps interior dark region opaque
+        img_arr = np.zeros((120, 120, 3), dtype=np.uint8)
+        img_arr[40:80, 40:80] = 240
+        img_arr[55:65, 55:65] = 0
+        buf = io.BytesIO()
+        Image.fromarray(img_arr, mode="RGB").save(buf, format="PNG")
+
+        out_bytes = finalize_transparent_png_bytes(
+            buf.getvalue(), transparent_bg=True, tight_crop=True, pad_frac=0.05
+        )
+        with Image.open(io.BytesIO(out_bytes)) as out_img:
+            self.assertEqual(out_img.mode, "RGBA")
+            out_arr = np.asarray(out_img)
+        self.assertLess(out_arr.shape[0], 55)
+        self.assertLess(out_arr.shape[1], 55)
+        self.assertEqual(int(out_arr[0, 0, 3]), 0)
+        cy, cx = out_arr.shape[0] // 2, out_arr.shape[1] // 2
+        self.assertEqual(int(out_arr[cy, cx, 3]), 255)
+
+        # 2. VTK RGBA capture restores renderer/window state even after RGBA override
+        rgba_sample = np.zeros((60, 60, 4), dtype=np.uint8)
+        rgba_sample[20:40, 20:40] = [255, 220, 120, 255]
+        s_buf = io.BytesIO()
+        Image.fromarray(rgba_sample, mode="RGBA").save(s_buf, format="PNG")
+        sample_png = s_buf.getvalue()
+
+        class _Renderer:
+            def __init__(self) -> None:
+                self.grad = True
+                self.bg_alpha = 1.0
+                self.bg1 = (0.9, 0.9, 1.0)
+                self.bg2 = (0.7, 0.8, 0.9)
+
+            def GetGradientBackground(self):
+                return self.grad
+
+            def SetGradientBackground(self, v):
+                self.grad = bool(v)
+
+            def GradientBackgroundOff(self):
+                self.grad = False
+
+            def GetBackgroundAlpha(self):
+                return self.bg_alpha
+
+            def SetBackgroundAlpha(self, a):
+                self.bg_alpha = float(a)
+
+            def GetBackground(self):
+                return self.bg1
+
+            def SetBackground(self, *c):
+                self.bg1 = tuple(float(x) for x in c)
+
+            def GetBackground2(self):
+                return self.bg2
+
+            def SetBackground2(self, *c):
+                self.bg2 = tuple(float(x) for x in c)
+
+        ren = _Renderer()
+
+        class _Rens:
+            def __init__(self):
+                self._done = False
+
+            def InitTraversal(self):
+                self._done = False
+
+            def GetNextItem(self):
+                if self._done:
+                    return None
+                self._done = True
+                return ren
+
+        class _RW:
+            def __init__(self):
+                self.alpha_bits = 0
+                self._rens = _Rens()
+
+            def GetAlphaBitPlanes(self):
+                return self.alpha_bits
+
+            def SetAlphaBitPlanes(self, v):
+                self.alpha_bits = int(v)
+
+            def GetRenderers(self):
+                return self._rens
+
+        rw = _RW()
+        w2i_modes = []
+
+        class _W2I:
+            def SetInput(self, _rw):
+                pass
+
+            def SetScale(self, _s):
+                pass
+
+            def SetInputBufferTypeToRGBA(self):
+                w2i_modes.append("RGBA")
+
+            def SetInputBufferTypeToRGB(self):
+                w2i_modes.append("RGB")
+
+            def ReadFrontBufferOff(self):
+                pass
+
+            def Update(self):
+                pass
+
+            def GetOutputPort(self):
+                return "port"
+
+        class _Result:
+            def GetNumberOfTuples(self):
+                return len(sample_png)
+
+            def GetNumberOfValues(self):
+                return len(sample_png)
+
+            def GetValue(self, i):
+                return sample_png[i]
+
+        class _Writer:
+            def WriteToMemoryOn(self):
+                pass
+
+            def SetInputConnection(self, _p):
+                pass
+
+            def Write(self):
+                pass
+
+            def GetResult(self):
+                return _Result()
+
+        fake_vtk = type("_VTK", (), {"vtkWindowToImageFilter": _W2I, "vtkPNGWriter": _Writer})()
+        with patch("CBCTPlannerLib.AdvancedTools.vtk", fake_vtk):
+            uri = capture_vtk_render_window_png_base64(
+                rw,
+                force_render_fn=lambda: None,
+                transparent_bg=True,
+                tight_crop=True,
+                pad_frac=0.05,
+            )
+        self.assertIsNotNone(uri)
+        self.assertEqual(w2i_modes, ["RGBA"])
+        self.assertEqual(rw.alpha_bits, 0)
+        self.assertTrue(ren.grad)
+        self.assertEqual(ren.bg_alpha, 1.0)
+        self.assertEqual(ren.bg1, (0.9, 0.9, 1.0))
+        self.assertEqual(ren.bg2, (0.7, 0.8, 0.9))
+        decoded = base64.b64decode(uri.split(",", 1)[1])
+        with Image.open(io.BytesIO(decoded)) as cropped_vr:
+            self.assertEqual(cropped_vr.mode, "RGBA")
+            self.assertLess(cropped_vr.width, 30)
+            self.assertLess(cropped_vr.height, 30)
+
+
 if __name__ == "__main__":
     unittest.main()

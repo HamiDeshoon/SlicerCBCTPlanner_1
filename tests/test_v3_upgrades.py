@@ -59,8 +59,7 @@ class TestV3Upgrades(unittest.TestCase):
             ("seg_46", "Tooth 46", "46"),
         ]
         tf3_records = [
-            match_segment_to_label_and_precedence(sid, sname, fdi)
-            for sid, sname, fdi in tf3_segments
+            match_segment_to_label_and_precedence(sid, sname, fdi) for sid, sname, fdi in tf3_segments
         ]
         self.assertFalse(resolve_combined_mask_scheme(tf3_records))
 
@@ -73,8 +72,7 @@ class TestV3Upgrades(unittest.TestCase):
             ("s5", "Mandibular canal", None),
         ]
         ds5_records = [
-            match_segment_to_label_and_precedence(sid, sname, fdi)
-            for sid, sname, fdi in ds5_segments
+            match_segment_to_label_and_precedence(sid, sname, fdi) for sid, sname, fdi in ds5_segments
         ]
         self.assertTrue(resolve_combined_mask_scheme(ds5_records))
 
@@ -180,7 +178,9 @@ class TestV3Upgrades(unittest.TestCase):
             self.assertIn("@schema", Path(saved).read_text(encoding="utf-8"))
 
         # 2. ASO standardized orientation
-        aso = engine.compute_aso_standardized_orientation(vol, mask=mask, is_5class=False, landmarks=landmarks)
+        aso = engine.compute_aso_standardized_orientation(
+            vol, mask=mask, is_5class=False, landmarks=landmarks
+        )
         self.assertEqual(aso.matrix_4x4_ras.shape, (4, 4))
 
         # 3. CLI-C impaction report
@@ -225,9 +225,9 @@ class TestV3Upgrades(unittest.TestCase):
         rng = np.random.default_rng(7)
         slice_2d = rng.normal(400.0, 180.0, size=(80, 80)).astype(np.float32)
         seg_2d = np.zeros((80, 80), dtype=np.int16)
-        seg_2d[30:65, 25:55] = 1   # Mandible bone
+        seg_2d[30:65, 25:55] = 1  # Mandible bone
         seg_2d[12:32, 34:46] = 36  # Vivid Tooth #36 crown & root
-        seg_2d[56:62, 37:43] = 3   # IAN nerve canal
+        seg_2d[56:62, 37:43] = 3  # IAN nerve canal
 
         u_coords = np.linspace(-16.0, 16.0, 80)
         v_coords = np.linspace(16.0, -16.0, 80)

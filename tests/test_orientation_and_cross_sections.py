@@ -162,7 +162,9 @@ class TestCrossSectionVerticalAlignment(unittest.TestCase):
 
     def test_measurement_footer_never_fabricates_zero(self) -> None:
         self.assertEqual(measurement_footer_text(None), "H --  W0 --")
-        self.assertEqual(measurement_footer_text(_DummyMeas(bone_height_mm=12.3, crest_width_mm=None)), "H 12.3 mm  W0 --")
+        self.assertEqual(
+            measurement_footer_text(_DummyMeas(bone_height_mm=12.3, crest_width_mm=None)), "H 12.3 mm  W0 --"
+        )
 
 
 if __name__ == "__main__":

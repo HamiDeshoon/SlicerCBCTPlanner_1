@@ -44,6 +44,7 @@ RISEMAR_HU_MIN: float = -1024.0
 RISEMAR_HU_MAX: float = 3072.0
 DEFAULT_METAL_THRESHOLD_HU: float = 2200.0
 
+
 def validate_risemar_weights_path(weights_path: Optional[str]) -> Tuple[bool, str]:
     """Validate a user-selected RISE-MAR weights file before enabling neural inference."""
     raw = str(weights_path or "").strip()
@@ -84,7 +85,9 @@ class RiseMarResult:
     output_image_zyx: np.ndarray
     weights_path: str
     weights_loaded: bool
-    mode_used: str  # "risemar_neural_cbam", "risemar_pickled_module", "physics_hybrid_fallback", or "no_metal_noop"
+    mode_used: (
+        str  # "risemar_neural_cbam", "risemar_pickled_module", "physics_hybrid_fallback", or "no_metal_noop"
+    )
     device_used: str
     total_slices: int
     processed_slices: int
@@ -735,9 +738,7 @@ class RiseMarEngine:
         model, mode_used, loaded_t, total_t, dev = self.load_risemar_checkpoint(
             cfg.weights_path, device=cfg.device
         )
-        weights_loaded = model is not None and (
-            mode_used == "risemar_pickled_module" or loaded_t > 0
-        )
+        weights_loaded = model is not None and (mode_used == "risemar_pickled_module" or loaded_t > 0)
 
         target_slices = metal_indices if cfg.metal_slices_only else list(range(z_dim))
         out_zyx = arr.copy()
@@ -786,7 +787,10 @@ class RiseMarEngine:
             if weights_loaded and model is not None and torch_mod is not None:
                 try:
                     norm_batch = np.stack(
-                        [preprocess_slice_risemar(it[3], hu_min=hu_min, hu_max=hu_max) for it in active_items],
+                        [
+                            preprocess_slice_risemar(it[3], hu_min=hu_min, hu_max=hu_max)
+                            for it in active_items
+                        ],
                         axis=0,
                     )[:, None, :, :]
                     with torch_mod.no_grad():

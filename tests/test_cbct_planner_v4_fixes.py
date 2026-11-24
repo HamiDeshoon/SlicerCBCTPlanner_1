@@ -4,6 +4,8 @@ smart multi-missing-tooth span, and mask-free implant-guide cross-section upgrad
 
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import sys
 import unittest
 from pathlib import Path
@@ -17,6 +19,7 @@ if str(CBCT_DIR) not in sys.path:
     sys.path.insert(0, str(CBCT_DIR))
 
 import importlib
+
 mar = importlib.import_module("CBCTPlannerLib.RiseMarEngine")
 from CBCTPlannerLib import Utils as utils
 from CBCTPlannerLib import core_print_render as cpr
@@ -65,7 +68,7 @@ class TestSmartMissingToothExpansion(unittest.TestCase):
         eng = object.__new__(MeasurementEngine)
         eng.is_dental_segmentator_5class = False
         present = {"41", "42", "43", "44", "47"}
-        eng._get_tooth_info = lambda fdi: (SimpleNamespace(fdi=fdi) if str(fdi) in present else None)
+        eng._get_tooth_info = lambda fdi: SimpleNamespace(fdi=fdi) if str(fdi) in present else None
 
         expanded, missing = eng.expand_missing_edentulous_span([45])
         self.assertEqual(expanded, [45, 46])
@@ -75,7 +78,7 @@ class TestSmartMissingToothExpansion(unittest.TestCase):
         eng = object.__new__(MeasurementEngine)
         eng.is_dental_segmentator_5class = False
         present = {"44", "47"}
-        eng._get_tooth_info = lambda fdi: (SimpleNamespace(fdi=fdi) if str(fdi) in present else None)
+        eng._get_tooth_info = lambda fdi: SimpleNamespace(fdi=fdi) if str(fdi) in present else None
 
         expanded, missing = eng.expand_missing_edentulous_span([44])
         self.assertEqual(expanded, [44])
@@ -101,7 +104,9 @@ class TestPanoramicAndCrossSectionRender(unittest.TestCase):
         self.assertGreaterEqual(res.image.height, 340)
         self.assertEqual(len(res.overlay_px), 4)
         arr_rgb = np.asarray(res.image)
-        self.assertGreater(float(np.mean(arr_rgb[250:290, 10:60])), float(np.mean(arr_rgb[10:40, 10:60])) + 50.0)
+        self.assertGreater(
+            float(np.mean(arr_rgb[250:290, 10:60])), float(np.mean(arr_rgb[10:40, 10:60])) + 50.0
+        )
 
     def test_cross_section_mask_free_and_draws_vertical_entry_and_guides(self):
         u = np.linspace(-15.0, 15.0, 121)
@@ -131,7 +136,8 @@ class TestPanoramicAndCrossSectionRender(unittest.TestCase):
         self.assertEqual(len(r1.overlay_px), 0)
         self.assertTrue(any("not measurable" in t for _, _, t in r1.labels))
 
-        # Full measured site renders engine-supplied H, W0, Impl suggestion, and Misch density verbatim
+        # Full measured site renders engine-supplied H, W0 and Misch density verbatim; the
+        # implant envelope, root line and 2 mm barrier are deliberately not drawn any more.
         cs_full = SimpleNamespace(
             img_cs=img,
             mask_cs=mask,
@@ -155,7 +161,9 @@ class TestPanoramicAndCrossSectionRender(unittest.TestCase):
         texts = [t for _, _, t in r2.labels]
         self.assertTrue(any("H 14.0 mm" in t for t in texts), texts)
         self.assertTrue(any("W0 7.6 mm" in t for t in texts), texts)
-        self.assertTrue(any("Impl 4.5x11.5 mm" in t for t in texts), texts)
+        self.assertFalse(any(t.startswith("Impl ") for t in texts), texts)
+        self.assertFalse(any(t.startswith("Root ") for t in texts), texts)
+        self.assertFalse(any("2mm SAFE" in t for t in texts), texts)
         self.assertTrue(any("D2" in t for t in texts), texts)
 
 

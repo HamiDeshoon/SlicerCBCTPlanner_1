@@ -143,6 +143,7 @@ from CBCTPlannerLib import (
     run_automated_dental_tool,
     should_handle_navigation_shortcut,
 )
+from CBCTPlannerLib.AdvancedTools import capture_vtk_render_window_png_base64
 from CBCTPlannerLib.WorkflowUIHelpers import (
     GalleryNavigationState,
     apply_risemar_validation_to_widget,
@@ -194,6 +195,7 @@ NOT_MEASURED = "not measured"
 DEFAULTS = {
     "PanoThicknessMm": 25.0,
     "PanoHeightMm": 120.0,
+    "PanoProjectionMode": "RaySum",
 }
 
 
@@ -618,6 +620,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         step1Layout.addRow("Manual Correction:", flipRow)
 
         self.autoStandardizeOnLoadCheck = qt.QCheckBox("Auto-standardize on load (RAS)")
+        # RAS remains the default: the persisted key is versioned so an old explicit "false"
+        # from a previous release cannot switch the default off.
         self.autoStandardizeOnLoadCheck.setChecked(True)
         self.autoStandardizeOnLoadCheck.setToolTip(
             "When enabled, loading a volume attempts a lossless RAS standardization. Data is never changed silently."
@@ -625,10 +629,16 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         try:
             settings = qt.QSettings()
             self.autoStandardizeOnLoadCheck.setChecked(
-                str(settings.value(self.SETTINGS_PREFIX + "autoStandardizeOnLoad", "true")).lower() == "true"
+                str(settings.value(self.SETTINGS_PREFIX + "autoStandardizeOnLoadRas", "true")).lower()
+                == "true"
             )
+            # Migration: the pre-RAS-default key is obsolete. Drop it so a stale "false"
+            # left by an older release cannot linger and be mistaken for the current choice.
+            legacy_key = self.SETTINGS_PREFIX + "autoStandardizeOnLoad"
+            if settings.contains(legacy_key):
+                settings.remove(legacy_key)
         except Exception:
-            logger.debug("Could not read autoStandardizeOnLoad setting", exc_info=True)
+            logger.debug("Could not read/migrate autoStandardizeOnLoad setting", exc_info=True)
         step1Layout.addRow(self.autoStandardizeOnLoadCheck)
 
         layoutBtnRow = qt.QHBoxLayout()
@@ -842,7 +852,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         # ==================== STEP 3: PANORAMIC (O1, F3) ====================
         self.step3Box = ctk.ctkCollapsibleButton()
-        self.step3Box.text = "Step 3: In-Process Panoramic CPR (Mean / MIP / MinIP / RaySum)"
+        self.step3Box.text = "Step 3: In-Process Panoramic CPR (RaySum / Mean / MIP / MinIP)"
         self.step3Box.collapsed = True
         self.layout.addWidget(self.step3Box)
         step3Outer = qt.QVBoxLayout(self.step3Box)
@@ -893,9 +903,10 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         step3Layout.addRow("Panoramic Geometry:", panoGeomRow)
 
         self.panoProjCombo = qt.QComboBox()
-        self.panoProjCombo.addItems(["Mean", "MIP", "MinIP", "RaySum"])
+        self.panoProjCombo.addItems(["RaySum", "Mean", "MIP", "MinIP"])
+        self.panoProjCombo.setCurrentText(DEFAULTS["PanoProjectionMode"])
         self.panoProjCombo.setToolTip(
-            "Intensity projection mode across the slab (including RaySum pseudo-pan, F3)."
+            "Intensity projection mode across the slab (RaySum pseudo-pan default, F3)."
         )
         step3Layout.addRow("Projection Mode:", self.panoProjCombo)
 
@@ -1528,7 +1539,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         adtNativeRow2.addWidget(self.btnRunAutoCropROI)
         step7Layout.addRow("CLI-C, VFACE & Crop:", adtNativeRow2)
 
-        self.adtResultsLabel = qt.QLabel("AutomatedDentalTools ready — click ALI, ASO, CLI-C, VFACE, or AutoCrop3D above.")
+        self.adtResultsLabel = qt.QLabel(
+            "AutomatedDentalTools ready — click ALI, ASO, CLI-C, VFACE, or AutoCrop3D above."
+        )
         self.adtResultsLabel.setWordWrap(True)
         self.adtResultsLabel.setStyleSheet(
             "background-color: #0f172a; color: #e2e8f0; padding: 6px; border-radius: 4px; border: 1px solid #334155;"
@@ -1537,9 +1550,21 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         adtRow = qt.QHBoxLayout()
         self.adtToolCombo = qt.QComboBox()
-        for tool in ("ASO", "AMASSS", "ALI", "AReg", "AutoCrop3D", "BatchDentalSegmentator", "MRI2CBCT", "CLI-C", "VFACE"):
+        for tool in (
+            "ASO",
+            "AMASSS",
+            "ALI",
+            "AReg",
+            "AutoCrop3D",
+            "BatchDentalSegmentator",
+            "MRI2CBCT",
+            "CLI-C",
+            "VFACE",
+        ):
             self.adtToolCombo.addItem(tool, tool)
-        self.adtToolCombo.setToolTip("Installed SlicerAutomatedDentalTools module to launch (or run built-in native engine).")
+        self.adtToolCombo.setToolTip(
+            "Installed SlicerAutomatedDentalTools module to launch (or run built-in native engine)."
+        )
         self.btnLaunchAdtTool = qt.QPushButton("Launch / Run Tool")
         self.btnLaunchAdtTool.setToolTip(
             "Launch the selected SlicerAutomatedDentalTools module if installed, or execute the built-in native algorithm."
@@ -1833,7 +1858,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             )
             self.panoOffsetSpin.setValue(float(self._parameterNode.GetParameter("PanoOffsetMm") or 0.0))
             self.panoProjCombo.setCurrentText(
-                self._parameterNode.GetParameter("PanoProjectionMode") or "Mean"
+                self._parameterNode.GetParameter("PanoProjectionMode") or DEFAULTS["PanoProjectionMode"]
             )
             self.panoFlipVerticalCheck.setChecked(
                 (self._parameterNode.GetParameter("PanoFlipVertical") or "false").lower() == "true"
@@ -2055,7 +2080,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         try:
             settings = qt.QSettings()
-            settings.setValue(self.SETTINGS_PREFIX + "autoStandardizeOnLoad", "true" if checked else "false")
+            settings.setValue(
+                self.SETTINGS_PREFIX + "autoStandardizeOnLoadRas", "true" if checked else "false"
+            )
         except Exception:
             logger.debug("Could not persist autoStandardizeOnLoad setting", exc_info=True)
 
@@ -2143,9 +2170,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         if self.logic.flip_orientation_axis(volNode, segNode, axis):
             self.globalStatusLabel.setText(f"Manual {axis} flip applied")
-            self.step1HintLabel.setText(
-                f"Manual {axis} flip applied and slice views refreshed."
-            )
+            self.step1HintLabel.setText(f"Manual {axis} flip applied and slice views refreshed.")
             if slicer:
                 slicer.util.showStatusMessage(f"Applied {axis} flip to volume and slice views", 4000)
         else:
@@ -2400,17 +2425,27 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onSetDentalLightboxLayout(self) -> None:
         volNode = self.volumeSelector.currentNode()
         registerAndSetDentalLightboxLayout(volumeNode=volNode)
+        if qt is not None and hasattr(qt, "QApplication"):
+            qt.QApplication.processEvents()
         self.enableLightboxCheckBox.setChecked(True)
-        if volNode and self.logic:
-            self.logic.reset_slice_views(volNode)
-            self._syncCursorToViews()
+        if self.logic:
+            if volNode:
+                self.logic.reset_slice_views(volNode)
+                self._syncCursorToViews()
+            else:
+                self.logic.refit_panoramic_view()
 
     def onSetDentalLayout(self) -> None:
         registerAndSetDentalLayout()
+        if qt is not None and hasattr(qt, "QApplication"):
+            qt.QApplication.processEvents()
         volNode = self.volumeSelector.currentNode()
-        if volNode and self.logic:
-            self.logic.reset_slice_views(volNode)
-            self._syncCursorToViews()
+        if self.logic:
+            if volNode:
+                self.logic.reset_slice_views(volNode)
+                self._syncCursorToViews()
+            else:
+                self.logic.refit_panoramic_view()
 
     def onSetStandardMpr(self) -> None:
         volNode = self.volumeSelector.currentNode()
@@ -2539,7 +2574,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
         if segNode is not None and self.logic is not None:
             self.logic.vr.set_jawbone_3d_opacity(segNode, jaw_opacity=float(val), tooth_opacity=1.0)
-            self.globalStatusLabel.setText(f"Jawbone 3D Opacity: {float(val) * 100:.0f}% (Teeth & Roots: 100%)")
+            self.globalStatusLabel.setText(
+                f"Jawbone 3D Opacity: {float(val) * 100:.0f}% (Teeth & Roots: 100%)"
+            )
 
     def onSurfaceSmoothingSliderChanged(self, _val: float) -> None:
         segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
@@ -3566,23 +3603,20 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             progress.show()
             qt.QApplication.processEvents()
 
-        isolation = (
-            self.logic.quadrant_vr_isolation(segNode, selected_fdis)
-            if (self.logic is not None and hasattr(self.logic, "quadrant_vr_isolation"))
-            else contextlib.nullcontext()
-        )
+        # The clinical film is grayscale: no 3D VR panel is captured, so the quadrant VR
+        # isolation pass (which only hides segments for that capture) is not needed.
         try:
-            with isolation:
-                html_file, pdf_file, slices_data = engine.generate_8x10_layout(
-                    volumeNode=volNode,
-                    segmentationNode=segNode,
-                    selected_fdis=selected_fdis,
-                    quadrant=quadrant,
-                    out_dir=out_dir,
-                    patient_name=p_name or "Anonymous",
-                    patient_id=p_id or "Anonymous",
-                    include_metadata=include_meta,
-                )
+            html_file, pdf_file, slices_data = engine.generate_8x10_layout(
+                volumeNode=volNode,
+                segmentationNode=segNode,
+                selected_fdis=selected_fdis,
+                quadrant=quadrant,
+                out_dir=out_dir,
+                patient_name=p_name or "Anonymous",
+                patient_id=p_id or "Anonymous",
+                include_metadata=include_meta,
+                grayscale=True,
+            )
         except Exception:
             logger.exception("8x10 print layout generation failed")
             if slicer:
@@ -3598,8 +3632,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         self._showPrintPreviewDialog(html_file, pdf_file, slices_data, quadrant, sorted(selected_fdis))
         self.globalStatusLabel.setText(
-            f"Saved print files to {out_dir}: {pdf_file.name}"
-            + (f", {png_file.name}" if png_file else "")
+            f"Saved print files to {out_dir}: {pdf_file.name}" + (f", {png_file.name}" if png_file else "")
         )
         if slicer:
             slicer.util.showStatusMessage(f"Generated 8×10″ Print Layout: {pdf_file}", 5000)
@@ -3802,13 +3835,17 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Update the Step 5 Radiologist/Dentist clinical callout card for `fdi`."""
         if getattr(self, "siteClinicalCalloutLabel", None) is None:
             return
-        target_fdi = fdi or self.activeToothFDI or (next(iter(self.selectedTeeth)) if self.selectedTeeth else None)
+        target_fdi = (
+            fdi or self.activeToothFDI or (next(iter(self.selectedTeeth)) if self.selectedTeeth else None)
+        )
         if not target_fdi:
             return
         row = self.treatmentPlanByFDI.get(int(target_fdi))
         if row is None and self.logic is not None and hasattr(self, "volumeSelector"):
             volNode = self.volumeSelector.currentNode()
-            segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+            segNode = (
+                self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+            )
             if volNode is not None:
                 row = self.logic.analyze_single_tooth(int(target_fdi), volNode, segmentationNode=segNode)
                 self.treatmentPlanByFDI[int(target_fdi)] = row
@@ -4060,9 +4097,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             card = qt.QFrame()
             card.setFrameShape(qt.QFrame.StyledPanel)
             border_css = "2px solid #38bdf8" if is_center else "1px solid #1e293b"
-            card.setStyleSheet(
-                f"background-color: #020617; border: {border_css}; border-radius: 5px;"
-            )
+            card.setStyleSheet(f"background-color: #020617; border: {border_css}; border-radius: 5px;")
             tip_parts = [f"Slice {idx + 1} ({off:+.1f} mm)"]
             if fdi_val is not None:
                 tip_parts[0] = f"FDI #{fdi_val} - " + tip_parts[0]
@@ -4163,7 +4198,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
         if not volNode or not segNode or not self.logic:
             if slicer:
-                slicer.util.warningDisplay("Select both a CBCT volume and a ToothFairy3 segmentation for CLI-C.")
+                slicer.util.warningDisplay(
+                    "Select both a CBCT volume and a ToothFairy3 segmentation for CLI-C."
+                )
             return
         items = self.logic.run_native_clic_impaction_analysis(volNode, segNode)
         if not items:
@@ -4311,7 +4348,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "PanoThicknessMm": f"{DEFAULTS['PanoThicknessMm']:.1f}",
             "PanoHeightMm": f"{DEFAULTS['PanoHeightMm']:.1f}",
             "PanoOffsetMm": "0.0",
-            "PanoProjectionMode": "Mean",
+            "PanoProjectionMode": DEFAULTS["PanoProjectionMode"],
             "PanoFlipVertical": "false",
             "ShowAxialTicks": "true",
             "OcclusalNormalX": "0.0",
@@ -4321,7 +4358,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "CanalSafetyMarginMm": "2.0",
             "IncludePatientMetadata": "false",
             "CheckpointPath": "",
-            "VRPreset": "CT-Dental-CBCT",
+            "VRPreset": "DentalSegmentator (Teeth & Bone)",
             "VRShiftHu": "0.0",
             "VRVisible": "false",
             "VRCropEnabled": "false",
@@ -4923,7 +4960,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                 bad_axes = inverted_axes_from_report(report)
                 if auto_fix_anatomy and bad_axes:
                     self.flip_orientation_axis(target_volume, segmentationNode, bad_axes)
-                    mask_fixed, is_5class_fixed = self._extract_combined_label_mask(target_volume, segmentationNode)
+                    mask_fixed, is_5class_fixed = self._extract_combined_label_mask(
+                        target_volume, segmentationNode
+                    )
                     if mask_fixed is not None:
                         report = verify_orientation(mask_fixed, result.affine, is_5class=is_5class_fixed)
                     report.notes.insert(
@@ -4947,6 +4986,43 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             )
         self.reset_slice_views(target_volume)
         return target_volume, report
+
+    def resample_segmentation_to_volume(self, volumeNode: Any, segmentationNode: Any) -> int:
+        """Re-grid every segment onto the volume's voxel grid in one step; returns segments updated.
+
+        A labelmap that was loaded at a different geometry than the CBCT silently makes every
+        cross-section measure the wrong voxels. This performs the nearest-neighbour resample
+        (no files, no dialogs) and refreshes the segmentation reference geometry.
+        """
+        if slicer is None or volumeNode is None or segmentationNode is None:
+            return 0
+        from CBCTPlannerLib.core.orientation import resample_mask_to_grid
+
+        arr, affine = self._volume_array_and_affine(volumeNode)
+        if arr is None or affine is None:
+            return 0
+        segmentation = segmentationNode.GetSegmentation()
+        if segmentation is None:
+            return 0
+        preloaded: dict[str, np.ndarray] = {}
+        for index in range(segmentation.GetNumberOfSegments()):
+            segment_id = segmentation.GetNthSegmentID(index)
+            seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segment_id, volumeNode)
+            if seg_arr is not None:
+                preloaded[segment_id] = np.asarray(seg_arr).copy()
+        if not preloaded:
+            return 0
+        target_shape = tuple(int(v) for v in arr.shape)
+        updated = self._apply_segment_ops(
+            segmentationNode,
+            volumeNode,
+            volumeNode,
+            lambda seg: resample_mask_to_grid(seg, affine, affine, target_shape),
+            preloaded_arrays=preloaded,
+        )
+        if hasattr(segmentationNode, "SetReferenceImageGeometryParameterFromVolumeNode"):
+            segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+        return int(updated)
 
     def detect_orientation_issues(self, volumeNode: Any, segmentationNode: Any = None) -> Any:
         """Run segmentation-based S-I / A-P / L-R verification without changing data."""
@@ -5023,6 +5099,23 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         self.reset_slice_views(volumeNode)
         return True
 
+    def refit_panoramic_view(self, slice_view_name: str = "Green") -> bool:
+        """Re-fit the active Panoramic volume inside `slice_view_name` after layout geometry changes."""
+        if slicer is None or not self.navigator.is_panoramic_shown_in_green():
+            return False
+        layoutManager = slicer.app.layoutManager() if getattr(slicer, "app", None) else None
+        if not layoutManager:
+            return False
+        sw = layoutManager.sliceWidget(slice_view_name)
+        comp = sw.mrmlSliceCompositeNode() if sw else None
+        bg_id = comp.GetBackgroundVolumeID() if comp else None
+        pano_node = slicer.mrmlScene.GetNodeByID(bg_id) if bg_id else None
+        if pano_node is None:
+            return False
+        return self.panoramic.display_panoramic_in_slice_view(
+            pano_node, slice_view_name=slice_view_name, force_fit=True
+        )
+
     def reset_slice_views(self, volumeNode: Any) -> None:
         """Reset Axial (Red), Sagittal/Cross-Section (Yellow*), and Coronal (Green) views without clobbering Panoramic."""
         if slicer is None or not volumeNode:
@@ -5040,6 +5133,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             ("Green", "Coronal"),
         ):
             if slice_name == "Green" and pano_shown:
+                self.refit_panoramic_view(slice_view_name="Green")
                 continue
             sw = layoutManager.sliceWidget(slice_name)
             if sw:
@@ -5580,6 +5674,18 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     write_mask = (seg_arr > 0) & (prec >= precedence_buf)
                     combined[write_mask] = label_val
                     precedence_buf[write_mask] = prec
+                elif seg_arr is not None:
+                    # A geometry mismatch used to drop the segment silently, which surfaced later as
+                    # "not measured". Name the segment and the geometry so the cause is actionable.
+                    seg_obj = segmentation.GetSegment(sid)
+                    logger.warning(
+                        "Segment '%s' (%s) skipped: labelmap shape %s does not match volume %s; "
+                        "re-export the segmentation in the selected volume's geometry.",
+                        (seg_obj.GetName() if seg_obj else ""),
+                        sid,
+                        tuple(getattr(seg_arr, "shape", ())),
+                        tuple(combined.shape),
+                    )
             except Exception:
                 logger.debug(
                     "Best-effort operation failed", exc_info=True
@@ -6135,20 +6241,26 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             return results
 
         tooth_list = [int(f) for f in (fdis or [fdi])]
-        if hasattr(engine, "expand_missing_edentulous_span"):
+        # A single active cross-section must stay a single render; only a multi-slice gallery is
+        # widened to cover a contiguous edentulous span (previously even 1 slice became 15 images).
+        if int(num_slices) > 1 and hasattr(engine, "expand_missing_edentulous_span"):
             try:
                 expanded_list, _missing_list = engine.expand_missing_edentulous_span(tooth_list)
                 if expanded_list:
                     tooth_list = sort_teeth_anatomically(expanded_list)
                     from CBCTPlannerLib.core.print_layout import slice_count_for_selection
+
                     rec_slices, rec_step = slice_count_for_selection(len(tooth_list))
                     num_slices = max(int(num_slices), int(rec_slices))
                     step_mm = float(rec_step)
             except Exception:
                 logger.debug("Missing-tooth span expansion skipped in slice series", exc_info=True)
 
-        is_mandible = int(str(tooth_list[0])[0]) in (3, 4)
+        is_mandible = is_mandibular_fdi(tooth_list[0])
         jaw_label = "Mandible" if is_mandible else "Maxilla"
+        # The measurement engine takes arch keys, not display names: "Mandible" was read as the
+        # maxilla, so every mandibular cross-section lost its bone and rendered no lines.
+        jaw_key = "lower" if is_mandible else "upper"
         arch = engine._arch_for_jaw(is_mandible)
         if arch is None:
             logger.error("Slice series needs a fitted arch for the %s", jaw_label)
@@ -6163,8 +6275,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             tooth_arcs[int(tooth)] = float(tooth_t) * float(arch.total_arc_length)
 
         # Ensure full quadrant or multi-tooth span never collapses onto a single tooth
-        if len(tooth_list) >= 2 and (not tooth_arcs or (max(tooth_arcs.values()) - min(tooth_arcs.values())) < 2.0):
-            jaw_key = "lower" if is_mandible else "upper"
+        if len(tooth_list) >= 2 and (
+            not tooth_arcs or (max(tooth_arcs.values()) - min(tooth_arcs.values())) < 2.0
+        ):
             site_map = compute_fdi_arc_positions_mm(
                 total_arc_length_mm=float(arch.total_arc_length),
                 jaw_type=jaw_key,
@@ -6184,24 +6297,41 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             t_center, _ = arch.find_closest_parameter(center)
             center_arc = float(t_center) * float(arch.total_arc_length)
 
-        if len(tooth_list) >= 2 and tooth_arcs and (max(tooth_arcs.values()) - min(tooth_arcs.values())) >= 1.5:
+        if (
+            len(tooth_list) >= 2
+            and tooth_arcs
+            and (max(tooth_arcs.values()) - min(tooth_arcs.values())) >= 1.5
+        ):
             pad = 2.5 if len(tooth_list) <= 3 else 2.0
-            arc_values = np.linspace(min(tooth_arcs.values()) - pad, max(tooth_arcs.values()) + pad, num_slices)
+            arc_values = np.linspace(
+                min(tooth_arcs.values()) - pad, max(tooth_arcs.values()) + pad, num_slices
+            )
         else:
             arc_values = center_arc + (np.arange(num_slices) - (num_slices - 1) / 2.0) * step_mm
 
-        for index, arc_mm in enumerate(arc_values):
+        measured = []
+        for arc_mm in arc_values:
             target_fdi = (
-                min(tooth_arcs, key=lambda t: abs(tooth_arcs[t] - float(arc_mm)))
-                if tooth_arcs
-                else int(fdi)
+                min(tooth_arcs, key=lambda t: abs(tooth_arcs[t] - float(arc_mm))) if tooth_arcs else int(fdi)
             )
             meas = None
             cs = None
             try:
-                meas, cs = engine.measure_at_arc_mm(jaw_label, float(arc_mm), fdi_hint=str(target_fdi))
+                meas, cs = engine.measure_at_arc_mm(jaw_key, float(arc_mm), fdi_hint=str(target_fdi))
             except Exception:
                 logger.exception("Cross-section measurement failed at %.2f mm", arc_mm)
+            measured.append((meas, cs, target_fdi, float(arc_mm)))
+
+        # Keep the osteotomy entry (alveolar crest) continuous: a crest that jumps between
+        # neighbouring slices is interpolated from its stable neighbours before rendering.
+        stabilize = getattr(engine, "stabilize_entry_points", None)
+        if callable(stabilize) and len(measured) >= 3:
+            try:
+                stabilize([(m, c) for m, c, _fdi, _arc in measured])
+            except Exception:
+                logger.debug("Entry-point stabilization skipped", exc_info=True)
+
+        for index, (meas, cs, target_fdi, arc_mm) in enumerate(measured):
             data_uri = ""
             if cs is not None:
                 render = render_cross_section(cs, meas, scale=3, show_masks=False, show_implant_guides=True)
@@ -6315,12 +6445,23 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
     # B21, B22 & F10: Report & CSV/JSON Export
     # ------------------------------------------------------------------
     @staticmethod
-    def _capture_slice_screenshot_base64(slice_name: str) -> Optional[str]:
+    def _capture_slice_screenshot_base64(
+        slice_name: str,
+        transparent_bg: Optional[bool] = None,
+        tight_crop: Optional[bool] = None,
+    ) -> Optional[str]:
         """B21: Capture slice view via `vtkWindowToImageFilter` on `renderWindow()`."""
-        return capture_slice_view_png_base64(slice_name)
+        is_green = str(slice_name) == "Green"
+        return capture_slice_view_png_base64(
+            slice_name,
+            transparent_bg=is_green if transparent_bg is None else bool(transparent_bg),
+            tight_crop=is_green if tight_crop is None else bool(tight_crop),
+        )
 
-    def capture_3d_view_png_base64(self, view_index: int = 0) -> Optional[str]:
-        """Capture the real 3D view (view index 0) as a PNG data URI."""
+    def capture_3d_view_png_base64(
+        self, view_index: int = 0, transparent_bg: bool = True, tight_crop: bool = True
+    ) -> Optional[str]:
+        """Capture the real 3D view (view index 0) as a tightly cropped RGBA transparent PNG data URI."""
         if slicer is None:
             return None
         try:
@@ -6331,32 +6472,13 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             if render_window is None:
                 logger.error("No 3D view is available for VR capture")
                 return None
-            view.forceRender()
-            import vtk
-
-            window_to_image = vtk.vtkWindowToImageFilter()
-            window_to_image.SetInput(render_window)
-            window_to_image.SetScale(1)
-            window_to_image.ReadFrontBufferOff()
-            window_to_image.Update()
-            writer = vtk.vtkPNGWriter()
-            writer.SetWriteToMemory(True)
-            writer.SetInputConnection(window_to_image.GetOutputPort())
-            writer.Write()
-            result = writer.GetResult()
-            if result is None or result.GetNumberOfTuples() == 0:
-                return None
-            try:
-                from vtk.util.numpy_support import vtk_to_numpy  # type: ignore
-
-                data = bytes(vtk_to_numpy(result))
-            except Exception:
-                data = bytes(result.GetValue(i) for i in range(result.GetNumberOfValues()))
-            if not data:
-                return None
-            import base64 as _b64
-
-            return "data:image/png;base64," + _b64.b64encode(data).decode("ascii")
+            return capture_vtk_render_window_png_base64(
+                render_window,
+                force_render_fn=getattr(view, "forceRender", None),
+                transparent_bg=bool(transparent_bg),
+                tight_crop=bool(tight_crop),
+                pad_frac=0.02,
+            )
         except Exception:
             logger.exception("3D VR capture failed")
             return None
@@ -6397,7 +6519,9 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     keep = int(str(fdi)[0]) in quadrants
                 else:
                     name = (segment.GetName() or "").lower()
-                    keep = any(word in name for word in ("jaw", "canal", "nerve", "mandible", "maxilla", "teeth"))
+                    keep = any(
+                        word in name for word in ("jaw", "canal", "nerve", "mandible", "maxilla", "teeth")
+                    )
                 _set_vis(segment_id, keep)
             yield
         finally:
@@ -6627,6 +6751,23 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         )
         pdf_path = html_path.with_suffix(".pdf")
         export_html_to_pdf(html_path.read_text(encoding="utf-8"), pdf_path)
+
+        # Export the preflight checklist and the per-site "why nothing was measured" reasons
+        # next to the report so a withheld metric can be explained without reopening the case.
+        try:
+            from CBCTPlannerLib.core.diagnostics import write_diagnostics_text
+
+            pNode = self.getParameterNode() if slicer is not None else None
+            segNode = pNode.GetNodeReference("Segmentation") if pNode is not None else None
+            if segNode is not None and volumeNode is not None:
+                engine = self._get_or_build_measurement_engine(volumeNode, segNode)
+                if engine is not None:
+                    fdis = [int(row["fdi"]) for row in plan_data if row.get("fdi") is not None]
+                    write_diagnostics_text(
+                        engine, Path(html_path).with_name(Path(html_path).stem + "_diagnostics.txt"), fdis
+                    )
+        except Exception:
+            logger.debug("Diagnostics export skipped", exc_info=True)
         return html_path, pdf_path
 
     def generate_printable_report(

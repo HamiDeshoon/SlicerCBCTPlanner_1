@@ -28,11 +28,11 @@ directly in Python/NumPy so they work out-of-the-box in 3D Slicer without requir
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 try:
@@ -42,11 +42,8 @@ except ImportError:
 
 from .core.labels import (
     DENTALSEGMENTATOR_CANAL_ID,
-    DENTALSEGMENTATOR_LOWER_TEETH_ID,
     DENTALSEGMENTATOR_MANDIBLE_ID,
     DENTALSEGMENTATOR_MAXILLA_ID,
-    DENTALSEGMENTATOR_UPPER_TEETH_ID,
-    FDI_TO_TOOTH_ID,
     LEFT_IAN_ID,
     LOWER_JAW_ID,
     RIGHT_IAN_ID,
@@ -159,8 +156,12 @@ class AutomatedDentalToolsEngine:
                 description=desc,
             )
 
-        mand_ids = [DENTALSEGMENTATOR_MANDIBLE_ID] if is_5class else [LOWER_JAW_ID, DENTALSEGMENTATOR_MANDIBLE_ID]
-        max_ids = [DENTALSEGMENTATOR_MAXILLA_ID] if is_5class else [UPPER_JAW_ID, DENTALSEGMENTATOR_MAXILLA_ID]
+        mand_ids = (
+            [DENTALSEGMENTATOR_MANDIBLE_ID] if is_5class else [LOWER_JAW_ID, DENTALSEGMENTATOR_MANDIBLE_ID]
+        )
+        max_ids = (
+            [DENTALSEGMENTATOR_MAXILLA_ID] if is_5class else [UPPER_JAW_ID, DENTALSEGMENTATOR_MAXILLA_ID]
+        )
         canal_ids = (
             [DENTALSEGMENTATOR_CANAL_ID]
             if is_5class
@@ -170,9 +171,7 @@ class AutomatedDentalToolsEngine:
         mand_pts = (
             self._sample_mask_world_pts(volume, mask, mand_ids) if mask is not None else np.empty((0, 3))
         )
-        max_pts = (
-            self._sample_mask_world_pts(volume, mask, max_ids) if mask is not None else np.empty((0, 3))
-        )
+        max_pts = self._sample_mask_world_pts(volume, mask, max_ids) if mask is not None else np.empty((0, 3))
         canal_pts = (
             self._sample_mask_world_pts(volume, mask, canal_ids) if mask is not None else np.empty((0, 3))
         )
@@ -362,7 +361,13 @@ class AutomatedDentalToolsEngine:
 
         # 1. Estimate Right-to-Left (+X) axis from bilateral landmark pairs
         rl_vectors: List[np.ndarray] = []
-        for r_key, l_key in (("Co_R", "Co_L"), ("Go_R", "Go_L"), ("Or_R", "Or_L"), ("U6_R", "U6_L"), ("L6_R", "L6_L")):
+        for r_key, l_key in (
+            ("Co_R", "Co_L"),
+            ("Go_R", "Go_L"),
+            ("Or_R", "Or_L"),
+            ("U6_R", "U6_L"),
+            ("L6_R", "L6_L"),
+        ):
             if r_key in lms and l_key in lms:
                 vec = np.asarray(lms[r_key].position_ras, dtype=np.float64) - np.asarray(
                     lms[l_key].position_ras, dtype=np.float64
@@ -388,9 +393,7 @@ class AutomatedDentalToolsEngine:
                 ap_vectors.append(v_pal / float(np.linalg.norm(v_pal)))
                 used.extend(["ANS", "PNS"])
         if "Go_R" in lms and "Go_L" in lms and "Gn" in lms:
-            go_mid = 0.5 * (
-                np.asarray(lms["Go_R"].position_ras) + np.asarray(lms["Go_L"].position_ras)
-            )
+            go_mid = 0.5 * (np.asarray(lms["Go_R"].position_ras) + np.asarray(lms["Go_L"].position_ras))
             v_mand = np.asarray(lms["Gn"].position_ras) - go_mid
             v_mand[2] = 0.0
             if float(np.linalg.norm(v_mand)) > 3.0:
@@ -608,7 +611,11 @@ class AutomatedDentalToolsEngine:
         r_vol_cm3: Optional[float] = None
         l_vol_cm3: Optional[float] = None
         if mask is not None:
-            mand_ids = [DENTALSEGMENTATOR_MANDIBLE_ID] if is_5class else [LOWER_JAW_ID, DENTALSEGMENTATOR_MANDIBLE_ID]
+            mand_ids = (
+                [DENTALSEGMENTATOR_MANDIBLE_ID]
+                if is_5class
+                else [LOWER_JAW_ID, DENTALSEGMENTATOR_MANDIBLE_ID]
+            )
             zyx = np.where(np.isin(mask, mand_ids))
             if len(zyx[0]) > 0:
                 sz, sy, sx = volume.spacing
@@ -668,9 +675,7 @@ class AutomatedDentalToolsEngine:
 
         if len(zyx[0]) == 0:
             c0 = volume.voxel_to_world([0, 0, 0])
-            c1 = volume.voxel_to_world(
-                [volume.shape[2] - 1, volume.shape[1] - 1, volume.shape[0] - 1]
-            )
+            c1 = volume.voxel_to_world([volume.shape[2] - 1, volume.shape[1] - 1, volume.shape[0] - 1])
             return np.minimum(c0, c1), np.maximum(c0, c1)
 
         z0, z1 = int(np.min(zyx[0])), int(np.max(zyx[0]))

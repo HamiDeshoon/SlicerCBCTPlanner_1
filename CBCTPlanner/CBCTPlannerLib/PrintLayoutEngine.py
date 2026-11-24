@@ -11,7 +11,9 @@ Generates standard 8x10 inch printable film layouts (HTML, PDF & 300 DPI PNG) co
        - Widths at >= 5 mm depth W5/W6/W9 (orange horizontal line, RGB 255,120,40)
        - Mandibular canal / nerve safety margin (Red circular boundary)
   3. 3D Volume Rendering (VR) / Anatomical Quadrant Projection isolating the anatomical classes
-     for the selected quadrant (jawbone, vivid teeth & roots, and inferior alveolar nerve canal).
+     for the selected quadrant (jawbone, vivid teeth & roots, and inferior alveolar nerve canal),
+     drawn only in colour mode: `generate_8x10_layout(...)` defaults to `grayscale=True`, a plain
+     black-and-white film without the VR panel or colour key (`grayscale=False` restores them).
 Multi-quadrant selections produce one page per quadrant, footered "Page N of M".
 """
 
@@ -46,11 +48,13 @@ except ImportError:
     ImageDraw = None
     ImageFont = None
 
-from .core.labels import tooth_mask_from_labels
+from .core.diagnostics import calibration_stamp, summarize_span_worst_case
 from .core.measurements import withheld_badge
 from .core_print_render import (
     _load_font,
-    hu_window_to_rgb,
+    _resize_rgba_clean,
+    is_estimated_provenance,
+    render_3d_mip_card,
     render_cross_section,
     render_panoramic_strip,
     unavailable_tile,
@@ -80,6 +84,8 @@ class CrossSectionSliceSpec:
     mean_hu: Optional[float] = None
     is_mandible: bool = True
     image_data_uri: str = ""
+    # Height was interpolated/estimated rather than read from this slice's label boundary.
+    height_estimated: bool = False
     # Why a tile withholds H/W (empty when every metric was measured).
     withheld_reason: Optional[str] = None
     _pil_image: Optional[Any] = field(default=None, repr=False)
@@ -102,7 +108,10 @@ def _data_uri_to_image(uri: str) -> Optional[Any]:
         return None
     try:
         raw = base64.b64decode(uri.split(",", 1)[1])
-        return Image.open(io.BytesIO(raw)).convert("RGB")
+        img = Image.open(io.BytesIO(raw))
+        if img.mode in ("RGBA", "LA") or ("transparency" in img.info):
+            return img.convert("RGBA")
+        return img.convert("RGB")
     except Exception:
         logger.exception("Could not decode layout image")
         return None
@@ -115,7 +124,7 @@ def _paste_contain(
     *,
     bg: Tuple[int, int, int] = (2, 6, 23),
 ) -> None:
-    """Paste ``img`` centered inside ``box=(x, y, w, h)`` while preserving aspect ratio."""
+    """Paste ``img`` centered inside ``box=(x, y, w, h)`` while preserving aspect ratio and alpha."""
     if img is None or Image is None:
         return
     x, y, w, h = box
@@ -127,10 +136,19 @@ def _paste_contain(
     nw = max(1, int(round(img.width * scale)))
     nh = max(1, int(round(img.height * scale)))
     resampling = getattr(Image, "Resampling", Image)
-    resized = img.resize((nw, nh), getattr(resampling, "LANCZOS", Image.BILINEAR))
+    resized = _resize_rgba_clean(img, (nw, nh), getattr(resampling, "LANCZOS", Image.BILINEAR))
     ox = x + (w - nw) // 2
     oy = y + (h - nh) // 2
-    canvas.paste(resized, (ox, oy))
+    if resized.mode == "RGBA":
+        if canvas.mode == "RGBA":
+            overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+            overlay.paste(resized, (ox, oy))
+            composited = Image.alpha_composite(canvas, overlay)
+            canvas.paste(composited)
+        else:
+            canvas.paste(resized, (ox, oy), mask=resized.split()[3])
+    else:
+        canvas.paste(resized, (ox, oy))
 
 
 class PrintLayoutEngine:
@@ -166,8 +184,13 @@ class PrintLayoutEngine:
         include_metadata: bool = False,
         pano_b64: Optional[str] = None,
         vr_b64: Optional[str] = None,
+        grayscale: bool = True,
     ) -> Tuple[Path, Path, List[CrossSectionSliceSpec]]:
-        """Generate genuine 8x10 inch film pages (HTML view + 300 DPI PDF + 300 DPI PNG)."""
+        """Generate genuine 8x10 inch film pages (HTML view + 300 DPI PDF + 300 DPI PNG).
+
+        ``grayscale=True`` (the clinical film default) prints a plain black-and-white layout:
+        no implant/root/safety overlays, no colour key and no 3D VR panel.
+        """
         from .core.labels import sort_teeth_anatomically
         from .core.print_layout import slice_count_for_selection
 
@@ -214,6 +237,8 @@ class PrintLayoutEngine:
         for q, q_fdis in groups:
             is_mandible = q in (3, 4)
             jaw_label = "Mandible" if is_mandible else "Maxilla"
+            # Canonical arch key for the engine; `jaw_label` is only the printable display name.
+            jaw_key = "lower" if is_mandible else "upper"
             n_slices, step_mm = slice_count_for_selection(len(q_fdis))
             arcs = self._tooth_arcs(engine, q_fdis)
             if not arcs:
@@ -223,6 +248,7 @@ class PrintLayoutEngine:
                 arch = engine._arch_for_jaw(is_mandible) if hasattr(engine, "_arch_for_jaw") else None
                 if arch is not None:
                     from .core.arch_detector import compute_fdi_arc_positions_mm
+
                     jaw_key = "lower" if is_mandible else "upper"
                     site_map = compute_fdi_arc_positions_mm(
                         total_arc_length_mm=float(arch.total_arc_length),
@@ -241,20 +267,40 @@ class PrintLayoutEngine:
                 pad = 2.5 if len(q_fdis) <= 3 else 2.0
                 arc_values = np.linspace(first_arc - pad, last_arc + pad, n_slices)
 
-            specs: List[CrossSectionSliceSpec] = []
-            for s_idx, arc_mm in enumerate(arc_values):
+            measured: List[Tuple[Any, Any, int, float]] = []
+            for arc_mm in arc_values:
                 target_fdi = min(q_fdis, key=lambda fdi: abs(arcs.get(fdi, 0.0) - arc_mm))
                 meas = None
                 cs = None
                 try:
-                    meas, cs = engine.measure_at_arc_mm(jaw_label, float(arc_mm), fdi_hint=str(target_fdi))
+                    meas, cs = engine.measure_at_arc_mm(jaw_key, float(arc_mm), fdi_hint=str(target_fdi))
                 except Exception:
                     logger.exception(
                         "Cross-section measurement failed at %.2f mm (FDI %s)", arc_mm, target_fdi
                     )
+                measured.append((meas, cs, target_fdi, float(arc_mm)))
+
+            # The osteotomy entry must not jump between adjacent cuts: interpolate a crest
+            # that differs from both neighbours by more than the engine's jump limit.
+            stabilize = getattr(engine, "stabilize_entry_points", None)
+            if callable(stabilize) and len(measured) >= 3:
+                try:
+                    stabilize([(m, c) for m, c, _fdi, _arc in measured])
+                except Exception:
+                    logger.debug("Entry-point stabilization skipped", exc_info=True)
+
+            specs: List[CrossSectionSliceSpec] = []
+            for s_idx, (meas, cs, target_fdi, arc_mm) in enumerate(measured):
                 pil_tile = None
                 if cs is not None:
-                    render = render_cross_section(cs, meas, scale=3, show_masks=False, show_implant_guides=True)
+                    render = render_cross_section(
+                        cs,
+                        meas,
+                        scale=3,
+                        show_masks=False,
+                        show_implant_guides=not grayscale,
+                        monochrome=grayscale,
+                    )
                     if render.available and render.image is not None:
                         pil_tile = render.image
                         data_uri = _image_to_data_uri(pil_tile)
@@ -267,12 +313,23 @@ class PrintLayoutEngine:
                 if meas and getattr(meas, "misch_density_class", None):
                     misch_short = str(meas.misch_density_class).split()[0]
 
+                height_estimated = is_estimated_provenance(
+                    getattr(meas, "provenance", None)
+                    if meas is not None
+                    else getattr(
+                        (getattr(cs, "measurements", None) or {}).get("available_bone_height"),
+                        "provenance",
+                        None,
+                    )
+                )
+
                 spec = CrossSectionSliceSpec(
                     slice_index=s_idx + 1,
                     total_slices=n_slices,
                     offset_mm=float(arc_mm - center_arc),
                     fdi=target_fdi,
                     height_mm=meas.bone_height_mm if meas else None,
+                    height_estimated=height_estimated,
                     crest_width_mm=meas.crest_width_mm if meas else None,
                     width_3mm=meas.bone_width_at_depths_mm.get(3.0)
                     if (meas and meas.bone_width_at_depths_mm)
@@ -296,7 +353,8 @@ class PrintLayoutEngine:
                 all_specs.append(spec)
 
             hi_indices = [
-                i for i, s in enumerate(specs)
+                i
+                for i, s in enumerate(specs)
                 if (int(s.fdi) in missing_fdis_set or abs(float(s.offset_mm)) < 0.05)
             ]
             pano_uri = pano_b64 or self._pano_strip_uri(
@@ -305,13 +363,21 @@ class PrintLayoutEngine:
                 engine=engine,
                 is_mandible=is_mandible,
                 highlight_indices=hi_indices,
+                monochrome=grayscale,
             )
             if not pano_uri:
                 pano_uri = _unavailable_data_uri("Panoramic")
 
-            vr_uri = vr_b64 or self._vr_capture(engine=engine, quadrant=q)
-            if not vr_uri:
-                vr_uri = _unavailable_data_uri("VR")
+            vr_uri = ""
+            if not grayscale:
+                vr_uri = vr_b64 or self._vr_capture(engine=engine, quadrant=q)
+                if not vr_uri:
+                    vr_uri = _unavailable_data_uri("VR")
+            elif vr_b64:
+                # Never drop a caller-supplied panel silently: say how to get it back.
+                logger.info(
+                    "Grayscale film omits the supplied 3D VR panel; pass grayscale=False to include it"
+                )
 
             page_records.append(
                 {
@@ -321,6 +387,10 @@ class PrintLayoutEngine:
                     "slices": specs,
                     "pano_b64": pano_uri,
                     "vr_b64": vr_uri,
+                    "span_summary": summarize_span_worst_case(
+                        [m for m, _cs, _f, _a in measured if m is not None]
+                    ),
+                    "calibration": calibration_stamp(getattr(engine, "volume", None)),
                 }
             )
 
@@ -338,6 +408,7 @@ class PrintLayoutEngine:
                 patient_id=patient_id if include_metadata else "Anonymous",
                 page_number=index + 1,
                 total_pages=total_pages,
+                grayscale=grayscale,
             )
             for index, rec in enumerate(page_records)
         ]
@@ -350,6 +421,7 @@ class PrintLayoutEngine:
                 patient_name=patient_name if include_metadata else "Anonymous",
                 page_number=index + 1,
                 total_pages=len(page_records),
+                grayscale=grayscale,
             )
             if page is not None:
                 pages.append(page)
@@ -398,30 +470,53 @@ class PrintLayoutEngine:
         engine: Any = None,
         is_mandible: bool = True,
         highlight_indices: Optional[Sequence[int]] = None,
+        monochrome: bool = False,
     ) -> Optional[str]:
         """Render the panoramic strip from `PanoramicVolume`, or synthesize it in-process from `engine`."""
-        # 1. Try existing Slicer PanoramicVolume node first
-        if self.logic is not None and slicer is not None:
+        pNode = None
+        if self.logic is not None and hasattr(self.logic, "getParameterNode"):
             try:
-                pNode = self.logic.getParameterNode() if hasattr(self.logic, "getParameterNode") else None
+                pNode = self.logic.getParameterNode()
+            except Exception:
+                pNode = None
+
+        proj_mode = "RaySum"
+        if pNode is not None and hasattr(pNode, "GetParameter"):
+            raw_mode = str(pNode.GetParameter("PanoProjectionMode") or "").strip()
+            if raw_mode:
+                proj_mode = raw_mode
+
+        pano_target = (2256, 552)
+
+        # 1. Try existing Slicer PanoramicVolume node first
+        if pNode is not None and slicer is not None:
+            try:
                 panoNode = (
-                    pNode.GetNodeReference("PanoramicVolume")
-                    if (pNode and hasattr(pNode, "GetNodeReference"))
-                    else None
+                    pNode.GetNodeReference("PanoramicVolume") if hasattr(pNode, "GetNodeReference") else None
                 )
                 if panoNode is not None:
                     arr = slicer.util.arrayFromVolume(panoNode)
-                    spacing = float(pNode.GetParameter("PanoSpacingMm") or 0.5) if pNode else 0.5
+                    attr_sp = (
+                        panoNode.GetAttribute("CBCTPlanner.SpacingMm")
+                        if hasattr(panoNode, "GetAttribute")
+                        else None
+                    )
+                    spacing = float(attr_sp or pNode.GetParameter("PanoSpacingMm") or 0.5)
+                    spacing = max(1e-3, spacing)
                     render = render_panoramic_strip(
                         arr,
-                        column_spacing_mm=max(1e-3, spacing),
+                        column_spacing_mm=spacing,
+                        row_spacing_mm=spacing,
                         tick_arcs_mm=arcs,
                         labels=[str(label) for label in labels],
-                        strip_height=460,
-                        scale=2,
+                        target_size=pano_target,
                         flip_vertical=True,
                         show_cross_section_lines=True,
                         highlight_indices=highlight_indices,
+                        monochrome=monochrome,
+                        transparent_bg=True,
+                        crop_empty_vertical=True,
+                        preserve_aspect=True,
                     )
                     if render.available and render.image is not None:
                         return _image_to_data_uri(render.image)
@@ -451,28 +546,33 @@ class PrintLayoutEngine:
                     if np.any((binormals @ up) < 0):
                         binormals[(binormals @ up) < 0] *= -1.0
 
+                    synth_spacing = 0.5
                     pano_arr = PanoramicCurveLogic.sample_panoramic_slab_array(
                         cbct_volume=vol,
                         pts_arch=pts_dense,
                         tangents=tangents,
                         normals=normals,
                         binormals=binormals,
-                        slab_thickness_mm=20.0,
-                        height_mm=70.0,
-                        spacing_mm=0.75,
-                        projection_mode="Mean",
+                        slab_thickness_mm=22.0,
+                        height_mm=80.0,
+                        spacing_mm=synth_spacing,
+                        projection_mode=proj_mode,
                         flip_vertical=False,
                     )
                     render = render_panoramic_strip(
                         pano_arr,
-                        column_spacing_mm=0.75,
+                        column_spacing_mm=synth_spacing,
+                        row_spacing_mm=synth_spacing,
                         tick_arcs_mm=arcs,
                         labels=[str(label) for label in labels],
-                        strip_height=460,
-                        scale=2,
+                        target_size=pano_target,
                         flip_vertical=True,
                         show_cross_section_lines=True,
                         highlight_indices=highlight_indices,
+                        monochrome=monochrome,
+                        transparent_bg=True,
+                        crop_empty_vertical=True,
+                        preserve_aspect=True,
                     )
                     if render.available and render.image is not None:
                         return _image_to_data_uri(render.image)
@@ -494,30 +594,20 @@ class PrintLayoutEngine:
         # Fallback: synthesize a 3D vivid MIP / segmentation projection card from engine.volume & mask
         vol = getattr(engine, "volume", None) if engine is not None else None
         mask = getattr(engine, "mask", None) if engine is not None else None
-        if vol is not None and Image is not None and getattr(vol, "image", None) is not None:
+        if vol is not None and getattr(vol, "image", None) is not None:
             try:
-                img_3d = np.asarray(vol.image, dtype=np.float32)
-                # Coronal MIP projection (Z, X)
-                mip = np.max(img_3d, axis=1)[::-1, :]
-                gray = hu_window_to_rgb(mip)
-                rgb = np.repeat(gray[:, :, None], 3, axis=2).astype(np.float32)
-                if mask is not None and mask.shape == img_3d.shape:
-                    m_proj = np.max(mask, axis=1)[::-1, :]
-                    teeth_m = tooth_mask_from_labels(m_proj)
-                    rgb[teeth_m] = 0.35 * rgb[teeth_m] + 0.65 * np.array([255.0, 220.0, 120.0])
-                    if np.any(m_proj == 5):
-                        rgb[m_proj == 5] = np.array([255.0, 60.0, 50.0])
-                pil_img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), mode="RGB").resize(
-                    (400, 220), Image.BILINEAR
+                spacing = getattr(vol, "spacing", (1.0, 1.0, 1.0))
+                render = render_3d_mip_card(
+                    vol.image,
+                    mask=mask,
+                    spacing_zyx=spacing,
+                    quadrant=quadrant,
+                    target_size=(772, 272),
+                    transparent_bg=True,
+                    show_title=True,
                 )
-                draw = ImageDraw.Draw(pil_img)
-                draw.text(
-                    (8, 6),
-                    f"3D Vivid MIP Projection (Q{quadrant})",
-                    fill=(56, 189, 248),
-                    font=_load_font(13, bold=True),
-                )
-                return _image_to_data_uri(pil_img)
+                if render.available and render.image is not None:
+                    return _image_to_data_uri(render.image)
             except Exception:
                 logger.debug("Fallback MIP projection card failed", exc_info=True)
         return None
@@ -531,15 +621,41 @@ class PrintLayoutEngine:
         joined = '<div class="print-page" style="page-break-after: always;">' + bodies[0] + "</div>"
         for body in bodies[1:]:
             joined += '<div class="print-page" style="page-break-before: always;">' + body + "</div>"
-        return "<!DOCTYPE html>\n<html lang=\"en\">\n<head>" + head + "</head><body>" + joined + "</body></html>"
+        return (
+            '<!DOCTYPE html>\n<html lang="en">\n<head>' + head + "</head><body>" + joined + "</body></html>"
+        )
 
     def _compose_page_image(
-        self, record: dict, *, patient_name: str, page_number: int, total_pages: int
+        self,
+        record: dict,
+        *,
+        patient_name: str,
+        page_number: int,
+        total_pages: int,
+        grayscale: bool = True,
     ) -> Optional[Any]:
         if Image is None:
             return None
         page_w, page_h = 2400, 3000
-        page = Image.new("RGB", (page_w, page_h), (2, 4, 9))
+        if grayscale:
+            bg, panel, line_col, text, muted = (
+                (255, 255, 255),
+                (255, 255, 255),
+                (0, 0, 0),
+                (0, 0, 0),
+                (70, 70, 70),
+            )
+            hdr_bg, center_hdr_bg, center_border = (232, 232, 232), (198, 198, 198), (0, 0, 0)
+        else:
+            bg, panel, line_col, text, muted = (
+                (2, 4, 9),
+                (2, 6, 23),
+                (51, 65, 85),
+                (226, 232, 240),
+                (148, 163, 184),
+            )
+            hdr_bg, center_hdr_bg, center_border = (15, 23, 42), (12, 74, 110), (56, 189, 248)
+        page = Image.new("RGB", (page_w, page_h), bg)
         draw = ImageDraw.Draw(page)
         margin = 68
 
@@ -553,33 +669,37 @@ class PrintLayoutEngine:
         font_disc = _load_font(15, bold=False)
 
         # Header band
-        draw.text((margin, 34), "CBCT Dental Planner  |  8x10\" Clinical Film", fill=(56, 189, 248), font=font_title)
+        draw.text((margin, 34), 'CBCT Dental Planner  |  8x10" Clinical Film', fill=line_col, font=font_title)
         meta_line = (
             f"Quadrant {record['quadrant']} ({record['jaw_label']})   |   Teeth: "
             + ", ".join(f"#{fdi}" for fdi in record["fdis"])
             + f"   |   Patient: {patient_name}"
         )
-        draw.text((margin, 84), meta_line, fill=(226, 232, 240), font=font_sub)
-        draw.line([(margin, 120), (page_w - margin, 120)], fill=(56, 189, 248), width=3)
+        draw.text((margin, 84), meta_line, fill=text, font=font_sub)
+        draw.text((margin, 112), record.get("calibration", ""), fill=muted, font=font_disc)
+        draw.line([(margin, 136), (page_w - margin, 136)], fill=line_col, width=2)
 
         # Panoramic reference strip (aspect-ratio preserved)
-        pano_top = 136
-        pano_h = 580
+        pano_top = 150
+        pano_h = 560
         pano_w = page_w - 2 * margin
-        draw.rectangle([(margin, pano_top), (margin + pano_w, pano_top + pano_h)], fill=(2, 6, 23), outline=(51, 65, 85), width=2)
+        draw.rectangle(
+            [(margin, pano_top), (margin + pano_w, pano_top + pano_h)],
+            fill=panel,
+            outline=line_col,
+            width=1,
+        )
         pano = _data_uri_to_image(record["pano_b64"])
         if pano is not None:
-            _paste_contain(page, pano, (margin + 4, pano_top + 4, pano_w - 8, pano_h - 8), bg=(2, 6, 23))
+            _paste_contain(page, pano, (margin + 4, pano_top + 4, pano_w - 8, pano_h - 8), bg=panel)
 
         # Cross-section grid (aspect-ratio preserved so 10 mm scale bars stay true)
         specs: List[CrossSectionSliceSpec] = record["slices"]
         cols = 5 if len(specs) <= 15 else (7 if len(specs) <= 21 else 9)
         rows = int(math.ceil(len(specs) / cols))
-        grid_top = 736
+        grid_top = 730
         footer_top = 2855
-        key_h = 280
-        key_top = footer_top - key_h - 18
-        grid_bottom = key_top - 20
+        grid_bottom = footer_top - 20
         gap = 12
         cell_w = (page_w - 2 * margin - (cols - 1) * gap) // cols
         cell_h = (grid_bottom - grid_top - (rows - 1) * gap) // max(1, rows)
@@ -593,20 +713,28 @@ class PrintLayoutEngine:
             x = margin + col * (cell_w + gap)
             y = grid_top + row * (cell_h + gap)
             is_center = abs(float(spec.offset_mm)) < 0.05
-            border_col = (56, 189, 248) if is_center else (51, 65, 85)
+            card_border = center_border if is_center else line_col
             border_w = 3 if is_center else 1
-            draw.rectangle([(x, y), (x + cell_w, y + cell_h)], fill=(2, 6, 23), outline=border_col, width=border_w)
+            draw.rectangle(
+                [(x, y), (x + cell_w, y + cell_h)], fill=panel, outline=card_border, width=border_w
+            )
 
             # Card header
-            hdr_bg = (12, 74, 110) if is_center else (15, 23, 42)
-            draw.rectangle([(x + 1, y + 1), (x + cell_w - 1, y + hdr_h)], fill=hdr_bg)
+            draw.rectangle(
+                [(x + 1, y + 1), (x + cell_w - 1, y + hdr_h)],
+                fill=center_hdr_bg if is_center else hdr_bg,
+            )
             hdr_txt = f"#{spec.fdi} S{spec.slice_index} ({spec.offset_mm:+.1f}mm)"
-            draw.text((x + 6, y + 5), hdr_txt, fill=(125, 211, 252) if not is_center else (255, 255, 255), font=font_card_hdr)
+            draw.text((x + 6, y + 5), hdr_txt, fill=text, font=font_card_hdr)
 
             # Aspect-ratio-preserving cross-section image
-            image = spec._pil_image if getattr(spec, '_pil_image', None) is not None else _data_uri_to_image(spec.image_data_uri)
+            image = (
+                spec._pil_image
+                if getattr(spec, "_pil_image", None) is not None
+                else _data_uri_to_image(spec.image_data_uri)
+            )
             if image is not None:
-                _paste_contain(page, image, (x + 2, y + hdr_h + 2, cell_w - 4, img_box_h), bg=(2, 6, 23))
+                _paste_contain(page, image, (x + 2, y + hdr_h + 2, cell_w - 4, img_box_h), bg=panel)
 
             # Card footer (2 compact lines: H/W0 + W3/W5 or withheld badge)
             fy = y + hdr_h + img_box_h + 4
@@ -614,49 +742,82 @@ class PrintLayoutEngine:
             w0_txt = f"{spec.crest_width_mm:.1f}" if spec.crest_width_mm is not None else "--"
             w3_txt = f"{spec.width_3mm:.1f}" if spec.width_3mm is not None else "--"
             w5_txt = f"{spec.width_5mm:.1f}" if spec.width_5mm is not None else "--"
-            draw.text((x + 6, fy), f"H:{h_txt}  W0:{w0_txt}", fill=(248, 250, 252), font=font_card_ftr)
+            h_lbl = "H~" if spec.height_estimated else "H"
+            draw.text((x + 6, fy), f"{h_lbl}:{h_txt}  W0:{w0_txt}", fill=text, font=font_card_ftr)
             badge = withheld_badge(spec.withheld_reason)
             if badge:
-                draw.text((x + 6, fy + 20), f"W3:{w3_txt} [{badge}]", fill=(251, 191, 36), font=font_card_ftr)
+                draw.text((x + 6, fy + 20), f"W3:{w3_txt} [{badge}]", fill=muted, font=font_card_ftr)
             else:
-                ian_part = f" IAN:{spec.nerve_dist_mm:.1f}" if spec.nerve_dist_mm is not None else f" W5:{w5_txt}"
-                draw.text((x + 6, fy + 20), f"W3:{w3_txt}{ian_part}", fill=(148, 163, 184), font=font_card_ftr)
+                ian_part = (
+                    f" IAN:{spec.nerve_dist_mm:.1f}" if spec.nerve_dist_mm is not None else f" W5:{w5_txt}"
+                )
+                draw.text((x + 6, fy + 20), f"W3:{w3_txt}{ian_part}", fill=muted, font=font_card_ftr)
 
-        # Bottom clinical key + 3D VR panel
-        vr_w = 780
-        key_w = page_w - 2 * margin - vr_w - 20
-        draw.rectangle([(margin, key_top), (margin + key_w, key_top + key_h)], fill=(2, 6, 23), outline=(51, 65, 85), width=2)
-        draw.text((margin + 18, key_top + 14), "Measurement Key & Overlay Legend", fill=(56, 189, 248), font=font_key_b)
+        if not grayscale:
+            # Optional colour review page: compact key + 3D VR panel.
+            vr_w = 780
+            key_h = 280
+            key_top = footer_top - key_h - 18
+            key_w = page_w - 2 * margin - vr_w - 20
+            draw.rectangle(
+                [(margin, key_top), (margin + key_w, key_top + key_h)],
+                fill=panel,
+                outline=line_col,
+                width=2,
+            )
+            draw.text(
+                (margin + 18, key_top + 14),
+                "Measurement Key & Overlay Legend",
+                fill=(56, 189, 248),
+                font=font_key_b,
+            )
+            legend_items = [
+                ((34, 197, 94), "H (mm): green caliper from the crest entry to the canal / sinus / jaw end"),
+                ((0, 220, 255), "W0 (mm): crestal width at the osteotomy entry point"),
+                ((255, 180, 0), "W3 / W5 (mm): gold (3 mm) & orange (5 mm) buccolingual ridge widths"),
+                ((255, 60, 60), "IAN / SINUS: red nerve ring & magenta sinus floor"),
+            ]
+            ly = key_top + 54
+            for rgb_col, desc in legend_items:
+                draw.rectangle([(margin + 18, ly + 4), (margin + 36, ly + 22)], fill=rgb_col)
+                draw.text((margin + 48, ly), desc, fill=text, font=font_key)
+                ly += 40
 
-        legend_items = [
-            ((34, 197, 94), "H / Root (mm): vertical green caliper from entry point to root apex / canal / sinus"),
-            ((0, 220, 255), "W0 Entry (mm): cyan crestal width + yellow bullseye osteotomy entry target"),
-            ((255, 180, 0), "W3 / W5 (mm): gold (3 mm) & orange (5 mm) buccolingual ridge widths"),
-            ((56, 189, 248), "Impl Guide: dashed safe fixture envelope, prosthetic axis & ridge angle"),
-            ((255, 60, 60), "IAN / SINUS / 2mm SAFE: red nerve ring, magenta sinus floor & 2 mm safety barrier"),
-        ]
-        ly = key_top + 54
-        for rgb_col, desc in legend_items:
-            draw.rectangle([(margin + 18, ly + 4), (margin + 36, ly + 22)], fill=rgb_col)
-            draw.text((margin + 48, ly), desc, fill=(226, 232, 240), font=font_key)
-            ly += 40
-
-        vr_x = margin + key_w + 20
-        draw.rectangle([(vr_x, key_top), (vr_x + vr_w, key_top + key_h)], fill=(2, 6, 23), outline=(51, 65, 85), width=2)
-        vr = _data_uri_to_image(record["vr_b64"])
-        if vr is not None:
-            _paste_contain(page, vr, (vr_x + 4, key_top + 4, vr_w - 8, key_h - 8), bg=(2, 6, 23))
+            vr_x = margin + key_w + 20
+            draw.rectangle(
+                [(vr_x, key_top), (vr_x + vr_w, key_top + key_h)],
+                fill=panel,
+                outline=line_col,
+                width=2,
+            )
+            vr = _data_uri_to_image(record["vr_b64"])
+            if vr is not None:
+                _paste_contain(page, vr, (vr_x + 4, key_top + 4, vr_w - 8, key_h - 8), bg=panel)
 
         # Footer disclaimer & page number
-        draw.line([(margin, footer_top), (page_w - margin, footer_top)], fill=(51, 65, 85), width=1)
+        draw.line([(margin, footer_top), (page_w - margin, footer_top)], fill=line_col, width=1)
         for line_idx, line_txt in enumerate(textwrap.wrap(CLINICAL_DISCLAIMER_TEXT, width=130)[:2]):
-            draw.text((margin, footer_top + 14 + line_idx * 22), line_txt, fill=(148, 163, 184), font=font_disc)
+            draw.text((margin, footer_top + 14 + line_idx * 22), line_txt, fill=muted, font=font_disc)
+        span = record.get("span_summary") or {}
+        if span.get("sites"):
+            h_span, w_span = span.get("min_height_mm"), span.get("min_crest_width_mm")
+            worst = (
+                f"worst-case span: {'H~' if span.get('min_height_estimated') else 'H'} "
+                f"{'--' if h_span is None else f'{float(h_span):.1f}'} mm "
+                f"(#{span.get('limiting_height_site') or '--'})  "
+                f"W0 {'--' if w_span is None else f'{float(w_span):.1f}'} mm "
+                f"(#{span.get('limiting_width_site') or '--'})"
+            )
+            draw.text((margin, footer_top + 60), worst, fill=muted, font=font_disc)
         draw.text(
             (page_w - margin - 180, footer_top + 22),
             f"Page {page_number} of {total_pages}",
-            fill=(148, 163, 184),
+            fill=muted,
             font=font_sec,
         )
+        if grayscale:
+            gray = page.convert("L")
+            page = Image.merge("RGB", (gray, gray, gray))
         return page
 
     def _build_8x10_html(
@@ -671,10 +832,20 @@ class PrintLayoutEngine:
         patient_id: str,
         page_number: int = 1,
         total_pages: int = 1,
+        grayscale: bool = True,
     ) -> str:
         """Construct exact 8x10-inch standard print HTML/CSS page."""
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         cols = 5 if len(slices) <= 15 else (7 if len(slices) <= 21 else 9)
+        grayscale_css = (
+            "body { background: #ffffff !important; color: #000000 !important; }\n"
+            ".page-container { filter: grayscale(1); }\n"
+            ".pano-section, .pano-img, .vr-card, .vr-img { background: transparent !important; }\n"
+            ".bottom-section { display: none !important; }\n"
+            ".grid-section { flex: 1; }\n"
+            if grayscale
+            else ""
+        )
 
         cards_html: List[str] = []
         for s in slices:
@@ -701,7 +872,7 @@ class PrintLayoutEngine:
                 f"<div class='cs-hdr'>#{s.fdi} S{s.slice_index} ({s.offset_mm:+.1f}mm){html.escape(misch_badge)}</div>"
                 f"<img src='{s.image_data_uri}' alt='Slice {s.slice_index}'/>"
                 f"<div class='cs-ftr'>"
-                f"<span class='m-h'>H:{h_txt}</span> "
+                f"<span class='m-h'>{'H~' if s.height_estimated else 'H'}:{h_txt}</span> "
                 f"<span class='m-w0'>W0:{w0_txt}</span> "
                 f"<span class='m-w3'>W3:{w3_txt}</span> "
                 f"<span class='m-w5'>W5:{w5_txt}</span>{ian_html}"
@@ -767,10 +938,9 @@ body {{
 }}
 .pano-section {{
     border: 1px solid #334155;
-    background: #020617;
+    background: transparent;
     border-radius: 4px;
     overflow: hidden;
-    max-height: 244px;
     display: flex;
     flex-direction: column;
 }}
@@ -781,7 +951,7 @@ body {{
     background: #1e293b;
     color: #94a3b8;
 }}
-.pano-img {{ width: 100%; max-height: 220px; object-fit: contain; background: #020617; }}
+.pano-img {{ width: 100%; height: auto; display: block; object-fit: contain; background: transparent; }}
 .grid-section {{
     display: grid;
     grid-template-columns: repeat({cols}, 1fr);
@@ -824,14 +994,14 @@ body {{
 }}
 .vr-card {{
     flex: 1.2;
-    background: #020617;
+    background: transparent;
     border: 1px solid #334155;
     border-radius: 4px;
     overflow: hidden;
     display: flex;
     flex-direction: column;
 }}
-.vr-img {{ width: 100%; height: 118px; object-fit: contain; }}
+.vr-img {{ width: 100%; height: auto; max-height: 150px; display: block; object-fit: contain; background: transparent; }}
 .summary-card {{
     flex: 1.8;
     background: #020617;
@@ -851,6 +1021,7 @@ body {{
     border-top: 1px solid #1e293b;
     padding-top: 4px;
 }}
+{grayscale_css}
 </style>
 </head>
 <body>

@@ -33,28 +33,64 @@ WORKSPACE_ROLE_PROFILES: Dict[str, WorkspaceRoleProfile] = {
     "full": WorkspaceRoleProfile(
         key="full",
         status_text="Workspace: Full Clinical Suite (All Steps Visible)",
-        visible_boxes=("step1Box", "step2Box", "step3Box", "step4Box", "step5Box", "step6Box", "step7Box", "risemarBox"),
+        visible_boxes=(
+            "step1Box",
+            "step2Box",
+            "step3Box",
+            "step4Box",
+            "step5Box",
+            "step6Box",
+            "step7Box",
+            "risemarBox",
+        ),
         expanded_boxes=("step1Box", "step2Box", "step3Box", "step4Box", "step5Box"),
         collapsed_boxes=("step6Box", "step7Box", "advancedStep5Box"),
     ),
     "radiologist": WorkspaceRoleProfile(
         key="radiologist",
         status_text="Workspace: Radiologist (RISE-MAR, Panoramic, Cross-Sections & Film Print)",
-        visible_boxes=("step1Box", "step2Box", "step3Box", "step4Box", "step5Box", "step6Box", "step7Box", "risemarBox"),
+        visible_boxes=(
+            "step1Box",
+            "step2Box",
+            "step3Box",
+            "step4Box",
+            "step5Box",
+            "step6Box",
+            "step7Box",
+            "risemarBox",
+        ),
         expanded_boxes=("step1Box", "risemarBox", "step3Box", "step4Box", "step5Box"),
         collapsed_boxes=("step2Box", "step6Box", "step7Box", "advancedStep5Box"),
     ),
     "implant": WorkspaceRoleProfile(
         key="implant",
         status_text="Workspace: Implant & Surgical Dentist (Arch, Measurements, Implants & Guide)",
-        visible_boxes=("step1Box", "step2Box", "step3Box", "step4Box", "step5Box", "step6Box", "step7Box", "risemarBox"),
+        visible_boxes=(
+            "step1Box",
+            "step2Box",
+            "step3Box",
+            "step4Box",
+            "step5Box",
+            "step6Box",
+            "step7Box",
+            "risemarBox",
+        ),
         expanded_boxes=("step1Box", "step2Box", "step5Box", "advancedStep5Box", "step6Box"),
         collapsed_boxes=("risemarBox", "step3Box", "step4Box", "step7Box"),
     ),
     "ortho": WorkspaceRoleProfile(
         key="ortho",
         status_text="Workspace: Ortho & Craniofacial (ALI Landmarks, ASO, CLI-C, VFACE, Airway & Ceph)",
-        visible_boxes=("step1Box", "step2Box", "step3Box", "step4Box", "step5Box", "step6Box", "step7Box", "risemarBox"),
+        visible_boxes=(
+            "step1Box",
+            "step2Box",
+            "step3Box",
+            "step4Box",
+            "step5Box",
+            "step6Box",
+            "step7Box",
+            "risemarBox",
+        ),
         expanded_boxes=("step1Box", "step6Box", "step7Box"),
         collapsed_boxes=("risemarBox", "step2Box", "step3Box", "step4Box", "step5Box", "advancedStep5Box"),
     ),
@@ -208,7 +244,9 @@ def compute_volume_segmentation_cache_token(volumeNode: Any, segmentationNode: A
         # Track underlying VTK image data mtime (volumes)
         if hasattr(node, "GetImageData"):
             img_data = node.GetImageData()
-            parts.append(int(img_data.GetMTime()) if (img_data is not None and hasattr(img_data, "GetMTime")) else 0)
+            parts.append(
+                int(img_data.GetMTime()) if (img_data is not None and hasattr(img_data, "GetMTime")) else 0
+            )
         else:
             parts.append(0)
 

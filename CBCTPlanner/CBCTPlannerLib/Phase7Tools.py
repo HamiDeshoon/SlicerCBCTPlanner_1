@@ -730,7 +730,7 @@ def run_headless_batch_pipeline(
         slab_thickness_mm=15.0,
         height_mm=40.0,
         spacing_mm=1.0,
-        projection_mode="Mean",
+        projection_mode="RaySum",
     )
     pano_npy_path = out_path / "panoramic_cpr.npy"
     np.save(str(pano_npy_path), pano_arr)

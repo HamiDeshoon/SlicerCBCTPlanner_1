@@ -9,8 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 import numpy as np
+
+# The only two arch keys the measurement engine accepts. Display names ("Mandible",
+# "Maxilla & Upper Skull") are normalized by `jaw_key_from_text` before they reach an engine.
+JawKey = Literal["lower", "upper"]
+JAW_KEYS: Tuple[JawKey, JawKey] = ("lower", "upper")
 
 
 @dataclass(frozen=True)
@@ -164,21 +169,15 @@ _VIVID_TOOTH_COLORS_BY_QUADRANT: Dict[int, Dict[int, Tuple[float, float, float]]
 }
 
 LABELS_BY_ID: Dict[int, AnatomicalLabel] = {
-    LOWER_JAW_ID: AnatomicalLabel(
-        LOWER_JAW_ID, "Lower Jawbone (Mandible)", "jaw", color=(0.83, 0.63, 0.90)
-    ),
-    UPPER_JAW_ID: AnatomicalLabel(
-        UPPER_JAW_ID, "Upper Jawbone (Maxilla)", "jaw", color=(0.89, 0.87, 0.56)
-    ),
+    LOWER_JAW_ID: AnatomicalLabel(LOWER_JAW_ID, "Lower Jawbone (Mandible)", "jaw", color=(0.83, 0.63, 0.90)),
+    UPPER_JAW_ID: AnatomicalLabel(UPPER_JAW_ID, "Upper Jawbone (Maxilla)", "jaw", color=(0.89, 0.87, 0.56)),
     LEFT_IAN_ID: AnatomicalLabel(
         LEFT_IAN_ID, "Left Inferior Alveolar Canal", "canal", color=(0.98, 0.24, 0.18)
     ),
     RIGHT_IAN_ID: AnatomicalLabel(
         RIGHT_IAN_ID, "Right Inferior Alveolar Canal", "canal", color=(1.00, 0.32, 0.16)
     ),
-    LEFT_SINUS_ID: AnatomicalLabel(
-        LEFT_SINUS_ID, "Left Maxillary Sinus", "sinus", color=(0.22, 0.74, 0.97)
-    ),
+    LEFT_SINUS_ID: AnatomicalLabel(LEFT_SINUS_ID, "Left Maxillary Sinus", "sinus", color=(0.22, 0.74, 0.97)),
     RIGHT_SINUS_ID: AnatomicalLabel(
         RIGHT_SINUS_ID, "Right Maxillary Sinus", "sinus", color=(0.18, 0.68, 0.94)
     ),
@@ -186,9 +185,7 @@ LABELS_BY_ID: Dict[int, AnatomicalLabel] = {
     BRIDGE_ID: AnatomicalLabel(BRIDGE_ID, "Bridge", "restoration", color=(0.30, 0.82, 0.95)),
     CROWN_ID: AnatomicalLabel(CROWN_ID, "Crown", "restoration", color=(0.40, 0.90, 0.95)),
     IMPLANT_ID: AnatomicalLabel(IMPLANT_ID, "Implant", "restoration", color=(0.20, 0.92, 0.55)),
-    LINGUAL_CANAL_ID: AnatomicalLabel(
-        LINGUAL_CANAL_ID, "Lingual Canal", "canal", color=(1.00, 0.45, 0.20)
-    ),
+    LINGUAL_CANAL_ID: AnatomicalLabel(LINGUAL_CANAL_ID, "Lingual Canal", "canal", color=(1.00, 0.45, 0.20)),
     LEFT_INCISIVE_CANAL_ID: AnatomicalLabel(
         LEFT_INCISIVE_CANAL_ID, "Left Incisive Canal", "canal", color=(1.00, 0.50, 0.25)
     ),
@@ -406,8 +403,7 @@ def resolve_combined_mask_scheme(
     the segmentation uses the canonical ToothFairy3 / multi-class numbering (`is_5class = False`).
     """
     has_multi_class_token = any(
-        (not is_5c and lbl > 0) or (lbl >= 11)
-        for lbl, _cat, is_5c, _prec in matched_records
+        (not is_5c and lbl > 0) or (lbl >= 11) for lbl, _cat, is_5c, _prec in matched_records
     )
     if has_multi_class_token:
         return False
@@ -510,6 +506,7 @@ def sort_teeth_anatomically(teeth_list: List[int]) -> List[int]:
         ordered.extend(int(fdi) for fdi in group if int(fdi) in teeth_set)
     return ordered
 
+
 RIGHT_SIDE_TEETH_IDS: List[int] = [tid for fdi, tid in FDI_TO_TOOTH_ID.items() if fdi[0] in ("1", "4")]
 LEFT_SIDE_TEETH_IDS: List[int] = [tid for fdi, tid in FDI_TO_TOOTH_ID.items() if fdi[0] in ("2", "3")]
 
@@ -569,6 +566,38 @@ def get_jaw_label_id(is_mandible: bool, is_5class: bool = False) -> int:
     return LOWER_JAW_ID if is_mandible else UPPER_JAW_ID
 
 
+def jaw_key_from_text(jaw: Any) -> Optional[str]:
+    """Normalize any jaw identifier to the canonical ``"lower"`` / ``"upper"`` arch key.
+
+    Accepts the engine/arch keys (``"lower"``, ``"upper"``), clinical display names
+    (``"Mandible"``, ``"Maxilla"``, ``"Lower jaw"``, ``"Maxilla & Upper Skull"``) and
+    case variants. Returns ``None`` when the text does not name a single jaw (for example
+    ``"Shared"`` or an empty string) so callers fall back to the selected tooth instead of
+    silently measuring the wrong jaw.
+    """
+    text = str(jaw or "").strip().lower()
+    if not text:
+        return None
+    if text.startswith("low") or "mandib" in text:
+        return "lower"
+    if text.startswith("up") or "maxill" in text:
+        return "upper"
+    return None
+
+
+def parse_jaw_key(jaw: Any, *, strict: bool = False) -> Optional[JawKey]:
+    """Return a canonical `JawKey`; with ``strict=True`` raise instead of returning `None`.
+
+    Engines and arch helpers accept only ``"lower"``/``"upper"`` so a display name can
+    never be silently read as the other jaw: ``"Mandible"`` used to start with neither
+    ``"low"`` nor ``"up"`` and became the maxilla.
+    """
+    key = jaw_key_from_text(jaw)
+    if key is None and strict:
+        raise ValueError(f"jaw must be one of {JAW_KEYS}, got {jaw!r}")
+    return key  # type: ignore[return-value]
+
+
 def get_tooth_group_label_id(is_mandible: bool, is_5class: bool = True) -> int:
     """Return the grouped teeth label ID for 5-class DentalSegmentator masks."""
     if not is_5class:
@@ -581,7 +610,11 @@ def get_ipsilateral_canal_ids(fdi_or_quadrant: Any, is_5class: bool = False) -> 
 
     Never returns contralateral canal IDs or canal IDs for maxillary quadrants.
     """
-    q = int(fdi_or_quadrant) if isinstance(fdi_or_quadrant, int) and fdi_or_quadrant in (1, 2, 3, 4) else get_fdi_quadrant(fdi_or_quadrant)
+    q = (
+        int(fdi_or_quadrant)
+        if isinstance(fdi_or_quadrant, int) and fdi_or_quadrant in (1, 2, 3, 4)
+        else get_fdi_quadrant(fdi_or_quadrant)
+    )
     if q not in (3, 4):
         return []
     if is_5class:
@@ -594,7 +627,11 @@ def get_ipsilateral_sinus_ids(fdi_or_quadrant: Any, is_5class: bool = False) -> 
 
     Never returns contralateral sinus IDs or sinus IDs for mandibular quadrants.
     """
-    q = int(fdi_or_quadrant) if isinstance(fdi_or_quadrant, int) and fdi_or_quadrant in (1, 2, 3, 4) else get_fdi_quadrant(fdi_or_quadrant)
+    q = (
+        int(fdi_or_quadrant)
+        if isinstance(fdi_or_quadrant, int) and fdi_or_quadrant in (1, 2, 3, 4)
+        else get_fdi_quadrant(fdi_or_quadrant)
+    )
     if q not in (1, 2) or is_5class:
         return []
     return [RIGHT_SINUS_ID] if q == 1 else [LEFT_SINUS_ID]
@@ -633,12 +670,26 @@ def is_sinus_label_id(label_id: int, is_5class: bool = False) -> bool:
 
 
 def infer_mask_is_5class(mask: np.ndarray) -> bool:
-    """Infer whether a combined label array uses 5-class DentalSegmentator IDs vs ToothFairy3."""
+    """Infer whether a combined label array uses 5-class DentalSegmentator IDs vs ToothFairy3.
+
+    A value range of 1..5 alone is not enough: ToothFairy3 also uses 1/2 for the jaws and
+    3/4/5 for canal/sinus labels. Any FDI tooth id (11-48) or ToothFairy3 canal/pulp id
+    (100+) proves the canonical scheme, as does the ToothFairy3 sinus pair (5 and 6).
+    Everything else — including jaw-only 1/2, which is inherently ambiguous — keeps the
+    historical grouped 5-class default.
+    """
     arr = np.asarray(mask)
     if arr.size == 0:
         return False
-    max_val = int(arr.max())
-    return 0 < max_val <= 5
+    values = {int(v) for v in np.unique(arr) if int(v) > 0}
+    if not values:
+        return False
+    if any(v >= 11 for v in values):
+        return False
+    if 5 in values and 6 in values:
+        return False
+    # Jaw-only masks (1/2) are inherently ambiguous; the grouped scheme remains the default.
+    return True
 
 
 def tooth_mask_from_labels(mask: np.ndarray, is_5class: Optional[bool] = None) -> np.ndarray:

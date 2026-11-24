@@ -24,7 +24,7 @@ Upgrades & Guarantees:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 try:
@@ -93,9 +93,7 @@ class VRVisualizationLogic:
             return [ids.GetValue(i) for i in range(ids.GetNumberOfValues())]
         except Exception:
             if hasattr(segmentation, "GetNumberOfSegments") and hasattr(segmentation, "GetNthSegmentID"):
-                return [
-                    segmentation.GetNthSegmentID(i) for i in range(segmentation.GetNumberOfSegments())
-                ]
+                return [segmentation.GetNthSegmentID(i) for i in range(segmentation.GetNumberOfSegments())]
             return []
 
     @staticmethod
@@ -116,32 +114,78 @@ class VRVisualizationLogic:
                 return segment_name, hex_color, opacity
         return None
 
+    @staticmethod
+    def _extract_ras_bounds(node: Any) -> Optional[Tuple[float, ...]]:
+        """Extract valid finite 6-tuple RAS bounds `(xmin, xmax, ymin, ymax, zmin, zmax)` from a MRML node."""
+        if node is None or not hasattr(node, "GetRASBounds"):
+            return None
+        buf = [0.0] * 6
+        node.GetRASBounds(buf)
+        if all(np.isfinite(buf)) and buf[1] > buf[0] and buf[3] > buf[2] and buf[5] > buf[4]:
+            return tuple(float(v) for v in buf)
+        return None
+
+    def frame_3d_views_tight(
+        self,
+        bounds: Optional[Sequence[float]] = None,
+        zoom_factor: float = 1.40,
+        frontal_view: bool = False,
+    ) -> None:
+        """Reset 3D cameras around `bounds` (when given) and zoom tightly so the jaw fills the 3D field."""
+        if slicer is None:
+            return
+        layoutManager = slicer.app.layoutManager() if getattr(slicer, "app", None) else None
+        framed_via_renderer = False
+        if layoutManager:
+            count = int(getattr(layoutManager, "threeDViewCount", 1) or 0)
+            for i in range(count):
+                threeD = layoutManager.threeDWidget(i) if hasattr(layoutManager, "threeDWidget") else None
+                view = threeD.threeDView() if (threeD and hasattr(threeD, "threeDView")) else None
+                if view is None:
+                    continue
+                if frontal_view and i == 0 and hasattr(view, "rotateToViewAxis"):
+                    view.rotateToViewAxis(3)
+                rw = view.renderWindow() if hasattr(view, "renderWindow") else None
+                rens = rw.GetRenderers() if (rw and hasattr(rw, "GetRenderers")) else None
+                ren = rens.GetFirstRenderer() if (rens and hasattr(rens, "GetFirstRenderer")) else None
+                if ren is not None and hasattr(ren, "ResetCamera"):
+                    if bounds is not None and len(bounds) == 6:
+                        ren.ResetCamera(tuple(float(b) for b in bounds))
+                    else:
+                        ren.ResetCamera()
+                    cam = ren.GetActiveCamera() if hasattr(ren, "GetActiveCamera") else None
+                    if cam is not None and zoom_factor > 0.1 and hasattr(cam, "Zoom"):
+                        cam.Zoom(float(zoom_factor))
+                    if hasattr(ren, "ResetCameraClippingRange"):
+                        ren.ResetCameraClippingRange()
+                    if hasattr(view, "forceRender"):
+                        view.forceRender()
+                    framed_via_renderer = True
+        if not framed_via_renderer and hasattr(getattr(slicer, "util", None), "resetThreeDViews"):
+            slicer.util.resetThreeDViews()
+
     def configure_3d_view(
         self,
         white_background: bool = True,
         hide_box_and_labels: bool = True,
         switch_to_widescreen: bool = False,
         frontal_view: bool = True,
+        bounds: Optional[Sequence[float]] = None,
+        zoom_factor: float = 1.40,
     ) -> None:
-        """Configure 3D viewport presentation matching SlicerDentalSegmentator."""
+        """Configure clean flat 3D viewport presentation and tight dental camera framing."""
         if slicer is None:
             return
         if switch_to_widescreen:
             setConventionalWideScreenView()
         if white_background:
-            set3DViewBackgroundColors((0.97, 0.98, 1.0), (0.88, 0.91, 0.96))
+            set3DViewBackgroundColors((1.0, 1.0, 1.0), (1.0, 1.0, 1.0))
         else:
-            set3DViewBackgroundColors((0.08, 0.11, 0.16), (0.03, 0.04, 0.07))
+            set3DViewBackgroundColors((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
         if hide_box_and_labels:
             setBoxAndTextVisibilityOnThreeDViews(False)
 
-        layoutManager = slicer.app.layoutManager() if getattr(slicer, "app", None) else None
-        if layoutManager and frontal_view:
-            for i in range(getattr(layoutManager, "threeDViewCount", 1)):
-                threeD = layoutManager.threeDWidget(i)
-                if i == 0 and threeD and hasattr(threeD, "threeDView"):
-                    threeD.threeDView().rotateToViewAxis(3)
-        slicer.util.resetThreeDViews()
+        self.frame_3d_views_tight(bounds=bounds, zoom_factor=zoom_factor, frontal_view=frontal_view)
 
     def apply_dental_segmentator_styling(
         self,
@@ -224,7 +268,12 @@ class VRVisualizationLogic:
                             opacity = tooth_op
                         elif "canal" in name_l or "nerve" in name_l:
                             opacity = canal_op
-                        elif "maxilla" in name_l or "mandible" in name_l or "jaw" in name_l or "skull" in name_l:
+                        elif (
+                            "maxilla" in name_l
+                            or "mandible" in name_l
+                            or "jaw" in name_l
+                            or "skull" in name_l
+                        ):
                             opacity = jaw_op
                         else:
                             opacity = default_op
@@ -243,9 +292,7 @@ class VRVisualizationLogic:
                     if hasattr(displayNode, "SetSegmentOpacity3D"):
                         displayNode.SetSegmentOpacity3D(seg_id, float(opacity))
                     if hasattr(displayNode, "SetSegmentOpacity2DFill"):
-                        displayNode.SetSegmentOpacity2DFill(
-                            seg_id, 0.18 if opacity < 0.5 else 0.30
-                        )
+                        displayNode.SetSegmentOpacity2DFill(seg_id, 0.18 if opacity < 0.5 else 0.30)
                     if hasattr(displayNode, "SetSegmentOpacity2DOutline"):
                         displayNode.SetSegmentOpacity2DOutline(seg_id, 0.95)
 
@@ -264,7 +311,7 @@ class VRVisualizationLogic:
                 displayNode.EndModify(was_modifying)
 
         if configure_view:
-            self.configure_3d_view()
+            self.configure_3d_view(bounds=self._extract_ras_bounds(segmentationNode))
 
     def set_jawbone_3d_opacity(
         self,
@@ -445,16 +492,12 @@ class VRVisualizationLogic:
                 if xs[index] <= xs[index - 1]:
                     xs[index] = xs[index - 1] + 1.0
             opacities = (
-                [0.0, 0.0, 0.025, 0.14, 0.78, 1.0]
-                if vivid_roots_mode
-                else [0.0, 0.0, 0.045, 0.28, 0.62, 1.0]
+                [0.0, 0.0, 0.025, 0.14, 0.78, 1.0] if vivid_roots_mode else [0.0, 0.0, 0.045, 0.28, 0.62, 1.0]
             )
         else:
             xs = [-400.0, 80.0, 320.0, 650.0, 1200.0, 2600.0]
             opacities = (
-                [0.0, 0.0, 0.025, 0.14, 0.80, 1.0]
-                if vivid_roots_mode
-                else [0.0, 0.0, 0.05, 0.32, 0.7, 1.0]
+                [0.0, 0.0, 0.025, 0.14, 0.80, 1.0] if vivid_roots_mode else [0.0, 0.0, 0.05, 0.32, 0.7, 1.0]
             )
         colors = [
             (0.0, 0.0, 0.0),
@@ -708,8 +751,19 @@ class VRVisualizationLogic:
             roiNode.GetDisplayNode().SetVisibility(bool(crop_enabled and visible))
 
         displayNode.SetVisibility(bool(visible))
-        if visible and not was_visible:
-            slicer.util.resetThreeDViews()
+        if visible and (not was_visible or (crop_enabled and not was_cropping)):
+            vr_bounds = (
+                self._extract_ras_bounds(roiNode)
+                if (crop_enabled and roiNode is not None)
+                else self._extract_ras_bounds(volumeNode)
+            )
+            self.configure_3d_view(
+                white_background=True,
+                hide_box_and_labels=True,
+                frontal_view=not was_visible,
+                bounds=vr_bounds,
+                zoom_factor=1.40,
+            )
         return displayNode
 
 

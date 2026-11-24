@@ -15,6 +15,7 @@ from .labels import (
     ANATOMICAL_MESIODISTAL_WIDTHS_MM,
     LOWER_JAW_ID,
     UPPER_JAW_ID,
+    jaw_key_from_text,
 )
 from .mask_centerline import CenterlineCurve
 
@@ -166,7 +167,12 @@ class ArchFrame:
 def validate_arch_frame(frame: ArchFrame, tol: float = 1e-5) -> Tuple[bool, List[str]]:
     """Validate that an ArchFrame is unit-normalized, mutually orthogonal, and finite."""
     issues: List[str] = []
-    for name, vec in (("point", frame.point), ("tangent", frame.tangent), ("normal", frame.normal), ("binormal", frame.binormal)):
+    for name, vec in (
+        ("point", frame.point),
+        ("tangent", frame.tangent),
+        ("normal", frame.normal),
+        ("binormal", frame.binormal),
+    ):
         arr = np.asarray(vec, dtype=np.float64)
         if arr.shape != (3,) or not np.all(np.isfinite(arr)):
             issues.append(f"{name} is non-finite or not 3D")
@@ -179,7 +185,11 @@ def validate_arch_frame(frame: ArchFrame, tol: float = 1e-5) -> Tuple[bool, List
         norm = float(np.linalg.norm(vec))
         if abs(norm - 1.0) > tol:
             issues.append(f"{name} is not unit length (norm={norm:.6f})")
-    for pair_name, dot_val in (("T.N", float(np.dot(T, N))), ("T.B", float(np.dot(T, B))), ("N.B", float(np.dot(N, B)))):
+    for pair_name, dot_val in (
+        ("T.N", float(np.dot(T, N))),
+        ("T.B", float(np.dot(T, B))),
+        ("N.B", float(np.dot(N, B))),
+    ):
         if abs(dot_val) > tol:
             issues.append(f"{pair_name} not orthogonal (dot={dot_val:.6f})")
     return len(issues) == 0, issues
@@ -627,7 +637,7 @@ def compute_fdi_arc_positions_mm(
     tooth_bearing_span_mm: Optional[Tuple[float, float]] = None,
 ) -> Dict[str, ToothArcSite]:
     """B2: Map every FDI tooth in `jaw_type` to its arc-length position along the curve."""
-    jaw_key = "lower" if jaw_type.lower().startswith("low") else "upper"
+    jaw_key = jaw_key_from_text(jaw_type) or "upper"
     order = JAW_TOOTH_ORDER[jaw_key]
     L = max(1.0, float(total_arc_length_mm))
 
@@ -944,9 +954,7 @@ def fit_arch_from_label_mask(
     if mask.ndim != 3 or matrix.shape != (4, 4):
         raise ValueError("mask_zyx must be 3D and affine must be 4x4")
 
-    jaw_key = (
-        "lower" if jaw.lower().startswith("low") else ("upper" if jaw.lower().startswith("up") else "shared")
-    )
+    jaw_key = jaw_key_from_text(jaw) or "shared"
     if is_5class:
         if jaw_key == "lower":
             labels = (4,)

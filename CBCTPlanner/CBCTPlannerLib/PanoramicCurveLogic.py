@@ -643,14 +643,14 @@ class PanoramicCurveLogic:
         height_mm: float = 120.0,
         spacing_mm: float = 0.5,
         buccolingual_offset_mm: float = 0.0,
-        projection_mode: str = "Mean",
+        projection_mode: str = "RaySum",
         flip_vertical: bool = False,
     ) -> np.ndarray:
         """O1, B5, B6, F3: Pure in-process panoramic CPR slab sampler using `scipy.ndimage.map_coordinates`.
 
         Samples layers across `[-slab_thickness_mm/2 + offset, +slab_thickness_mm/2 + offset]` along
         the right-handed displacement axis `disp_x = -N` (`det = +1`) and projects across layers via
-        `Mean`, `MIP`, `MinIP`, or `RaySum` (pseudo-pan).
+        `RaySum` (default pseudo-pan), `Mean`, `MIP`, or `MinIP`.
         Returns a 2D array of shape `(dim_y, dim_z)` where:
           - row `j` (`0 .. dim_y - 1`) increases Superiorly along `+B`
           - col `k` (`0 .. dim_z - 1`) progresses from Patient Right (`arc_mm = 0`) to Patient Left (`arc_mm = L`).
@@ -723,6 +723,93 @@ class PanoramicCurveLogic:
         assert accum is not None
         return cls._finalize_projection(accum, mode, n_layers)
 
+    @staticmethod
+    def _crop_panoramic_vertical_padding(
+        proj_yk: np.ndarray,
+        spacing_mm: float,
+        height_mm: float,
+        projection_mode: str = "RaySum",
+        margin_mm: float = 2.0,
+    ) -> Tuple[np.ndarray, float]:
+        """Trim empty out-of-volume / external-air bands from top and bottom of panoramic array."""
+        arr = np.asarray(proj_yk, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[0] <= 4:
+            return arr, float(height_mm)
+
+        mode = (projection_mode or "RaySum").strip().upper()
+        scale = 1.25 if mode == "RAYSUM" else 1.0
+        pad_cutoff = -1200.0 if mode == "RAYSUM" else -950.0
+        valid_vals = arr[arr > pad_cutoff]
+        if valid_vals.size == 0:
+            return arr, float(height_mm)
+
+        v_min = float(np.min(valid_vals))
+        v_max = float(np.max(valid_vals))
+        is_hu = v_min <= (-500.0 * scale) and (300.0 * scale) < v_max <= (10000.0 * scale)
+        content_thresh = (-680.0 if mode == "RAYSUM" else -550.0) if is_hu else pad_cutoff
+
+        row_p98 = np.percentile(arr, 98.0, axis=1)
+        active = np.where(row_p98 > content_thresh)[0]
+        if active.size == 0:
+            active = np.where(row_p98 > pad_cutoff)[0]
+        if active.size == 0:
+            return arr, float(height_mm)
+
+        sp = max(0.15, float(spacing_mm))
+        pad_px = max(1, int(round(float(margin_mm) / sp)))
+        r0 = max(0, int(active[0]) - pad_px)
+        r1 = min(arr.shape[0], int(active[-1]) + 1 + pad_px)
+
+        min_rows = min(arr.shape[0], max(4, int(round(20.0 / sp))))
+        if (r1 - r0) < min_rows:
+            mid = (r0 + r1) // 2
+            r0 = max(0, mid - min_rows // 2)
+            r1 = min(arr.shape[0], r0 + min_rows)
+            r0 = max(0, r1 - min_rows)
+
+        if r0 == 0 and r1 == arr.shape[0]:
+            return arr, float(height_mm)
+        cropped = arr[r0:r1, :]
+        eff_height_mm = round(float(cropped.shape[0]) * sp, 2)
+        return cropped, eff_height_mm
+
+    @staticmethod
+    def compute_panoramic_display_window_threshold(
+        proj_yk: np.ndarray,
+        projection_mode: str = "RaySum",
+        source_is_hu: bool = True,
+    ) -> Tuple[float, float, float, float]:
+        """Compute `(window, level, lower_threshold, upper_threshold)` for transparent-air panoramic display."""
+        arr = np.asarray(proj_yk, dtype=np.float32)
+        if arr.size == 0:
+            return 2000.0, 400.0, -937.5, 4000.0
+
+        mode = (projection_mode or "RaySum").strip().upper()
+        scale = 1.25 if mode == "RAYSUM" else 1.0
+        pad_cutoff = -1200.0 if mode == "RAYSUM" else -950.0
+        valid = arr[arr > pad_cutoff]
+        if valid.size == 0:
+            valid = arr.reshape(-1)
+
+        if source_is_hu:
+            lower_threshold = -750.0 * scale
+        else:
+            vmin = float(np.min(valid))
+            p2, p99 = np.percentile(valid, [2.0, 99.0])
+            if p2 <= vmin + 0.05 * max(1.0, float(p99 - vmin)):
+                lower_threshold = float(p2)
+            else:
+                lower_threshold = max(pad_cutoff + 50.0, vmin - 1.0)
+
+        fg = valid[valid > lower_threshold]
+        if fg.size < 16:
+            fg = valid
+        lo, hi = np.percentile(fg, [2.0, 99.5])
+        window = max(1.0, float(hi - lo))
+        level = float(0.5 * (lo + hi))
+        upper_threshold = max(float(np.max(arr)) + 1000.0, float(hi) + window)
+        return window, level, float(lower_threshold), float(upper_threshold)
+
     def _populate_panoramic_node_from_array(
         self,
         volumeNode: Any,
@@ -733,8 +820,30 @@ class PanoramicCurveLogic:
         show_in_green_view: bool = True,
         parameterNode: Any = None,
         force_fit: bool = False,
+        projection_mode: str = "RaySum",
+        source_is_hu: Optional[bool] = None,
+        trim_vertical_padding: bool = True,
     ) -> Any:
         """Write 2D panoramic array `(dim_y, dim_z)` into MRML panoramic volume node and display."""
+        if trim_vertical_padding:
+            proj_yk, height_mm = self._crop_panoramic_vertical_padding(
+                proj_yk,
+                spacing_mm=spacing_mm,
+                height_mm=height_mm,
+                projection_mode=projection_mode,
+            )
+
+        if source_is_hu is None:
+            source_is_hu = True
+            if volumeNode is not None and slicer is not None:
+                try:
+                    from .VRVisualization import VRVisualizationLogic
+
+                    src_arr = slicer.util.arrayFromVolume(volumeNode)
+                    source_is_hu = VRVisualizationLogic.is_volume_hu_calibrated(src_arr)
+                except Exception:
+                    logger.debug("Could not inspect CBCT HU calibration for pano display", exc_info=True)
+
         panoNode = None
         if parameterNode is not None and hasattr(parameterNode, "GetNodeReference"):
             panoNode = parameterNode.GetNodeReference("PanoramicVolume")
@@ -755,6 +864,13 @@ class PanoramicCurveLogic:
             if (volumeNode and volumeNode.GetImageData())
             else vtk.VTK_SHORT
         )
+        unsigned_types = tuple(
+            getattr(vtk, name)
+            for name in ("VTK_UNSIGNED_CHAR", "VTK_UNSIGNED_SHORT", "VTK_UNSIGNED_INT")
+            if hasattr(vtk, name)
+        )
+        if scalar_type in unsigned_types and float(np.min(proj_yk)) < 0.0:
+            scalar_type = getattr(vtk, "VTK_FLOAT", scalar_type)
         pano_img.AllocateScalars(scalar_type, 1)
         panoNode.SetAndObserveImageData(pano_img)
 
@@ -771,9 +887,45 @@ class PanoramicCurveLogic:
         panoNode.SetAttribute("CBCTPlanner.SpacingMm", str(spacing_mm))
         panoNode.SetAttribute("CBCTPlanner.HeightMm", str(height_mm))
         panoNode.SetAttribute("CBCTPlanner.TotalArcMm", str(total_len_mm))
+        panoNode.SetAttribute("CBCTPlanner.ProjectionMode", str(projection_mode))
         panoNode.CreateDefaultDisplayNodes()
-        if volumeNode and volumeNode.GetDisplayNode() and panoNode.GetDisplayNode():
-            panoNode.GetDisplayNode().CopyContent(volumeNode.GetDisplayNode())
+
+        disp = panoNode.GetDisplayNode()
+        if disp is not None:
+            win, lvl, lo_th, hi_th = self.compute_panoramic_display_window_threshold(
+                proj_yk,
+                projection_mode=projection_mode,
+                source_is_hu=bool(source_is_hu),
+            )
+            d_mod = disp.StartModify() if hasattr(disp, "StartModify") else None
+            try:
+                if hasattr(disp, "SetAutoWindowLevel"):
+                    disp.SetAutoWindowLevel(False)
+                if hasattr(disp, "SetWindowLevel"):
+                    disp.SetWindowLevel(win, lvl)
+                else:
+                    if hasattr(disp, "SetWindow"):
+                        disp.SetWindow(win)
+                    if hasattr(disp, "SetLevel"):
+                        disp.SetLevel(lvl)
+                if hasattr(disp, "SetApplyThreshold"):
+                    disp.SetApplyThreshold(True)
+                if hasattr(disp, "SetAutoThreshold"):
+                    disp.SetAutoThreshold(False)
+                if hasattr(disp, "SetThreshold"):
+                    disp.SetThreshold(lo_th, hi_th)
+                else:
+                    if hasattr(disp, "SetLowerThreshold"):
+                        disp.SetLowerThreshold(lo_th)
+                    if hasattr(disp, "SetUpperThreshold"):
+                        disp.SetUpperThreshold(hi_th)
+                if hasattr(disp, "SetInterpolate"):
+                    disp.SetInterpolate(True)
+                if hasattr(disp, "SetOpacity"):
+                    disp.SetOpacity(1.0)
+            finally:
+                if d_mod is not None and hasattr(disp, "EndModify"):
+                    disp.EndModify(d_mod)
 
         if show_in_green_view:
             self.display_panoramic_in_slice_view(panoNode, slice_view_name="Green", force_fit=force_fit)
@@ -787,7 +939,7 @@ class PanoramicCurveLogic:
         height_mm: float = 120.0,
         spacing_mm: float = 0.5,
         buccolingual_offset_mm: float = 0.0,
-        projection_mode: str = "Mean",
+        projection_mode: str = "RaySum",
         show_in_green_view: bool = True,
         occlusal_normal: Sequence[float] = (0.0, 0.0, 1.0),
         async_cli: bool = False,
@@ -849,6 +1001,7 @@ class PanoramicCurveLogic:
                 show_in_green_view=show_in_green_view,
                 parameterNode=parameterNode,
                 force_fit=force_fit,
+                projection_mode=projection_mode,
             )
             if on_progress is not None:
                 on_progress(100)
@@ -912,6 +1065,7 @@ class PanoramicCurveLogic:
                     show_in_green_view=show_in_green_view,
                     parameterNode=parameterNode,
                     force_fit=force_fit,
+                    projection_mode=projection_mode,
                 )
                 if on_complete is not None:
                     on_complete(panoNode, None)
@@ -926,9 +1080,10 @@ class PanoramicCurveLogic:
         slice_view_name: str = "Green",
         force_fit: bool = False,
     ) -> bool:
-        """B10: Display Panoramic Radiograph in `slice_view_name` and call `FitSliceToAll()` ONLY on first display or geometry change.
+        """B10: Display Panoramic Radiograph in `slice_view_name`, clear extra layers, and fit tightly.
 
-        Returns True if `FitSliceToAll()` was called, False if existing user zoom/pan was preserved.
+        Calls `FitSliceToAll()` ONLY on first display or when geometry changes (or `force_fit=True`).
+        Returns True if fitted, False if existing user zoom/pan was preserved.
         """
         if slicer is None:
             return False
@@ -941,11 +1096,28 @@ class PanoramicCurveLogic:
         compositeNode = widget.mrmlSliceCompositeNode()
         pano_id = panoNode.GetID()
         prev_bg_id = compositeNode.GetBackgroundVolumeID() if compositeNode else None
-        if compositeNode and prev_bg_id != pano_id:
-            compositeNode.SetBackgroundVolumeID(pano_id)
+        if compositeNode:
+            if prev_bg_id != pano_id:
+                compositeNode.SetBackgroundVolumeID(pano_id)
+            if hasattr(compositeNode, "SetForegroundVolumeID"):
+                compositeNode.SetForegroundVolumeID(None)
+            if hasattr(compositeNode, "SetLabelVolumeID"):
+                compositeNode.SetLabelVolumeID(None)
+            if hasattr(compositeNode, "SetForegroundOpacity"):
+                compositeNode.SetForegroundOpacity(0.0)
+            if hasattr(compositeNode, "SetLabelOpacity"):
+                compositeNode.SetLabelOpacity(0.0)
 
         total_arc = float(panoNode.GetAttribute("CBCTPlanner.TotalArcMm") or 0.0)
         height_mm = float(panoNode.GetAttribute("CBCTPlanner.HeightMm") or 0.0)
+        if (total_arc <= 0.0 or height_mm <= 0.0) and hasattr(panoNode, "GetRASBounds"):
+            bounds = [0.0] * 6
+            panoNode.GetRASBounds(bounds)
+            if total_arc <= 0.0:
+                total_arc = abs(float(bounds[1]) - float(bounds[0]))
+            if height_mm <= 0.0:
+                height_mm = abs(float(bounds[3]) - float(bounds[2]))
+
         prev_geom = self._fitted_pano_geometry.get(slice_view_name)
         geometry_changed = (
             prev_geom is None
@@ -956,12 +1128,41 @@ class PanoramicCurveLogic:
 
         sliceLogic = widget.sliceLogic()
         sliceNode = sliceLogic.GetSliceNode()
+        if hasattr(sliceNode, "SetBackgroundColor"):
+            sliceNode.SetBackgroundColor(0.0, 0.0, 0.0)
+        if hasattr(sliceNode, "SetBackgroundColor2"):
+            sliceNode.SetBackgroundColor2(0.0, 0.0, 0.0)
+
         did_fit = False
         if force_fit or prev_bg_id != pano_id or geometry_changed:
             was_mod = sliceNode.StartModify() if hasattr(sliceNode, "StartModify") else None
             try:
                 sliceNode.SetOrientationToAxial()
                 sliceLogic.FitSliceToAll()
+                if (
+                    total_arc > 1.0
+                    and height_mm > 1.0
+                    and hasattr(sliceNode, "GetDimensions")
+                    and hasattr(sliceNode, "GetFieldOfView")
+                    and hasattr(sliceNode, "SetFieldOfView")
+                ):
+                    dims = sliceNode.GetDimensions()
+                    fov = sliceNode.GetFieldOfView()
+                    vp_w = float(dims[0]) if dims and len(dims) >= 2 else 0.0
+                    vp_h = float(dims[1]) if dims and len(dims) >= 2 else 0.0
+                    if vp_w > 1.0 and vp_h > 1.0:
+                        vp_aspect = vp_w / vp_h
+                        pano_aspect = total_arc / height_mm
+                        if vp_aspect >= pano_aspect:
+                            fov_y = height_mm
+                            fov_x = height_mm * vp_aspect
+                        else:
+                            fov_x = total_arc
+                            fov_y = total_arc / vp_aspect
+                        fov_z = float(fov[2]) if fov and len(fov) >= 3 else 1.0
+                        sliceNode.SetFieldOfView(fov_x, fov_y, fov_z)
+                        if hasattr(sliceNode, "UpdateMatrices"):
+                            sliceNode.UpdateMatrices()
             finally:
                 if was_mod is not None and hasattr(sliceNode, "EndModify"):
                     sliceNode.EndModify(was_mod)
@@ -969,4 +1170,9 @@ class PanoramicCurveLogic:
             did_fit = True
         else:
             sliceNode.Modified()
+        if hasattr(widget, "sliceView") and hasattr(widget.sliceView(), "forceRender"):
+            try:
+                widget.sliceView().forceRender()
+            except Exception:
+                logger.debug("Panoramic sliceView.forceRender skipped", exc_info=True)
         return did_fit
