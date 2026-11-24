@@ -3585,23 +3585,20 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             progress.show()
             qt.QApplication.processEvents()
 
-        isolation = (
-            self.logic.quadrant_vr_isolation(segNode, selected_fdis)
-            if (self.logic is not None and hasattr(self.logic, "quadrant_vr_isolation"))
-            else contextlib.nullcontext()
-        )
+        # The clinical film is grayscale: no 3D VR panel is captured, so the quadrant VR
+        # isolation pass (which only hides segments for that capture) is not needed.
         try:
-            with isolation:
-                html_file, pdf_file, slices_data = engine.generate_8x10_layout(
-                    volumeNode=volNode,
-                    segmentationNode=segNode,
-                    selected_fdis=selected_fdis,
-                    quadrant=quadrant,
-                    out_dir=out_dir,
-                    patient_name=p_name or "Anonymous",
-                    patient_id=p_id or "Anonymous",
-                    include_metadata=include_meta,
-                )
+            html_file, pdf_file, slices_data = engine.generate_8x10_layout(
+                volumeNode=volNode,
+                segmentationNode=segNode,
+                selected_fdis=selected_fdis,
+                quadrant=quadrant,
+                out_dir=out_dir,
+                patient_name=p_name or "Anonymous",
+                patient_id=p_id or "Anonymous",
+                include_metadata=include_meta,
+                grayscale=True,
+            )
         except Exception:
             logger.exception("8x10 print layout generation failed")
             if slicer:

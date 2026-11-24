@@ -11,7 +11,9 @@ Generates standard 8x10 inch printable film layouts (HTML, PDF & 300 DPI PNG) co
        - Widths at >= 5 mm depth W5/W6/W9 (orange horizontal line, RGB 255,120,40)
        - Mandibular canal / nerve safety margin (Red circular boundary)
   3. 3D Volume Rendering (VR) / Anatomical Quadrant Projection isolating the anatomical classes
-     for the selected quadrant (jawbone, vivid teeth & roots, and inferior alveolar nerve canal).
+     for the selected quadrant (jawbone, vivid teeth & roots, and inferior alveolar nerve canal),
+     drawn only in colour mode: `generate_8x10_layout(...)` defaults to `grayscale=True`, a plain
+     black-and-white film without the VR panel or colour key (`grayscale=False` restores them).
 Multi-quadrant selections produce one page per quadrant, footered "Page N of M".
 """
 
@@ -345,6 +347,11 @@ class PrintLayoutEngine:
                 vr_uri = vr_b64 or self._vr_capture(engine=engine, quadrant=q)
                 if not vr_uri:
                     vr_uri = _unavailable_data_uri("VR")
+            elif vr_b64:
+                # Never drop a caller-supplied panel silently: say how to get it back.
+                logger.info(
+                    "Grayscale film omits the supplied 3D VR panel; pass grayscale=False to include it"
+                )
 
             page_records.append(
                 {
