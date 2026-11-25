@@ -314,6 +314,7 @@ class PrintLayoutEngine:
                             meas.crest_width_mm = float(ov["w0_mm"])
                 pil_tile = None
                 if cs is not None:
+                    is_key_slice = (s_idx == 0) or (abs(float(arc_mm) - float(arcs.get(target_fdi, arc_mm))) < 0.05)
                     render = render_cross_section(
                         cs,
                         meas,
@@ -322,6 +323,8 @@ class PrintLayoutEngine:
                         show_implant_guides=not grayscale,
                         monochrome=grayscale,
                         show_footer=False,
+                        inline_line_labels=is_key_slice,
+                        custom_overlays=(ov.get("custom_overlays") if ov else None),
                     )
                     if render.available and render.image is not None:
                         pil_tile = render.image

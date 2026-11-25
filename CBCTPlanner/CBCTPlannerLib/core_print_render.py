@@ -422,6 +422,8 @@ def render_cross_section(
     enhance_bone_edges: bool = True,
     monochrome: bool = False,
     show_footer: bool = True,
+    inline_line_labels: bool = False,
+    custom_overlays: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> CrossSectionRender:
     """Render one arch cross-section strictly from engine-supplied measurement endpoints.
 
@@ -549,7 +551,16 @@ def render_cross_section(
         border: Optional[Tuple[int, int, int]] = None,
         font: Any = None,
     ) -> Tuple[float, float, float, float]:
-        """Place a measurement caption in the reserved right margin, clear of the anatomy."""
+        """Place a measurement caption on its own line/ring (when inline_line_labels) or in the right gutter."""
+        if inline_line_labels:
+            return _place_non_overlapping_pill(
+                float(anchor[0]) + 4.0,
+                float(anchor[1]) - 8.0,
+                text,
+                fg=fg,
+                border=border,
+                font=font,
+            )
         tw, th = _text_size(draw, text, font)
         bw, bh = tw + 8, th + 4
         px = max(2.0, float(width - caption_gutter - bw + 2))
@@ -816,6 +827,49 @@ def render_cross_section(
             border=(236, 72, 153),
             font=font_sm,
         )
+
+    # 6. Clinician/agent custom overlays (user-added lines and circles with text from Pre-Print Editor)
+    if custom_overlays:
+        u_span = max(1e-6, abs(float(u_coords[-1]) - float(u_coords[0])))
+        px_per_mm = float(width) / u_span
+        for ov in custom_overlays:
+            if not isinstance(ov, dict):
+                continue
+            kind = str(ov.get("kind") or "").lower()
+            ov_text = str(ov.get("text") or "").strip()
+            if kind == "line" and ov.get("p1_uv") is not None and ov.get("p2_uv") is not None:
+                p1_uv, p2_uv = ov["p1_uv"], ov["p2_uv"]
+                lp1 = _px(float(p1_uv[0]), float(p1_uv[1]), u_coords, v_coords, scale)
+                lp2 = _px(float(p2_uv[0]), float(p2_uv[1]), u_coords, v_coords, scale)
+                draw.line([lp1, lp2], fill=(250, 204, 21, 255), width=max(2, scale))
+                overlay.append((lp1, lp2))
+                if ov_text:
+                    _place_non_overlapping_pill(
+                        0.5 * (lp1[0] + lp2[0]) + 4.0,
+                        0.5 * (lp1[1] + lp2[1]) - 8.0,
+                        ov_text,
+                        fg=(250, 204, 21),
+                        border=(234, 179, 8),
+                        font=font_sm,
+                    )
+            elif kind == "circle" and ov.get("center_uv") is not None:
+                cu, cv = ov["center_uv"]
+                cx, cy = _px(float(cu), float(cv), u_coords, v_coords, scale)
+                r_px = max(4.0, float(ov.get("radius_mm") or 2.0) * px_per_mm)
+                draw.ellipse(
+                    [cx - r_px, cy - r_px, cx + r_px, cy + r_px],
+                    outline=(244, 114, 182, 255),
+                    width=max(2, scale),
+                )
+                if ov_text:
+                    _place_non_overlapping_pill(
+                        cx + r_px + 3.0,
+                        cy - 6.0,
+                        ov_text,
+                        fg=(244, 114, 182),
+                        border=(236, 72, 153),
+                        font=font_sm,
+                    )
 
     bone_density = geom["misch_code"] if show_implant_guides else None
 

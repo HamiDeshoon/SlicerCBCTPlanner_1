@@ -1911,7 +1911,17 @@ class MeasurementEngine:
                     widths[depth] = None
             if 0.0 in segs_uv and crest_uv is not None:
                 w0_l, w0_r = segs_uv[0.0]
-                crest_uv = (0.5 * (float(w0_l[0]) + float(w0_r[0])), float(crest_uv[1]))
+                w0_mid_u = 0.5 * (float(w0_l[0]) + float(w0_r[0]))
+                w0_mid_v = 0.5 * (float(w0_l[1]) + float(w0_r[1]))
+                # Back-project along -d_apical from w0_mid to crest_v so the H ray literally crosses
+                # W0 at its exact midpoint even on steeply tilted ridges.
+                au, av = float(d_apical[0]), float(d_apical[1])
+                if abs(av) > 1e-4:
+                    dt = (w0_mid_v - float(crest_uv[1])) / av
+                    dt = max(0.0, min(2.5, dt))
+                    crest_uv = (w0_mid_u - dt * au, w0_mid_v - dt * av)
+                else:
+                    crest_uv = (w0_mid_u, float(crest_uv[1]))
                 cs.crest_uv = crest_uv
                 cs.crest_v = crest_uv[1]
                 cs.height_u = crest_uv[0]

@@ -319,5 +319,27 @@ class TestFitArchFromLabelMask(unittest.TestCase):
             self.assertTrue(result.reason)
 
 
+    def test_edentulous_jaw_falls_back_to_mandible_and_maxilla_bone_labels(self) -> None:
+        from CBCTPlannerLib.core.arch_detector import fit_arch_from_label_mask
+
+        # Build an edentulous horseshoe mandible (label 1) and maxilla (label 2) with ZERO teeth.
+        mask = np.zeros((60, 120, 120), dtype=np.int16)
+        angles = np.linspace(0.2, np.pi - 0.2, 240)
+        for ang in angles:
+            cx = int(round(60 + 30 * np.cos(ang)))
+            cy = int(round(35 + 32 * np.sin(ang)))
+            mask[12:26, max(0, cy - 3) : cy + 4, max(0, cx - 3) : cx + 4] = 1  # Mandible
+            mask[34:48, max(0, cy - 3) : cy + 4, max(0, cx - 3) : cx + 4] = 2  # Maxilla
+        aff = np.eye(4, dtype=np.float64)
+        res_mand = fit_arch_from_label_mask(mask, aff, jaw="lower", is_5class=False)
+        res_max = fit_arch_from_label_mask(mask, aff, jaw="upper", is_5class=False)
+        self.assertIsNotNone(res_mand)
+        self.assertIsNotNone(res_max)
+        self.assertEqual(res_mand.method, "jawbone_crest")
+        self.assertEqual(res_max.method, "jawbone_crest")
+        self.assertTrue(res_mand.accepted)
+        self.assertTrue(res_max.accepted)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3774,7 +3774,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return rows, discrepancies
 
     def _showPrePrintReviewDialog(self, selected_fdis: Sequence[int]) -> str:
-        """Show a manual review & edit window before final 8x10 print.
+        """Interactive Pre-Print Editor: drag H/W0 endpoints on the slice image and add/remove lines or circles.
 
         Returns ``'print'``, ``'agent'``, or ``'cancel'``.
         """
@@ -3782,24 +3782,70 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return "print"
         rows, discrepancies = self._buildPrePrintReviewRows(selected_fdis)
         dlg = qt.QDialog(self.parent)
-        dlg.setWindowTitle("Pre-Print Measurement Review & Manual Edit")
-        dlg.resize(680, 400)
-        lay = qt.QVBoxLayout(dlg)
+        dlg.setWindowTitle("Interactive Pre-Print Editor (Calipers, Lines & Circles)")
+        dlg.resize(1040, 660)
+        root = qt.QVBoxLayout(dlg)
 
         if discrepancies:
             banner = qt.QLabel(
                 f"{len(discrepancies)} significant cross-slice difference(s) detected "
-                "(excluding maxillary sinus heights). Review with Agent or edit H / W0 below before printing."
+                "(excluding maxillary sinus heights). Drag H/W0 handles, add review markers, or send to Agent."
             )
             banner.setWordWrap(True)
             banner.setStyleSheet("color: #f59e0b; font-weight: bold; padding: 4px;")
-            lay.addWidget(banner)
-        else:
-            lay.addWidget(qt.QLabel("Verify or manually edit H and W0 values before final 8x10 print:"))
+            root.addWidget(banner)
 
+        # Prepare per-site editable state (cached cross-section + overrides + custom_overlays)
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        meas_engine = None
+        if self.logic is not None and volNode is not None:
+            try:
+                meas_engine = self.logic._get_or_build_measurement_engine(volNode, segNode)
+            except Exception:
+                meas_engine = None
+
+        overrides_init = getattr(self, "_measurementOverridesByFDI", {}) or {}
+        site_state: Dict[int, Dict[str, Any]] = {}
+        for r in rows:
+            fdi = int(r["fdi"])
+            ov = dict(overrides_init.get(fdi, {}))
+            cs_obj, meas_obj = None, None
+            if meas_engine is not None:
+                try:
+                    meas_obj = meas_engine.measure_implant_site(str(fdi))
+                    cs_obj = getattr(meas_engine, "last_cross_sections", {}).get(str(fdi))
+                except Exception:
+                    logger.debug("Pre-print editor could not pre-measure FDI %s", fdi, exc_info=True)
+            h_start = ov.get("h_start_uv") or (getattr(cs_obj, "crest_uv", None) if cs_obj is not None else (0.0, 5.0))
+            h_end = ov.get("h_end_uv") or (getattr(cs_obj, "basal_uv", None) if cs_obj is not None else (0.0, -5.0))
+            w_eps = getattr(cs_obj, "width_endpoints_uv", {}) if cs_obj is not None else {}
+            w0_pair = w_eps.get(0.0) if isinstance(w_eps, dict) else None
+            w0_l = ov.get("w0_start_uv") or (w0_pair[0] if w0_pair else (-3.5, 4.0))
+            w0_r = ov.get("w0_end_uv") or (w0_pair[1] if w0_pair else (3.5, 4.0))
+            site_state[fdi] = {
+                "fdi": fdi,
+                "cs": cs_obj,
+                "meas": meas_obj,
+                "h_mm": r["h_mm"],
+                "w0_mm": r["w0_mm"],
+                "h_start_uv": tuple(float(v) for v in h_start) if h_start else (0.0, 5.0),
+                "h_end_uv": tuple(float(v) for v in h_end) if h_end else (0.0, -5.0),
+                "w0_start_uv": tuple(float(v) for v in w0_l) if w0_l else (-3.5, 4.0),
+                "w0_end_uv": tuple(float(v) for v in w0_r) if w0_r else (3.5, 4.0),
+                "custom_overlays": [dict(x) for x in (ov.get("custom_overlays") or [])],
+                "notes": list(r["notes"]),
+            }
+
+        body = qt.QHBoxLayout()
+        root.addLayout(body, 1)
+
+        # Left column: slice table + custom overlays list
+        left = qt.QVBoxLayout()
         tbl = qt.QTableWidget(len(rows), 4)
         tbl.setHorizontalHeaderLabels(["FDI", "H (mm)", "W0 (mm)", "Flags / Review Notes"])
         tbl.horizontalHeader().setStretchLastSection(True)
+        tbl.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         for idx, r in enumerate(rows):
             fdi_item = qt.QTableWidgetItem(f"#{r['fdi']}")
             fdi_item.setFlags(fdi_item.flags() & ~qt.Qt.ItemIsEditable)
@@ -3811,7 +3857,207 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             tbl.setItem(idx, 1, h_item)
             tbl.setItem(idx, 2, w0_item)
             tbl.setItem(idx, 3, notes_item)
-        lay.addWidget(tbl)
+        left.addWidget(tbl, 2)
+
+        left.addWidget(qt.QLabel("Custom Lines / Circles on Selected Slice:"))
+        ov_list = qt.QListWidget()
+        left.addWidget(ov_list, 1)
+        ov_btns = qt.QHBoxLayout()
+        btn_rm_ov = qt.QPushButton("Remove Selected")
+        btn_clr_ov = qt.QPushButton("Clear Slice Overlays")
+        ov_btns.addWidget(btn_rm_ov)
+        ov_btns.addWidget(btn_clr_ov)
+        left.addLayout(ov_btns)
+        body.addLayout(left, 2)
+
+        # Right column: interactive canvas + mode buttons
+        right = qt.QVBoxLayout()
+        mode_row = qt.QHBoxLayout()
+        mode_combo = qt.QComboBox()
+        mode_combo.addItem("Drag H / W0 Calipers", "drag")
+        mode_combo.addItem("Add Line + Text (click 2 pts)", "line")
+        mode_combo.addItem("Add Circle + Text (center + edge)", "circle")
+        mode_row.addWidget(qt.QLabel("Tool:"))
+        mode_row.addWidget(mode_combo, 1)
+        right.addLayout(mode_row)
+
+        scene = qt.QGraphicsScene(dlg)
+        view = qt.QGraphicsView(scene)
+        view.setMinimumSize(420, 460)
+        right.addWidget(view, 1)
+        canvas_hint = qt.QLabel("Click a site on the left, then drag green (H) or cyan (W0) handles directly.")
+        canvas_hint.setWordWrap(True)
+        right.addWidget(canvas_hint)
+        body.addLayout(right, 3)
+
+        active = {"row": 0, "pending_uv": None, "dragging": None, "u_bounds": (-15.0, 15.0), "v_bounds": (-25.0, 25.0), "w_px": 360.0, "h_px": 420.0}
+
+        def _uv_to_px(u: float, v: float) -> Tuple[float, float]:
+            u0, u1 = active["u_bounds"]
+            v0, v1 = active["v_bounds"]
+            px = (u - u0) / max(1e-6, u1 - u0) * active["w_px"]
+            py = (v1 - v) / max(1e-6, v1 - v0) * active["h_px"]
+            return px, py
+
+        def _px_to_uv(px: float, py: float) -> Tuple[float, float]:
+            u0, u1 = active["u_bounds"]
+            v0, v1 = active["v_bounds"]
+            u = u0 + (px / max(1e-6, active["w_px"])) * (u1 - u0)
+            v = v1 - (py / max(1e-6, active["h_px"])) * (v1 - v0)
+            return round(u, 2), round(v, 2)
+
+        def _refresh_canvas() -> None:
+            scene.clear()
+            ov_list.clear()
+            if not rows:
+                return
+            r_idx = max(0, min(len(rows) - 1, active["row"]))
+            fdi = int(rows[r_idx]["fdi"])
+            st = site_state[fdi]
+            cs_obj = st["cs"]
+            if cs_obj is not None and getattr(cs_obj, "u_coords", None) is not None:
+                active["u_bounds"] = (float(cs_obj.u_coords[0]), float(cs_obj.u_coords[-1]))
+                active["v_bounds"] = (float(cs_obj.v_coords[0]), float(cs_obj.v_coords[-1]))
+                try:
+                    import io as _io
+                    from CBCTPlannerLib.core_print_render import render_cross_section
+
+                    rnd = render_cross_section(
+                        cs_obj,
+                        st["meas"],
+                        scale=3,
+                        show_masks=False,
+                        show_footer=False,
+                        inline_line_labels=True,
+                        custom_overlays=st["custom_overlays"],
+                    )
+                    if rnd.available and rnd.image is not None:
+                        buf = _io.BytesIO()
+                        rnd.image.save(buf, format="PNG")
+                        pix = qt.QPixmap()
+                        pix.loadFromData(buf.getvalue(), "PNG")
+                        active["w_px"] = float(pix.width())
+                        active["h_px"] = float(pix.height())
+                        scene.addPixmap(pix)
+                except Exception:
+                    logger.debug("Pre-print editor slice render failed", exc_info=True)
+            else:
+                scene.addRect(0, 0, active["w_px"], active["h_px"], qt.QPen(qt.QColor("#334155")), qt.QBrush(qt.QColor("#0b1120")))
+
+            # Draw draggable H and W0 handle dots & lines
+            h0 = _uv_to_px(*st["h_start_uv"])
+            h1 = _uv_to_px(*st["h_end_uv"])
+            w0 = _uv_to_px(*st["w0_start_uv"])
+            w1 = _uv_to_px(*st["w0_end_uv"])
+            scene.addLine(h0[0], h0[1], h1[0], h1[1], qt.QPen(qt.QColor("#22c55e"), 2))
+            scene.addLine(w0[0], w0[1], w1[0], w1[1], qt.QPen(qt.QColor("#00dcff"), 2))
+            for pt, col in ((h0, "#22c55e"), (h1, "#22c55e"), (w0, "#00dcff"), (w1, "#00dcff")):
+                scene.addEllipse(pt[0] - 5, pt[1] - 5, 10, 10, qt.QPen(qt.QColor("#ffffff")), qt.QBrush(qt.QColor(col)))
+
+            for ov in st["custom_overlays"]:
+                ov_list.addItem(f"{ov.get('kind', '?').upper()}: {ov.get('text') or '(unlabeled)'}")
+
+        def _on_scene_press(pos_scene: Any) -> None:
+            if not rows:
+                return
+            fdi = int(rows[active["row"]]["fdi"])
+            st = site_state[fdi]
+            mode = str(mode_combo.currentData or "drag")
+            px, py = float(pos_scene.x()), float(pos_scene.y())
+            uv = _px_to_uv(px, py)
+            if mode == "drag":
+                best_key, best_d = None, 16.0
+                for key in ("h_start_uv", "h_end_uv", "w0_start_uv", "w0_end_uv"):
+                    hx, hy = _uv_to_px(*st[key])
+                    d = math.hypot(px - hx, py - hy)
+                    if d < best_d:
+                        best_d, best_key = d, key
+                active["dragging"] = best_key
+            elif mode in ("line", "circle"):
+                if active["pending_uv"] is None:
+                    active["pending_uv"] = uv
+                    canvas_hint.setText(f"First point set at {uv}. Click second point to finish {mode}.")
+                else:
+                    p1 = active["pending_uv"]
+                    active["pending_uv"] = None
+                    label_txt = qt.QInputDialog.getText(dlg, f"Add {mode.title()}", "Label text (optional):")
+                    if mode == "line":
+                        st["custom_overlays"].append({"kind": "line", "p1_uv": p1, "p2_uv": uv, "text": str(label_txt or "")})
+                    else:
+                        r_mm = round(math.hypot(uv[0] - p1[0], uv[1] - p1[1]), 2)
+                        st["custom_overlays"].append({"kind": "circle", "center_uv": p1, "radius_mm": max(0.5, r_mm), "text": str(label_txt or "")})
+                    canvas_hint.setText(f"Added {mode} to #{fdi}.")
+                    _refresh_canvas()
+
+        def _on_scene_move(pos_scene: Any) -> None:
+            key = active.get("dragging")
+            if not key or not rows:
+                return
+            r_idx = active["row"]
+            fdi = int(rows[r_idx]["fdi"])
+            st = site_state[fdi]
+            st[key] = _px_to_uv(float(pos_scene.x()), float(pos_scene.y()))
+            # Recompute H / W0 mm live and keep H start aligned when W0 moves
+            if key in ("w0_start_uv", "w0_end_uv"):
+                w0_l, w0_r = st["w0_start_uv"], st["w0_end_uv"]
+                st["w0_mm"] = round(math.hypot(w0_r[0] - w0_l[0], w0_r[1] - w0_l[1]), 2)
+                st["h_start_uv"] = (0.5 * (w0_l[0] + w0_r[0]), 0.5 * (w0_l[1] + w0_r[1]))
+                tbl.item(r_idx, 2).setText(f"{st['w0_mm']:.1f}")
+            h0, h1 = st["h_start_uv"], st["h_end_uv"]
+            st["h_mm"] = round(math.hypot(h1[0] - h0[0], h1[1] - h0[1]), 2)
+            tbl.item(r_idx, 1).setText(f"{st['h_mm']:.1f}")
+            _refresh_canvas()
+
+        def _on_scene_release(_pos: Any) -> None:
+            active["dragging"] = None
+
+        class _Filter(qt.QObject):
+            def eventFilter(self, obj: Any, ev: Any) -> bool:
+                et = ev.type()
+                if et == qt.QEvent.MouseButtonPress:
+                    _on_scene_press(view.mapToScene(ev.pos()))
+                    return True
+                if et == qt.QEvent.MouseMove and active.get("dragging"):
+                    _on_scene_move(view.mapToScene(ev.pos()))
+                    return True
+                if et == qt.QEvent.MouseButtonRelease and active.get("dragging"):
+                    _on_scene_release(view.mapToScene(ev.pos()))
+                    return True
+                return False
+
+        ev_filter = _Filter(view)
+        view.viewport().installEventFilter(ev_filter)
+
+        def _on_row_selected() -> None:
+            sel = tbl.currentRow()
+            if sel >= 0:
+                active["row"] = sel
+                active["pending_uv"] = None
+                _refresh_canvas()
+
+        def _remove_selected_ov() -> None:
+            if not rows:
+                return
+            idx = ov_list.currentRow()
+            fdi = int(rows[active["row"]]["fdi"])
+            ovs = site_state[fdi]["custom_overlays"]
+            if 0 <= idx < len(ovs):
+                ovs.pop(idx)
+                _refresh_canvas()
+
+        def _clear_ovs() -> None:
+            if not rows:
+                return
+            fdi = int(rows[active["row"]]["fdi"])
+            site_state[fdi]["custom_overlays"].clear()
+            _refresh_canvas()
+
+        tbl.itemSelectionChanged.connect(_on_row_selected)
+        btn_rm_ov.clicked.connect(_remove_selected_ov)
+        btn_clr_ov.clicked.connect(_clear_ovs)
+        if rows:
+            tbl.selectRow(0)
+            _refresh_canvas()
 
         choice = {"action": "cancel"}
         btn_row = qt.QHBoxLayout()
@@ -3821,18 +4067,25 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         def _commit_and_print() -> None:
             for idx, r in enumerate(rows):
-                edits: Dict[str, Any] = {}
+                fdi = int(r["fdi"])
+                st = site_state[fdi]
+                edits: Dict[str, Any] = {
+                    "h_start_uv": st["h_start_uv"],
+                    "h_end_uv": st["h_end_uv"],
+                    "w0_start_uv": st["w0_start_uv"],
+                    "w0_end_uv": st["w0_end_uv"],
+                    "custom_overlays": st["custom_overlays"],
+                }
                 for col, key in ((1, "h_mm"), (2, "w0_mm")):
                     txt = str(tbl.item(idx, col).text() or "").strip()
                     if txt:
                         try:
                             val = float(txt)
-                            if val > 0.0 and (r[key] is None or abs(val - float(r[key])) > 1e-3):
+                            if val > 0.0:
                                 edits[key] = val
                         except ValueError:
                             pass
-                if edits:
-                    self._apply_agent_measurement_edit(r["fdi"], edits)
+                self._apply_agent_measurement_edit(fdi, edits)
             choice["action"] = "print"
             dlg.accept()
 
@@ -3847,7 +4100,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         btn_row.addStretch(1)
         btn_row.addWidget(btn_cancel)
         btn_row.addWidget(btn_print)
-        lay.addLayout(btn_row)
+        root.addLayout(btn_row)
 
         dlg.exec_()
         return choice["action"]

@@ -793,10 +793,17 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
         self.assertIsNotNone(meas)
         assert cs is not None
         self.assertIn(0.0, cs.width_endpoints_uv)
-        w0_l, w0_r = cs.width_endpoints_uv[0.0]
-        expected_u = 0.5 * (float(w0_l[0]) + float(w0_r[0]))
         self.assertIsNotNone(cs.crest_uv)
-        self.assertAlmostEqual(float(cs.crest_uv[0]), expected_u, places=4)
+        self.assertIsNotNone(cs.basal_uv)
+        w0_l, w0_r = cs.width_endpoints_uv[0.0]
+        w0_mid = np.array([0.5 * (float(w0_l[0]) + float(w0_r[0])), 0.5 * (float(w0_l[1]) + float(w0_r[1]))])
+        h0 = np.array([float(cs.crest_uv[0]), float(cs.crest_uv[1])])
+        h1 = np.array([float(cs.basal_uv[0]), float(cs.basal_uv[1])])
+        # H segment [h0, h1] must cross W0 at its exact midpoint w0_mid (distance to segment == 0).
+        seg = h1 - h0
+        t = float(np.clip(np.dot(w0_mid - h0, seg) / max(1e-9, np.dot(seg, seg)), 0.0, 1.0))
+        closest = h0 + t * seg
+        self.assertLess(float(np.linalg.norm(w0_mid - closest)), 1e-3)
 
 
 class TestCrossSectionEntryPoints(unittest.TestCase):

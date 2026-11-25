@@ -972,9 +972,75 @@ def fit_arch_from_label_mask(
         else:
             labels = tuple(MANDIBULAR_TEETH_IDS) + tuple(MAXILLARY_TEETH_IDS)
 
+    def _fit_from_jawbone_crest() -> Optional[ArchFitResult]:
+        bone_labels = (1,) if jaw_key == "lower" else ((2,) if jaw_key == "upper" else (1, 2))
+        bz, by, bx = np.where(np.isin(mask, bone_labels))
+        if len(bx) < 30:
+            return None
+        b_step = max(1, len(bx) // 60000)
+        b_vox = np.column_stack(
+            [bx[::b_step], by[::b_step], bz[::b_step], np.ones(len(bx[::b_step]), dtype=np.float64)]
+        )
+        b_world = (matrix @ b_vox.T).T[:, :3]
+        # Keep the alveolar crest band: superior 30% for Mandible, inferior 30% for Maxilla.
+        if jaw_key == "lower":
+            crest_pts = b_world[b_world[:, 2] >= float(np.percentile(b_world[:, 2], 70))]
+        elif jaw_key == "upper":
+            crest_pts = b_world[b_world[:, 2] <= float(np.percentile(b_world[:, 2], 30))]
+        else:
+            crest_pts = b_world
+        if len(crest_pts) < 30:
+            crest_pts = b_world
+        b_order_idx = _order_cloud_as_horseshoe(crest_pts[:, :2])
+        b_ordered = crest_pts[b_order_idx]
+        b_bins = max(24, num_control_points * 3)
+        b_edges = np.linspace(0, len(b_ordered), b_bins + 1).astype(int)
+        b_binned = np.asarray(
+            [
+                np.median(b_ordered[b_edges[i] : max(b_edges[i] + 1, b_edges[i + 1])], axis=0)
+                for i in range(b_bins)
+            ],
+            dtype=np.float64,
+        )
+        if len(b_binned) < 4:
+            return None
+        if b_binned[0, 0] < b_binned[-1, 0]:
+            b_binned = b_binned[::-1].copy()
+        b_ctrl, b_dense = _spline_through_ordered(b_binned, num_control_points, smoothing=0.10)
+        b_arc = _polyline_arc_length(b_dense)
+        b_res = _rms_to_polyline(crest_pts, b_dense)
+        inv_aff = np.linalg.inv(matrix)
+        b_base = b_ctrl.copy()
+        b_ctrl = _extend_arch_endpoints(
+            b_ctrl, float(end_extension_mm), inverse_affine=inv_aff, shape_zyx=mask.shape
+        )
+        b_dense = _extend_arch_endpoints(
+            b_dense, float(end_extension_mm), inverse_affine=inv_aff, shape_zyx=mask.shape
+        )
+        b_ext = min(
+            float(np.linalg.norm(b_ctrl[0] - b_base[0])),
+            float(np.linalg.norm(b_ctrl[-1] - b_base[-1])),
+        )
+        b_acc = (45.0 <= b_arc <= 220.0) and (b_res <= 8.0)
+        b_reason = "" if b_acc else f"jawbone crest arc {b_arc:.1f} mm / RMS {b_res:.2f} mm outside gate"
+        if b_ctrl[0, 0] < b_ctrl[-1, 0]:
+            b_ctrl = b_ctrl[::-1].copy()
+        return ArchFitResult(
+            points_ras=b_ctrl,
+            arc_length_mm=_polyline_arc_length(b_dense),
+            residual_rms_mm=b_res,
+            n_points_used=int(len(crest_pts)),
+            method="jawbone_crest",
+            accepted=b_acc,
+            reason=b_reason,
+            tooth_bearing_arc_mm=float(b_arc),
+            end_extension_mm=float(end_extension_mm),
+            applied_extension_mm=float(b_ext),
+        )
+
     z_idx, y_idx, x_idx = np.where(np.isin(mask, labels))
     if len(x_idx) < 30:
-        return None
+        return _fit_from_jawbone_crest()
 
     # Per-label centroids (only meaningful when labels are individual FDI teeth).
     centroids: Dict[str, np.ndarray] = {}
@@ -1079,6 +1145,11 @@ def fit_arch_from_label_mask(
     # The clinical gate applies to the segmented tooth row, not the added retromolar
     # extension, otherwise a short/failed tooth fit could pass by growing its ends.
     if not (60.0 <= tooth_bearing_arc <= 200.0):
+        # Partially edentulous fallback: if remaining teeth cover < 60 mm, fit from Maxilla/Mandible bone.
+        if tooth_bearing_arc < 60.0:
+            bone_fit = _fit_from_jawbone_crest()
+            if bone_fit is not None and bone_fit.accepted:
+                return bone_fit
         accepted = False
         reason = (reason + "; " if reason else "") + (
             f"tooth-bearing arc {tooth_bearing_arc:.1f} mm outside [60, 200] mm"
