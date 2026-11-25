@@ -35,3 +35,32 @@
   3. `_data_uri_to_image` MUST NOT call `.convert("RGB")` — keep the RGBA channel intact for compositing.
   4. `_paste_contain` MUST alpha-composite the RGBA tile over the film using `Image.alpha_composite` or `paste(img, mask=img.split()[3])`, never draw a solid background color first.
 - **Rationale**: Dropping the alpha channel turns the transparent air black (`#020617`), producing opaque dark pano/VR panels on the clinical 8×10 film which are clinically unacceptable and aesthetically broken.
+
+## 7. Remote-Agent Output Is Untrusted Input
+- **Trigger**: Parsing, storing or applying anything that came back from a review-agent endpoint (`core/agent_review.py`).
+- **Observed Pattern**: Parse JSON tolerantly (fenced block, prose wrapper, brace-balanced substring) but **validate before
+  acting**: only whitelisted ops (`add_annotation`, `update_annotation`, `remove_annotation`, `add_tooth`, `remove_tooth`,
+  `set_implant_diameter`, `flag_site`) may run, and never automatically — the GUI applies them only on an explicit
+  *Apply agent changes*. Count rejected ops and show them; do not silently drop them.
+- **Also**: the API key is only ever an `Authorization: Bearer` header. It must not enter the request body, the annotation
+  store, the MRML scene, a log line or an exception message (`redact_secrets`). Patient identifiers are replaced before
+  the payload leaves the machine.
+- **Rationale**: A model can hallucinate a tooth, a measurement or an FDI number; a whitelist plus an explicit Apply step is
+  the difference between advice and an unaudited edit to a clinical plan.
+
+## 8. Tangential Sections Use the Arch Frame Explicitly
+- **Trigger**: Sampling a ridge-parallel (tangential) section in `core/tangential.py`.
+- **Observed Pattern**: Span the image plane by the **arch tangent** (image columns) and the **occlusal axis** (image rows,
+  **row 0 = superior**); average the slab along the **buccal normal**. Do not reuse the cross-section axis convention — a
+  tangential view is 90° from a cross-section and mixing the two silently transposes the anatomy. Report `crest_drop_mm`
+  from the cortical crest line (bone→air per column), and render RGBA with transparent air.
+- **Rationale**: Cross-sections answer "how much bone at this site"; tangential sections answer "is the crest continuous
+  along the ridge". Keeping the basis explicit makes the two views comparable instead of interchangeable.
+
+## 9. No QThread — Network Work Is a Plain Thread Plus a QTimer Poll
+- **Trigger**: Any blocking I/O started from a widget handler (agent HTTP request, exports).
+- **Observed Pattern**: `threading.Thread` runs the call into a plain attribute (`_agentWorkerOutcome`), a `QTimer` (150 ms
+  for the agent, 180 ms debounce for the tangential refresh) polls it on the GUI thread, and every timer/thread handle is
+  stopped in `cleanup()`. Do not introduce `QThread`/`Signal` patterns into this codebase — none of the existing modules use
+  them and headless tests cannot construct them.
+- **Rationale**: Keeps 3D Slicer responsive without a second threading idiom, and keeps the handlers testable without Qt.

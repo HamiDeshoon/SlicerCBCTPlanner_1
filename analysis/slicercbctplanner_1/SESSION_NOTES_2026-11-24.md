@@ -325,3 +325,67 @@ Three MCP tools over Slicer's built-in Web Server REST API (`http://localhost:20
 
 - `sys` is not in Slicer's `/exec` globals: probe code must `import sys` itself.
 - First launch of a fresh `.exe` can exceed 30 s (antivirus scan) — the initialize timeout is 120 s.
+
+---
+
+## 12. Documentation sync & commit record (2026-11-25)
+
+**Committed:** `9411c7b` — *Add comprehensive unit tests for agent review and annotation handling*.
+20 files, **+4 779 / −113**: `CBCTPlanner.py` (+1 020), `core/agent_review.py` (839), `core/annotations.py` (392),
+`core/tangential.py` (324), three new test modules (972), `WorkflowUIHelpers.py`, `verify_real_ct.py` (+190),
+`analysis/mcp_slicer_check/` (548), `.mcp.json`, plus the measurement/print adjustments from §9.
+Working tree is clean on `main`; nothing pushed beyond `main`'s existing upstream.
+
+This session then re-synced the documentation to the code as merged:
+
+| File | Update |
+|------|--------|
+| `README.md` | Header now reads “v3.0 → v3.1”; new **Roadmap / Future Updates** section (agent, measurement honesty, rendering, MCP); *Running Tests* shows 219 tests and both Slicer harnesses; Step 8 + MCP sections already documented in `9411c7b` |
+| `analysis/slicercbctplanner_1/BUSINESS_RULES.md` | Inventory 167→**219** tests / 51 modules; new **RC-07** (review agent + annotation store) and **RC-08** (tangential sections); backlog extended with `BL-13`–`BL-16`; test table replaced with the real per-file counts (16 files, 219); pipeline graph gains the three new core modules; §6 raised to **23/23** with the tangential + agent rows; new **§7 MCP verification record** (11/11) |
+| `.ecc/instincts.md` | Three new instincts: untrusted agent output / key handling, tangential plane basis, thread + `QTimer` instead of `QThread` |
+| `.ecc/context.json` | Milestone, decisions, completed and next tasks updated to the merged Step 8 + MCP state |
+
+### Checks re-run for this sync
+
+| Check | Result |
+|-------|--------|
+| `python -m unittest discover -s tests` | **219 tests, OK** (16.8 s) |
+| `PythonSlicer verify_real_ct.py` | 23/23 PASS, exit 0 (run before the doc sync; code unchanged since) |
+| `python analysis/mcp_slicer_check/verify_mcp_slicer.py` | 11/11 PASS, exit 0 |
+| `git status` | only the five documentation files below are modified; no code changed |
+
+---
+
+## 13. Consolidated future updates
+
+The same list lives in `README.md` → *Roadmap* and `BUSINESS_RULES.md` → §3; IDs are stable, so a future session can
+pick one and go.
+
+### Step 8 (agent, annotations, tangential)
+| ID | Item | Why it matters | Effort |
+|----|------|----------------|--------|
+| `BL-14` | Print annotations/agent comments into the 8×10 film and the HTML report | The store is invisible on the clinical deliverable today | S–M |
+| `BL-13` | Apply `set_implant_diameter`/length instead of skipping | Requires a plan override column so a measurement-derived row is not overwritten | M |
+| `BL-15` | Retry/backoff on 429/5xx | `AgentError.is_retryable` is exposed but unused; one transient rate limit loses the review | S |
+| — | Token/image budget + pre-send size estimate | Up to 8 images; long cases can exceed a context window | S |
+| — | Per-case review log (request id, model, latency, applied count) | Auditability of an AI-authored comment on a clinical case | S |
+| — | Tangential: multi-slab thickness and a buccal/lingual offset control | Current slab is a single averaged band | S |
+
+### Measurement honesty
+| ID | Item | Why it matters | Effort |
+|----|------|----------------|--------|
+| `BL-12` | Withhold `W0` when the opposite cortex is absent | 185/205 real-CT sections cut one plate and still report 1–3 mm as a crest width | M |
+| `BL-01` | 1-site Gaussian smoothing of `W0`/`W3`/`W5` along the arch | Removes isolated inter-root spikes | S |
+| `BL-05` | Dynamic `half_v_mm` for tall anterior mandibles | 25.0 mm clips the chin on some scans; 30.0 broke phantom tests | M |
+| `BL-06` | PDL gap tolerance validation on real molars | 1.5 mm bridge is untested against thin widened PDL | S |
+| — | FDI 43 edge section reads 1.75 mm | Single interproximal outlier; neighbours bridge 7.6–7.9 mm | S |
+
+### Rendering, packaging, MCP
+| ID | Item | Why it matters | Effort |
+|----|------|----------------|--------|
+| `OPT-03` | Pass `PIL.Image`/`ndarray` directly when composing the film | Avoids `RGBA → base64 → PIL.Image` round-trips | S |
+| `OPT-04` | `scipy.ndimage.label` flood-fill in `finalize_transparent_png_bytes` | Removes the Python per-pixel BFS on high-DPI captures | S |
+| `BL-03`/`BL-04` | RaySum scale/gamma exploration; user-adjustable VR `Zoom` | Rendering taste, no correctness impact | S |
+| `BL-16` | Vendored `mcp-slicer` with `SLICER_WEB_SERVER_URL` | Port 2016 is hardcoded upstream | S |
+| `BL-07`/`BL-09` | Test-helper extraction; trim unused `core/diagnostics.py` | Maintenance only | S |
+| `OPT-05` | Structured (JSON/Parquet) batch manifest for cohort QA | Phase 7 stores `.npy` only | M |

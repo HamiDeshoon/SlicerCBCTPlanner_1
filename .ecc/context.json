@@ -1,7 +1,7 @@
 {
   "session_id": "slicer-cbct-planner-v3.1-fixes",
-  "updated_at": "2026-11-24T21:30:00+03:30",
-  "active_milestone": "Phase 3: real-CT verification complete (19/19 headless PythonSlicer checks, 205 sections) merged to main (9528e4e)",
+  "updated_at": "2026-11-25T12:00:00+03:30",
+  "active_milestone": "Phase 4: Step 8 (review agent + annotations + tangential sections) and the MCP server integration verified and merged (9411c7b); documentation re-synced to 219 tests",
   "decisions": [
     {
       "topic": "Print File & Measured Image Bug Fixes",
@@ -57,25 +57,65 @@
       "topic": "half_v_mm kept at 25.0 mm",
       "chosen": "half_v_mm = 25.0 mm (not 30.0); 30.0 broke test_core_math.py 50x50x50 plausibility tests",
       "reason": "30 mm exceeds the phantom volume, causing EDT boundary artifacts in unit test geometry."
+    },
+    {
+      "topic": "Remote review agent wire format",
+      "chosen": "OpenAI-compatible POST <base>/chat/completions with Authorization: Bearer; URL resolver accepts bare host, /v1, /openai and full /chat/completions; tolerant JSON parse; fixed action whitelist; nothing applied until 'Apply agent changes'",
+      "reason": "Any gateway (OpenAI, Azure, vLLM, Ollama shim, internal proxy) works with one implementation, and untrusted model output can never silently edit a clinical plan."
+    },
+    {
+      "topic": "Annotation model",
+      "chosen": "Qt-free core/annotations.py AnnotationStore (id, FDI, arc mm, kind, severity, author, source, timestamps, JSON round trip); GUI keeps a Qt-free _annotationRowIds map",
+      "reason": "Annotations are needed by the agent payload, the report and tests; keeping them out of Qt makes all of it headless-testable."
+    },
+    {
+      "topic": "Tangential (ridge-parallel) plane",
+      "chosen": "Plane spanned by arch tangent (columns) and occlusal axis (rows, row 0 superior), slab averaged along the buccal normal, 0.3 mm pixels, crest line + crest_drop_mm reported",
+      "reason": "Shows crest continuity along the ridge, which a buccolingual cross-section cannot; mirrors the cross-section convention without transposing the anatomy."
+    },
+    {
+      "topic": "MCP server integration",
+      "chosen": "Keep upstream zhaoyouj/mcp-slicer 0.3.1 unmodified; repo ships .mcp.json (uvx mcp-slicer), a loopback REST-API Slicer launcher and an 11-check harness",
+      "reason": "Verified working on Slicer 5.12.3 without vendoring a patched copy; the hardcoded port 2016 is documented as BL-16."
+    },
+    {
+      "topic": "Threading for agent requests",
+      "chosen": "threading.Thread + 150 ms QTimer poll (180 ms debounce for tangential); timers stopped in cleanup()",
+      "reason": "No QThread/Signal pattern exists in the codebase, and headless tests cannot construct Qt objects."
     }
   ],
   "modified_files": [
-    "CBCTPlanner/CBCTPlannerLib/core/labels.py",
-    "CBCTPlanner/CBCTPlannerLib/core/measurements.py",
-    "CBCTPlanner/CBCTPlannerLib/core_print_render.py",
-    "CBCTPlanner/CBCTPlannerLib/PrintLayoutEngine.py",
-    "CBCTPlanner/CBCTPlannerLib/VRVisualization.py",
-    "CBCTPlanner/CBCTPlannerLib/RiseMarEngine.py",
-    "CBCTPlanner/CBCTPlannerLib/AutomatedDentalToolsEngine.py",
-    "CBCTPlanner/CBCTPlannerLib/AdvancedTools.py",
-    "CBCTPlanner/CBCTPlannerLib/__init__.py",
+    ".ecc/context.json",
+    ".ecc/instincts.md",
+    ".mcp.json",
     "CBCTPlanner/CBCTPlanner.py",
+    "CBCTPlanner/CBCTPlannerLib/AdvancedTools.py",
+    "CBCTPlanner/CBCTPlannerLib/AutomatedDentalToolsEngine.py",
     "CBCTPlanner/CBCTPlannerLib/PanoramicCurveLogic.py",
     "CBCTPlanner/CBCTPlannerLib/Phase7Tools.py",
+    "CBCTPlanner/CBCTPlannerLib/PrintLayoutEngine.py",
+    "CBCTPlanner/CBCTPlannerLib/RiseMarEngine.py",
+    "CBCTPlanner/CBCTPlannerLib/VRVisualization.py",
+    "CBCTPlanner/CBCTPlannerLib/WorkflowUIHelpers.py",
+    "CBCTPlanner/CBCTPlannerLib/__init__.py",
+    "CBCTPlanner/CBCTPlannerLib/core/agent_review.py",
+    "CBCTPlanner/CBCTPlannerLib/core/annotations.py",
+    "CBCTPlanner/CBCTPlannerLib/core/labels.py",
+    "CBCTPlanner/CBCTPlannerLib/core/measurements.py",
+    "CBCTPlanner/CBCTPlannerLib/core/tangential.py",
+    "CBCTPlanner/CBCTPlannerLib/core_print_render.py",
+    "README.md",
+    "analysis/mcp_slicer_check/slicer_webserver_boot.py",
+    "analysis/mcp_slicer_check/verify_mcp_slicer.py",
+    "analysis/slicercbctplanner_1/BUSINESS_RULES.md",
+    "analysis/slicercbctplanner_1/SESSION_NOTES_2026-11-24.md",
+    "tests/test_agent_review.py",
+    "tests/test_agent_step_glue.py",
     "tests/test_anatomy_aware_measurements.py",
-    "tests/test_print_layout.py",
     "tests/test_clinical_delivery.py",
-    "tests/test_slicer_integration.py"
+    "tests/test_print_layout.py",
+    "tests/test_slicer_integration.py",
+    "tests/test_tangential_view.py"
   ],
   "completed_tasks": [
     "Inspect SlicerCBCTPlanner_1 codebase",
@@ -103,16 +143,23 @@
     "Detect and document the S-I/L-R voxel inversion of ToothFairy3S_0021 and the required auto_fix_anatomical_orientation step",
     "Profile RaySum panoramic sampling (0.8 ms/column) and 3D MIP RGBA capture (0.64-0.95 s) on the full 370x370x169 volume",
     "Merge feat/new_ver_gpt into main and push (9528e4e)",
-    "Delete the 7 merged origin/* branches after fetch --prune"
+    "Delete the 7 merged origin/* branches after fetch --prune",
+    "Step 8: AI Agent Review, Annotations & Tangential Sections (8th step chip, all four workspace role profiles)",
+    "core/agent_review.py: endpoint normalisation, context/payload, tolerant JSON, action whitelist, apply, urllib transport + MockTransport, redaction",
+    "core/annotations.py AnnotationStore with JSON round trip; GUI table add/remove/export",
+    "core/tangential.py ridge-parallel sampler, crest drop and RGBA renderer",
+    "Real-CT verification extended to 23/23: tangential section (101x141 @ 0.30 mm/px, crest drop 11.1 mm, 0.03 s) and agent mock round trip (49 KB payload, 3 applied, 1 rejected)",
+    "Install and verify zhaoyouj/mcp-slicer 0.3.1 against Slicer 5.12.3 (11/11), add .mcp.json + launcher + harness",
+    "Commit the whole Step 8 + MCP batch (9411c7b) and re-sync README / BUSINESS_RULES / instincts / session notes / this context file"
   ],
   "next_tasks": [
-    "Withhold W0 when the opposite cortex is absent from the section, instead of reporting a 1-3 mm plate (BL-12)",
-    "Decide grayscale default for CLI/batch callers in generate_8x10_layout",
-    "Smooth W0/W3/W5 along arch (1-site Gaussian, BL-01)",
-    "PDL gap tolerance validation on real molar CT (BL-06)",
-    "Trim unused core/diagnostics.py code (BL-09)",
-    "Refactor brittle NIfTI parser in test_clinical_delivery.py to tests/helpers/nifti_reader.py (BL-07)",
-    "Delete or PR-close remote origin/feat/new_ver_gpt on GitHub",
-    "Delete local swarm worktree branches (swarm-measurer-a7517b9a, swarm-panoview-b0afd737, swarm-renderer-9da5293b)"
+    "BL-14: print annotations and agent comments into the 8x10 film and HTML report",
+    "BL-13: apply agent implant diameter/length edits via a plan override column",
+    "BL-15: retry/backoff on agent rate limits (422/429/5xx), using AgentError.is_retryable",
+    "BL-12: withhold W0 when the opposite cortex is absent from the section",
+    "BL-01: smooth W0/W3/W5 along the arch (1-site Gaussian)",
+    "BL-16: vendored mcp-slicer copy with SLICER_WEB_SERVER_URL so the port is configurable",
+    "OPT-03: pass PIL.Image/ndarray directly when composing the 8x10 film",
+    "OPT-04: scipy.ndimage.label flood-fill in finalize_transparent_png_bytes"
   ]
 }

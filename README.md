@@ -2,7 +2,7 @@
 
 **SlicerCBCTPlanner v3.1** is a full-stack 3D Slicer scripted extension for automated pre-implant CBCT bone morphometry, 3D vivid tooth/root visualization, cephalometric & orthodontic analysis, and deep-learning Metal Artifact Reduction (MAR).
 
-## Key Upgrades in v3.0
+## Key Features & Upgrades (v3.0 → v3.1)
 
 ### 1. Fixed Print File Generation & Live Measured Cross-Section Gallery
 - **Root-Cause Fixes**:
@@ -111,7 +111,52 @@ JPEG captures of the application window, the Red slice view (matching the widget
 - Slice screenshots grab the on-screen widget, so the image is only as big as that view; maximise Slicer for a usable
   capture, and prefer `view_type="application"` or `"3d"` for full-case context.
 
+## Roadmap / Future Updates
+
+Nothing below is implemented yet. It is the agreed backlog after the v3.1 feature pass, ordered by clinical value;
+the measurement items are tracked as `BL-*` in `analysis/slicercbctplanner_1/BUSINESS_RULES.md`.
+
+### Agent & annotations
+- **Print the annotations** — agent comments and clinician notes are stored and exportable to JSON, but they do not
+  appear on the 8×10 film or in the HTML report yet (`BL-14`).
+- **Let the agent change implant selection** — `set_implant_diameter` is accepted and then reported as skipped, because
+  the plan table is derived from measurements; the plan needs an explicit override column first (`BL-13`).
+- **Retry/backoff on rate limits** — a `429`/`5xx` answer currently surfaces as a failed request; `AgentError.is_retryable`
+  is already exposed for a backoff loop (`BL-15`).
+- **Token/image budget** — the payload is built once with up to 8 images; long cases would benefit from a per-image
+  budget and a size estimate before sending.
+- **Review history** — one request/response pair is kept in memory; a per-case log (request id, model, latency, applied
+  actions) would make the agent auditable.
+
+### Measurement honesty
+- **Withhold `W0` when the opposite cortex is absent** (`BL-12`) — 185/205 sections in the real-CT sweep cut a single
+  plate and currently report 1–3 mm as a crest width instead of withholding it the way `H~` is marked.
+- **Smooth `W0`/`W3`/`W5` along the arch** (`BL-01`) — a 1-site Gaussian would stop isolated slices between roots from
+  spiking.
+- **Dynamic `half_v_mm`** (`BL-05`) for very tall anterior mandibles, and **PDL gap validation** on real molars (`BL-06`).
+- **One residual interproximal section** at the FDI 43 edge (arc 39.9 mm) still reads a 1.75 mm plate while its
+  neighbours bridge 7.6–7.9 mm.
+
+### Rendering & performance
+- `1.0×` vs `1.25×` RaySum scale and gamma/CLAHE post-processing (`BL-03`); user-adjustable VR `Zoom` (`BL-04`).
+- Reuse RGBA tiles instead of the `RGBA → base64 → PIL.Image` round-trip when composing the film (`OPT-03`).
+- Vectorise `finalize_transparent_png_bytes` with `scipy.ndimage.label` (`OPT-04`).
+
+### MCP
+- The server hardcodes `http://localhost:2016/slicer`; a small vendored copy that reads `SLICER_WEB_SERVER_URL` would
+  allow another port or host (`BL-16`). Loopback-only binding and the stop-server step stay mandatory either way.
+
 ## Running Tests
 ```bash
-python3 -m unittest discover -s tests -v
+python -m unittest discover -s tests -v      # 219 tests
+```
+
+Two headless harnesses run inside 3D Slicer's *own* Python (they need VTK/Qt, so the plain interpreter cannot run them):
+
+```bash
+# measurement + print + tangential + agent round trip on a real CT (23 checks)
+"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" analysis/slicercbctplanner_1/verify_real_ct.py
+
+# boot Slicer with the REST API and exercise every MCP tool (11 checks)
+python analysis/mcp_slicer_check/verify_mcp_slicer.py
 ```
