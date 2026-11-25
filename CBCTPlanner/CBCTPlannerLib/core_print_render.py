@@ -460,22 +460,32 @@ def render_cross_section(
         rgb = _apply_anatomical_contour_tint(rgb, mask_arr)
 
     image = Image.fromarray(rgb, mode="RGB")
-    width = max(1, (len(u_coords) - 1) * scale)
-    height = max(1, (len(v_coords) - 1) * scale)
+    img_w = max(1, (len(u_coords) - 1) * scale)
+    img_h = max(1, (len(v_coords) - 1) * scale)
     resampling = getattr(Image, "Resampling", Image)
-    image = image.resize((width, height), getattr(resampling, "BICUBIC", Image.BILINEAR))
-    # Draw every overlay on an RGBA layer so W3/W5 can be genuinely semi-transparent and
-    # still read over bright cortical bone; the layer is composited once at the end.
-    base_image = image.convert("RGBA")
-    layer = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(layer)
+    image = image.resize((img_w, img_h), getattr(resampling, "BICUBIC", Image.BILINEAR))
 
     font_sm = _load_font(max(11, int(round(4.6 * scale))), bold=True)
     font_md = _load_font(max(13, int(round(5.4 * scale))), bold=True)
     font_lg = _load_font(max(14, int(round(6.2 * scale))), bold=True)
     footer_h = max(24, int(round(9.5 * scale)))
-    safe_h = max(1, height - footer_h - 2)
+    # The footer gets its OWN band below the anatomy: the tile is taller than the image, so a
+    # caption or a deep basal end-cap can never be hidden behind the footer text.
+    width = img_w
+    height = img_h + footer_h
+    safe_h = img_h
     bounds = (width, safe_h)
+    # Reserved right margin for measurement captions: they sit outside the tooth/jaw silhouette
+    # instead of on top of it.
+    caption_gutter = max(64, int(round(14.0 * scale)))
+    caption_cursor = [26.0]
+
+    # Draw every overlay on an RGBA layer so W3/W5 can be genuinely semi-transparent and
+    # still read over bright cortical bone; the layer is composited once at the end.
+    base_image = Image.new("RGBA", (width, height), (2, 4, 9, 255))
+    base_image.paste(image.convert("RGBA"), (0, 0))
+    layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
 
     overlay: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
     labels: List[Tuple[float, float, str]] = []
@@ -530,9 +540,48 @@ def render_cross_section(
         labels.append((chosen[0], chosen[1], text))
         return rect
 
+    def _place_caption(
+        anchor: Tuple[float, float],
+        text: str,
+        *,
+        fg: Tuple[int, int, int],
+        border: Optional[Tuple[int, int, int]] = None,
+        font: Any = None,
+    ) -> Tuple[float, float, float, float]:
+        """Place a measurement caption in the reserved right margin, clear of the anatomy."""
+        tw, th = _text_size(draw, text, font)
+        bw, bh = tw + 8, th + 4
+        px = max(2.0, float(width - caption_gutter - bw + 2))
+        py = float(caption_cursor[0])
+        while any(_rects_overlap((px, py, px + bw, py + bh), r) for r in occupied_rects):
+            py += bh + 3
+        py = float(min(max(24.0, py), max(24.0, float(safe_h - bh - 4))))
+        rect = _draw_pill_label(
+            draw,
+            px,
+            py,
+            text,
+            fg=fg,
+            bg=(8, 13, 24),
+            border=border,
+            font=font,
+            bounds=(max(1, width - 3), max(1, safe_h - 2)),
+        )
+        occupied_rects.append(rect)
+        labels.append((px, py, text))
+        caption_cursor[0] = py + bh + 3
+        # Short colour stub on the caption's leading edge instead of a leader across the bone.
+        stub = max(6.0, 3.0 * scale)
+        draw.line(
+            [(px - stub - 2, py + bh * 0.5), (px - 2, py + bh * 0.5)],
+            fill=(int(fg[0]), int(fg[1]), int(fg[2]), 220),
+            width=1,
+        )
+        return rect
+
     # Draw the bottom footer bar BEFORE calipers so a deep basal height end-cap is never occluded.
-    draw.rectangle([(0, height - footer_h), (width, height)], fill=(2, 4, 9, 220))
-    draw.line([(0, height - footer_h), (width, height - footer_h)], fill=(30, 41, 59, 255), width=1)
+    draw.rectangle([(0, img_h), (width, height)], fill=(2, 4, 9, 220))
+    draw.line([(0, img_h), (width, img_h)], fill=(30, 41, 59, 255), width=1)
 
     # Orientation badges: Lingual (L) left, Buccal (B) right, Superior (S) top-center.
     l_rect = _draw_pill_label(
@@ -627,9 +676,8 @@ def render_cross_section(
         mid_hx = 0.5 * (p0[0] + p1[0])
         mid_hy = 0.5 * (p0[1] + p1[1])
         h_tag = f"H~:{height_mm_val:.1f} mm" if is_estimated else f"H:{height_mm_val:.1f} mm"
-        _place_non_overlapping_pill(
-            mid_hx + cap_r + 5,
-            mid_hy - 8,
+        _place_caption(
+            (mid_hx, mid_hy),
             h_tag,
             fg=COLOR_BONE_HEIGHT_TEXT,
             border=COLOR_BONE_HEIGHT,
@@ -652,6 +700,10 @@ def render_cross_section(
     has_w5 = 5.0 in width_endpoints
     for depth in sorted(width_endpoints.keys()):
         pt_l, pt_r, w_val, w_prov = width_endpoints[depth]
+        if float(depth) > 0.0:
+            # W3/W5 are reference widths, not crest geometry: they are drawn only inside the
+            # corner depth key below, never as calipers across the tooth or jaw.
+            continue
         start = _px(pt_l[0], pt_l[1], u_coords, v_coords, scale)
         end = _px(pt_r[0], pt_r[1], u_coords, v_coords, scale)
         is_primary = depth in (0.0, 3.0, 5.0) or (depth == 6.0 and not has_w5)
@@ -678,20 +730,42 @@ def render_cross_section(
         _draw_endcap(draw, end, w_perp, tick_r, fill=stroke, width=max(2, w_line - 1))
         overlay.append((start, end))
 
-        if is_primary and w_val is not None:
-            lbl_str = f"W0 {w_val:.1f} mm" if depth == 0.0 else f"W{depth:g} {w_val:.1f} mm"
-            if depth == 3.0:
-                pref_x = min(start[0], end[0]) - _text_size(draw, lbl_str, font_md)[0] - 12
-            else:
-                pref_x = max(start[0], end[0]) + 6
-            _place_non_overlapping_pill(
-                pref_x,
-                0.5 * (start[1] + end[1]) - 8,
-                lbl_str,
+        if is_primary and w_val is not None and float(depth) == 0.0:
+            _place_caption(
+                (0.5 * (start[0] + end[0]), 0.5 * (start[1] + end[1])),
+                f"W0 {w_val:.1f} mm",
                 fg=colour,
                 border=colour,
                 font=font_md,
             )
+
+    # Corner depth key: W3/W5 calipers and values isolated from the anatomy.
+    deep_depths = [d for d in sorted(width_endpoints.keys()) if float(d) > 0.0]
+    if deep_depths:
+        row_h = max(14, int(round(6.0 * scale)))
+        box_w = max(78, int(round(28.0 * scale)))
+        box_h = row_h * len(deep_depths) + 8
+        bx = float(max(4, width - box_w - 4))
+        by = float(max(4, safe_h - box_h - 4))
+        draw.rectangle(
+            [(bx, by), (bx + box_w, by + box_h)],
+            fill=(2, 6, 23, 230),
+            outline=(70, 84, 104, 255),
+            width=1,
+        )
+        for i_d, d in enumerate(deep_depths):
+            _pl, _pr, w_val, _prov = width_endpoints[d]
+            colour = COLOR_WIDTH_W3 if float(d) <= 3.5 else COLOR_WIDTH_DEEP
+            y = by + 4 + i_d * row_h
+            draw.line(
+                [(bx + 5, y + row_h * 0.5), (bx + 5 + max(8, 3 * scale), y + row_h * 0.5)],
+                fill=colour,
+                width=max(2, scale - 1),
+            )
+            txt = f"W{float(d):g} {w_val:.1f}" if w_val is not None else f"W{float(d):g} --"
+            draw.text((bx + 10 + max(8, 3 * scale), y), txt, fill=colour, font=font_sm)
+        occupied_rects.append((bx, by, bx + box_w, by + box_h))
+        labels.append((bx, by, "W3/W5 key"))
 
     # 5. Vital anatomical structures (actual segmentation contour + marker)
     canal = geom["canal_centroid_uv"]
@@ -719,9 +793,8 @@ def render_cross_section(
             cross_r = max(2.0, radius_px * 0.45)
             draw.line([(cx - cross_r, cy), (cx + cross_r, cy)], fill=(255, 100, 100), width=1)
             draw.line([(cx, cy - cross_r), (cx, cy + cross_r)], fill=(255, 100, 100), width=1)
-            _place_non_overlapping_pill(
-                cx + radius_px + 5,
-                cy - 8,
+            _place_caption(
+                (cx, cy),
                 "IAN",
                 fg=(255, 96, 96),
                 border=(239, 68, 68),
@@ -734,9 +807,8 @@ def render_cross_section(
         for i_s in range(len(px_pts) - 1):
             draw.line([px_pts[i_s], px_pts[i_s + 1]], fill=COLOR_VITAL_SINUS, width=max(2, scale))
         mid_sx, mid_sy = px_pts[len(px_pts) // 2]
-        _place_non_overlapping_pill(
-            mid_sx + 6,
-            mid_sy - 14,
+        _place_caption(
+            (mid_sx, mid_sy),
             "SINUS",
             fg=(249, 168, 212),
             border=(236, 72, 153),
@@ -770,7 +842,7 @@ def render_cross_section(
                 if abs(end_pt[0] - alt_x) > abs(end_pt[0] - f_x):
                     f_x = alt_x
                 break
-    f_y = float(height - footer_h + 4)
+    f_y = float(img_h + 4)
     draw.text((f_x, f_y), f_text, fill=f_fill, font=font_md)
     labels.append((f_x, f_y, f_text))
 

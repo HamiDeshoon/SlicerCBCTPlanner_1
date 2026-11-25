@@ -44,6 +44,73 @@
   - Default model weights pre-configured to a user-configured `.pkl` / `.pth` checkpoint (stored in Slicer settings).
   - Clips HU values to `[-1024, 3072]` and normalizes to `[0, 1]`, runs the 2D CBAM Attention U-Net generator paired with physics-guided radial streak & photon-starvation suppression, preserves high-density metal cores, and reports before/after **Clinical Quality Assessor (`CQA`)** scores (`1–10` Likert scale).
 
+### 6. Step 8: AI Agent Review, Annotations & Tangential Sections
+
+A new wizard step (`Step 8`, after the canal/guide and cephalometry steps) turns the measured case into
+something a remote review agent can work with, and adds a ridge-parallel section view.
+
+**Review agent (URL + API key)**
+- Any **OpenAI-compatible** endpoint works: `https://api.openai.com/v1`, an Azure gateway, vLLM, Ollama's OpenAI
+  shim, or an internal proxy. Enter the base URL (a full `.../chat/completions` URL is also accepted), the key, the
+  model/deployment name, and a timeout.
+- The request carries the *clinical context* (`core/agent_review.py`): jaw and arch geometry, every planned site with
+  `H / W0 / W3 / W5`, IAN clearance, HU/density class, suggested implant, measurement provenance and withheld
+  reasons, the automated warnings, the existing annotations, and an optional clinician question — plus up to 8
+  rendered cross-section/tangential images as vision inputs.
+- The agent answers with one JSON object: `summary`, `comments[]`, and `actions[]`. Actions are validated against a
+  fixed whitelist (`add_annotation`, `update_annotation`, `remove_annotation`, `add_tooth`, `remove_tooth`,
+  `set_implant_diameter`, `flag_site`) and **nothing is applied until you press “Apply agent changes”**.
+- Annotations live in `core/annotations.py` (`AnnotationStore`): id, FDI, arc position, kind, severity, author,
+  source, timestamps. Add clinician notes, remove rows, export the whole set to JSON.
+- The key never leaves the machine except as an `Authorization: Bearer` header; it is not put in the request body,
+  the annotations, or error messages (`redact_secrets`). Requests are anonymised (no patient identifiers) and run on
+  a worker thread with a poll timer, so Slicer never freezes.
+
+**Tangential (ridge-parallel) sections** (`core/tangential.py`)
+- The plane spanned by the arch *tangent* and the occlusal axis at a given arc position — it looks **along** the ridge
+  instead of across it, showing crest continuity between adjacent teeth (slab `mean`/`max`/`min`, 0.3 mm pixels).
+- Follows the cross-section cursor by default (debounced), or can be stepped manually; the cortical crest line and the
+  crest drop are drawn on the section, and it can be saved as PNG.
+
+## MCP server for 3D Slicer ([zhaoyouj/mcp-slicer](https://github.com/zhaoyouj/mcp-slicer))
+
+Lets an MCP client (Claude Desktop, Cline, Claude Code, …) drive Slicer directly: list MRML nodes, run Python in
+Slicer, and take screenshots of the app, a slice view or the 3D view, so an agent can reason about the case.
+
+**Install** (once, needs [uv](https://astral.sh/uv)):
+```bash
+uv tool install mcp-slicer      # or let the client resolve it: uvx mcp-slicer
+uv tool update-shell            # puts mcp-slicer on PATH (not required when using .mcp.json)
+```
+The repository ships `.mcp.json` at its root, so clients that read that file pick the server up with `uvx mcp-slicer`.
+
+**Start Slicer with its REST API ready** — the Web Server GUI module leaves `exec` disabled by default, so use the
+launcher instead of enabling checkboxes by hand:
+```bash
+"D:/Program Files/3D Slicer 5.12.3/Slicer.exe" --no-splash \
+  --additional-module-paths ./CBCTPlanner \
+  --python-script analysis/mcp_slicer_check/slicer_webserver_boot.py
+```
+That binds Slicer's REST API to `127.0.0.1:2016` with the Slicer API + `exec` interfaces on (loopback only, so no
+Windows firewall prompt) and registers **CBCTPlanner** as a module, which lets the agent call this module's own logic
+through `execute_python_code`. The interactive equivalent is the **Web Server** module: *Advanced* → tick
+`Slicer API` and `Slicer API exec` → *Start server* (port 2016).
+
+**Verify the whole chain** (boots Slicer, speaks MCP over stdio, calls every tool):
+```bash
+python analysis/mcp_slicer_check/verify_mcp_slicer.py
+```
+Checked here against **Slicer 5.12.3** (README asks for 5.8+): 11/11 — handshake, `tools/list`, `execute_python_code`
+(result and error path), `list_nodes` names/ids/properties on the live scene, `CBCTPlanner` visible as a module, and
+JPEG captures of the application window, the Red slice view (matching the widget size) and the 3D view from axis A.
+
+**Notes and limitations**
+- The server hardcodes `http://localhost:2016/slicer`, so Slicer's web server must stay on port 2016.
+- `execute_python_code` is remote code execution by design. Keep the API on loopback, and stop it (*Web Server → Stop
+  server*) once the agent session is over.
+- Slice screenshots grab the on-screen widget, so the image is only as big as that view; maximise Slicer for a usable
+  capture, and prefer `view_type="application"` or `"3d"` for full-case context.
+
 ## Running Tests
 ```bash
 python3 -m unittest discover -s tests -v

@@ -60,6 +60,7 @@ from CBCTPlannerLib.core.labels import (
     resolve_fdi_number,
 )
 from CBCTPlannerLib.core.measurements import (
+    JAW_END_CORTEX_INSET_MM,
     MeasurementEngine,
     WITHHELD_NO_ARCH,
     WITHHELD_NO_CANAL_SEG,
@@ -340,7 +341,8 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
         meas, cs = eng.measure_at_arc_mm("lower", 8.0, fdi_hint="46")
         self.assertIsNotNone(meas)
         assert meas is not None and cs is not None
-        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 15.5, delta=1.2)
+        # H stops at the INTERNAL border of the basal cortex, not the periosteal surface.
+        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 15.5 - JAW_END_CORTEX_INSET_MM, delta=1.2)
         self.assertAlmostEqual(meas.crest_width_mm or 0.0, 7.8, delta=1.0)
         _verify_rendered_measurement_sync(self, cs, meas)
 
@@ -403,7 +405,7 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
         self.assertIsNone(meas.distance_to_vital_structure_mm)
         self.assertEqual(cs.vital_withheld_reason, WITHHELD_NO_CANAL_SEG)
         self.assertIsNone(cs.canal_centroid_uv)
-        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 17.5, delta=1.0)
+        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 17.5 - JAW_END_CORTEX_INSET_MM, delta=1.0)
 
     # 9. Unrelated or contralateral canal elsewhere in the volume
     def test_09_contralateral_or_distant_canal_rejected(self) -> None:
@@ -729,7 +731,7 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
             assert meas is not None and cs is not None
             # PCA angle must remain positive (no flip to -35 deg at 45 deg tilt) and height must extend.
             self.assertGreater(float(cs.ridge_axis_angle_deg or 0.0), 15.0)
-            self.assertGreater(float(meas.bone_height_mm or 0.0), 18.0)
+            self.assertGreater(float(meas.bone_height_mm or 0.0), 18.0 - JAW_END_CORTEX_INSET_MM)
             # W0 bridges the tilted socket cleanly (~7-9 mm) instead of clipping or missing.
             self.assertIsNotNone(meas.crest_width_mm)
             self.assertGreater(float(meas.crest_width_mm or 0.0), 6.0)

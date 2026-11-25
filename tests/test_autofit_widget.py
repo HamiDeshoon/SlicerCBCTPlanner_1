@@ -201,7 +201,7 @@ class _ChipLogic:
 class TestStepChipsAndPipeline(unittest.TestCase):
     def _widget(self, curve=None) -> CBCTPlannerWidget:
         widget = object.__new__(CBCTPlannerWidget)
-        widget.stepStatusLabels = [_Label() for _ in range(7)]
+        widget.stepStatusLabels = [_Label() for _ in range(8)]
         widget._parameterNode = _NodeRefs(
             {
                 "PanoramicVolume": object(),
@@ -222,6 +222,8 @@ class TestStepChipsAndPipeline(unittest.TestCase):
         texts = [label.text for label in widget.stepStatusLabels]
         self.assertEqual(texts[:6], ["1 \u2713", "2 \u2713", "3 \u2713", "4 \u2713", "5 \u2713", "6 \u25cb"])
         self.assertEqual(texts[6], "7 \u25cb")
+        # Step 8 (agent review + tangential) is pending until something is annotated.
+        self.assertEqual(texts[7], "8 \u25cb")
         self.assertIn("#2e7d32", widget.stepStatusLabels[0].style)
         self.assertIn("#9e9e9e", widget.stepStatusLabels[5].style)
 
@@ -232,7 +234,7 @@ class TestStepChipsAndPipeline(unittest.TestCase):
         widget._parameterNode = _NodeRefs({})
         widget._updateStepChips()
         self.assertEqual(
-            [label.text for label in widget.stepStatusLabels], [f"{i} \u25cb" for i in range(1, 8)]
+            [label.text for label in widget.stepStatusLabels], [f"{i} \u25cb" for i in range(1, 9)]
         )
 
     def test_run_full_pipeline_fits_then_panorama_then_canals(self) -> None:

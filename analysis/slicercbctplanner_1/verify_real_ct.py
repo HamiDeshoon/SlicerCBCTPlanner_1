@@ -7,8 +7,9 @@ Run:
 Checks, on the ToothFairy3S_0021 CBCT (image + ToothFairy3 labelmap):
   1. `CBCTPlannerLib` imports cleanly inside Slicer's Python.
   2. Dentate `W0` bridges buccal->lingual bone across a socket (never a ~2 mm plate).
+  2b. Frontal sockets (31-33, 41-43) never report one side of the tooth as `W0`.
   3. Tilted ridges keep the crest/W0 on bone (crest voxel is jaw bone).
-  4. `H` reaches the basal jaw end on non-canal slices and stops before the IAN.
+  4. `H` stops at the internal cortical border (before the last part of the jaw) and before the IAN.
   5. `RaySum` panoramic + 3D MIP render RGBA with transparent air and isotropic fill.
   6. The 8x10 film page composes and exports PNG/PDF at 300 DPI (8x10 in).
   7. Times the panoramic sampler and the MIP/RGBA capture (OPT profiling).
@@ -88,7 +89,7 @@ def main() -> int:  # noqa: C901 - a linear verification script
         RIGHT_INCISIVE_CANAL_ID,
         UPPER_JAW_ID,
     )
-    from CBCTPlannerLib.core.measurements import MeasurementEngine
+    from CBCTPlannerLib.core.measurements import JAW_END_CORTEX_INSET_MM, MeasurementEngine
     from CBCTPlannerLib.core.orientation import (
         auto_fix_anatomical_orientation,
         canonicalize_to_ras,
@@ -328,6 +329,21 @@ def main() -> int:  # noqa: C901 - a linear verification script
         f"{sum(r['w0_ends_on_bone'] for r in dentate)}/{len(dentate)}",
     )
 
+    # Frontal teeth are the historical failure: the incisal crown's labial/lingual lobes stop the
+    # crestal bridge on one plate and W0 collapsed to that plate (~1-2 mm) instead of the ridge.
+    frontal_sites = {fdi: engine.measure_implant_site(fdi) for fdi in ("31", "32", "33", "41", "42", "43")}
+    frontal_w0 = {
+        fdi: (None if m is None or m.crest_width_mm is None else round(float(m.crest_width_mm), 2))
+        for fdi, m in frontal_sites.items()
+    }
+    bridged_frontal = [fdi for fdi, w in frontal_w0.items() if w is not None and w >= 4.0]
+    check(
+        "frontal sockets never report one side of the tooth as W0",
+        bool(frontal_w0) and len(bridged_frontal) == len(frontal_w0),
+        f"{len(bridged_frontal)}/{len(frontal_w0)} anterior sites bridge both walls (W0 >= 4 mm): "
+        + str(frontal_w0),
+    )
+
     tilted = [r for r in measured if r["ridge_deg"] is not None and abs(r["ridge_deg"]) >= 15.0]
     on_bone = [r for r in tilted if r["w0_ends_on_bone"] and (r["w0"] or 0) >= 4.0]
     print(
@@ -343,12 +359,25 @@ def main() -> int:  # noqa: C901 - a linear verification script
     )
 
     non_canal = [r for r in measured if r["jaw"] == "lower" and not r["canal_present"] and r["h"]]
-    reached = [r for r in non_canal if r["jaw_end_gap_mm"] is not None and r["jaw_end_gap_mm"] <= 1.5]
+    # H is specified to stop at the INTERNAL cortical border, i.e. one cortical inset short of the
+    # independently measured periosteal jaw end.
+    gaps = np.asarray(
+        [r["jaw_end_gap_mm"] for r in non_canal if r["jaw_end_gap_mm"] is not None], dtype=np.float64
+    )
     check(
-        "H reaches the basal jaw end on non-canal mandibular slices",
-        bool(non_canal) and len(reached) / len(non_canal) >= 0.8,
-        f"{len(reached)}/{len(non_canal)} within 1.5 mm of the independently measured jaw end; "
-        f"median H {np.median([r['h'] for r in non_canal]) if non_canal else 0:.1f} mm",
+        "H stops at the internal cortical border (before the last part of the jaw)",
+        bool(non_canal)
+        and gaps.size > 0
+        and float(np.mean(gaps >= 0.6)) >= 0.95
+        and float(np.percentile(gaps, 90)) <= 4.0
+        and float(np.median(gaps)) >= JAW_END_CORTEX_INSET_MM - 0.3,
+        f"{int((gaps >= 0.6).sum())}/{gaps.size} end inside the jaw (>= 0.6 mm short of the "
+        f"periosteal border); median H "
+        f"{np.median([r['h'] for r in non_canal]) if non_canal else 0:.1f} mm; gap p10/p50/p90 = "
+        + "/".join(f"{v:.2f}" for v in np.percentile(gaps, [10, 50, 90]))
+        + f" (target {JAW_END_CORTEX_INSET_MM:.1f} mm cortical inset)"
+        if gaps.size
+        else "no non-canal mandibular slices",
     )
 
     canal_slices = [r for r in measured if r["jaw"] == "lower" and r["canal_present"]]
@@ -569,8 +598,153 @@ def main() -> int:  # noqa: C901 - a linear verification script
         f"{len(html)} chars -> {html_file}",
     )
 
+    # ------------------------------------------- 7. tangential + review agent
+    print("--- 7. Step 8: tangential section + review agent (mock transport) ---", flush=True)
+    from CBCTPlannerLib.core.agent_review import (
+        AgentClient,
+        AgentEndpointConfig,
+        AgentImage,
+        MockTransport,
+        apply_agent_actions,
+        context_to_prompt_text,
+        parse_agent_response,
+    )
+    from CBCTPlannerLib.core.annotations import AnnotationStore
+    from CBCTPlannerLib.core.tangential import (
+        crest_drop_mm,
+        render_tangential_section,
+        sample_tangential_section,
+    )
+
+    t_tang = time.perf_counter()
+    section = sample_tangential_section(
+        vol,
+        arches["lower"],
+        20.0,
+        width_mm=42.0,
+        height_mm=30.0,
+        thickness_mm=2.0,
+        mode="mean",
+        mask=mask,
+        is_mandible=True,
+    )
+    t_tang = time.perf_counter() - t_tang
+    bone_frac = (
+        float(np.mean(np.asarray(section.array) > 500.0)) if section.array is not None else 0.0
+    )
+    drop = crest_drop_mm(section)
+    check(
+        "tangential section samples real bone along the ridge",
+        bool(section.available)
+        and section.shape[0] > 20
+        and section.shape[1] > 20
+        and bone_frac > 0.15
+        and len(section.crest_line_mm) > 10,
+        f"{section.shape} @ {section.mm_per_px:.2f} mm/px, arc {section.arc_mm:.1f} mm, "
+        f"bone {bone_frac:.2f} of pixels, crest samples {len(section.crest_line_mm)}"
+        + (f", drop {drop:.1f} mm" if drop is not None else "")
+        + f", {t_tang:.2f}s",
+    )
+
+    tang_render = render_tangential_section(section, scale=2, footer_text="tangential")
+    tang_alpha = (
+        np.asarray(tang_render.image.split()[3]) if tang_render.image is not None else None
+    )
+    check(
+        "tangential section renders RGBA with transparent air",
+        bool(tang_render.available)
+        and tang_render.image is not None
+        and tang_render.image.mode == "RGBA"
+        and tang_alpha is not None
+        and int(tang_alpha.min()) == 0,
+        f"{None if tang_render.image is None else tang_render.image.size} "
+        f"alpha_min={None if tang_alpha is None else int(tang_alpha.min())}",
+    )
+
+    # Review-agent round trip entirely offline: real context + real images, mock transport.
+    agent_sites = [
+        {
+            "fdi": r["fdi"],
+            "h_mm": r["h"],
+            "w0_mm": r["w0"],
+            "ian_mm": r["vital_dist"],
+            "provenance": "measured" if r["w0"] is not None else "withheld",
+            "withheld": r["withheld"],
+        }
+        for r in measured
+        if r["fdi"] in ("46", "47")
+    ][:4]
+    context = {
+        "patient": {"name": "Anonymous", "id": "Anonymous"},
+        "modality": "CBCT",
+        "arch": {"jaw": "lower", "length_mm": round(arches["lower"].total_arc_length, 1)},
+        "selected_teeth": [int(r["fdi"]) for r in measured if r["fdi"]][:3],
+        "sites": agent_sites,
+        "annotations": [],
+        "question": "Is the crest wide enough for a guided implant?",
+    }
+    prompt_text = context_to_prompt_text(context)
+    import io as _io
+
+    tile_buf = _io.BytesIO()
+    tang_render.image.convert("RGB").save(tile_buf, format="PNG")
+    reply = json.dumps(
+        {
+            "summary": "Crest width is adequate; confirm IAN clearance.",
+            "comments": [{"fdi": 46, "severity": "warning", "text": "Verify IAN clearance."}],
+            "actions": [
+                {"op": "add_annotation", "fdi": 46, "text": "Reviewer: re-cut at 3 mm"},
+                {"op": "add_tooth", "fdi": 47},
+                {"op": "rm_rf"},
+            ],
+        }
+    )
+    transport = MockTransport(
+        [{"choices": [{"message": {"content": reply}}], "usage": {"total_tokens": 42}}]
+    )
+    agent_cfg = AgentEndpointConfig(url="https://agent.example.com/v1", api_key="sk-verify-key", model="mock-1")
+    agent_client = AgentClient(agent_cfg, transport=transport)
+    agent_result = agent_client.review(
+        context, [AgentImage(label="tangential", png_bytes=tile_buf.getvalue())]
+    )
+    store = AnnotationStore()
+
+    class _PlanProbe:
+        def __init__(self) -> None:
+            self.tooth_calls = []
+
+        def add_tooth(self, fdi: int) -> bool:
+            self.tooth_calls.append(int(fdi))
+            return True
+
+        def remove_tooth(self, fdi: int) -> bool:
+            self.tooth_calls.append(-int(fdi))
+            return True
+
+    plan_probe = _PlanProbe()
+    outcome = apply_agent_actions(agent_result, store, plan_probe)
+    sent = transport.calls[0]
+    sent_parts = sent["payload"]["messages"][1]["content"]
+    check(
+        "review agent round-trip (mock transport) parses and edits annotations/plan",
+        sent["url"] == "https://agent.example.com/v1/chat/completions"
+        and sent["headers"]["Authorization"] == "Bearer sk-verify-key"
+        and "sk-verify-key" not in json.dumps(sent["payload"])
+        and sum(1 for part in sent_parts if part.get("type") == "image_url") == 1
+        and agent_result.summary.startswith("Crest width")
+        and len(agent_result.comments) == 1
+        and plan_probe.tooth_calls == [47]
+        # 1 parsed comment + 1 add_annotation action; add_tooth edits the plan, not the store.
+        and len(store) == 2
+        and outcome.skipped
+        and len(prompt_text) > 200,
+        f"payload {len(json.dumps(sent['payload']))} chars, {len(agent_result.comments)} comment(s), "
+        f"{len(outcome.applied)} applied / {len(outcome.skipped)} rejected, store {len(store)} annotation(s), "
+        f"plan calls {plan_probe.tooth_calls}",
+    )
+
     # ------------------------------------------------------------ profiling
-    print("--- 7. profiling (OPT-01 / OPT-03) ---", flush=True)
+    print("--- 8. profiling (OPT-01 / OPT-03) ---", flush=True)
     n_cols, n_rows = pano.shape
     print(
         f"RaySum pano {n_cols}x{n_rows} over {len(arc_vals)} arcs: {t_sample:.2f}s "

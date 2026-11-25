@@ -49,7 +49,7 @@ from CBCTPlannerLib.core.labels import (  # noqa: E402
     FDI_TO_TOOTH_ID,
     match_segment_to_label_and_precedence,
 )
-from CBCTPlannerLib.core.measurements import MeasurementEngine  # noqa: E402
+from CBCTPlannerLib.core.measurements import JAW_END_CORTEX_INSET_MM, MeasurementEngine  # noqa: E402
 from CBCTPlannerLib.core.volume_loader import CBCTVolume  # noqa: E402
 
 
@@ -568,9 +568,11 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         self.assertIsNotNone(meas)
         assert meas is not None
         self.assertIsNone(meas.withheld_reason)
-        # The crest sits on the lingual plate (Z~27.5) and the caliper continues to the jaw
-        # end (Z=10) because there is no canal in this region.
-        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 18.5, delta=1.5)
+        # The crest sits on the lingual plate (Z~27.5) and the caliper continues to the internal
+        # cortical border at the jaw end (Z=10, minus the cortical inset) as there is no canal here.
+        self.assertAlmostEqual(
+            meas.bone_height_mm or 0.0, 18.5 - JAW_END_CORTEX_INSET_MM, delta=1.5
+        )
         # W0 is the bone plate itself (~2 mm), not plate + root wall (which used to read ~6 mm).
         self.assertAlmostEqual(meas.crest_width_mm or 0.0, 2.0, delta=1.0)
 
@@ -991,7 +993,10 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
 
             first_png = base64.b64decode(slices_15[0].image_data_uri.split(",", 1)[1])
             with Image.open(io.BytesIO(first_png)) as png:
-                self.assertEqual(png.size, (240, 240))
+                # 240 px anatomy render plus its own footer band below it, so the caption strip
+                # can never overlap the image.
+                self.assertEqual(png.size[0], 240)
+                self.assertGreater(png.size[1], 240)
                 pixels = np.asarray(png.convert("L"), dtype=np.float32)
             self.assertGreater(float(pixels.std()), 15.0)
             self.assertGreater(float(pixels.max()) - float(pixels.min()), 80.0)

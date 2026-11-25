@@ -234,6 +234,23 @@ class CBCTPlanner(ScriptedLoadableModule):
             )
 
 
+class _AgentPlanAdapter:
+    """Narrow, validated view of the plan that a review agent is allowed to edit.
+
+    Only tooth-plan membership is exposed: implant diameter/length edits stay a clinician
+    decision because the plan table is derived from measurements, not stored state.
+    """
+
+    def __init__(self, widget: Any) -> None:
+        self._widget = widget
+
+    def add_tooth(self, fdi: int) -> bool:
+        return bool(self._widget._set_tooth_in_plan(int(fdi), True))
+
+    def remove_tooth(self, fdi: int) -> bool:
+        return bool(self._widget._set_tooth_in_plan(int(fdi), False))
+
+
 class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     """Progressive Workflow UI for CBCT Dental Planner with VTKObservationMixin and full ParameterNode state."""
 
@@ -253,6 +270,51 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._panoPreviewTimer: Any = None
         self._shortcuts: List[Any] = []
         self._observedCurveNodeIDs: Set[str] = set()
+
+        # Step 8: review agent + tangential sections. Declared here so a partially built UI
+        # never trips an AttributeError (see tests/test_static_attrs.py).
+        self.annotationStore: Any = self._make_annotation_store()
+        self.agentStepBox: Any = None
+        self.agentContentWidget: Any = None
+        self.agentHintLabel: Any = None
+        self.agentUrlEdit: Any = None
+        self.agentKeyEdit: Any = None
+        self.agentModelEdit: Any = None
+        self.agentTimeoutSpin: Any = None
+        self.agentIncludeImagesCheck: Any = None
+        self.agentMaxImagesSpin: Any = None
+        self.btnAgentTest: Any = None
+        self.btnAgentSave: Any = None
+        self.btnAgentReview: Any = None
+        self.btnAgentApplyActions: Any = None
+        self.btnAgentClearAi: Any = None
+        self.agentQuestionEdit: Any = None
+        self.agentStatusLabel: Any = None
+        self.agentSummaryText: Any = None
+        self.annotationTextEdit: Any = None
+        self.btnAnnotationAdd: Any = None
+        self.btnAnnotationRemove: Any = None
+        self.btnAnnotationExport: Any = None
+        self.annotationCountLabel: Any = None
+        self.annotationTable: Any = None
+        self._annotationRowIds: List[str] = []
+        self.tangentialBox: Any = None
+        self.tangentialFollowCheck: Any = None
+        self.tangentialArcSpin: Any = None
+        self.tangentialWidthSpin: Any = None
+        self.tangentialHeightSpin: Any = None
+        self.tangentialThicknessSpin: Any = None
+        self.tangentialModeCombo: Any = None
+        self.btnTangentialRefresh: Any = None
+        self.btnTangentialSavePng: Any = None
+        self.tangentialImageLabel: Any = None
+        self.tangentialStatusLabel: Any = None
+        self._lastTangentialSection: Any = None
+        self._pendingAgentResult: Any = None
+        self._agentThread: Any = None
+        self._agentPollTimer: Any = None
+        self._agentWorkerOutcome: Any = None
+        self._tangentialDebounceTimer: Any = None
 
         # Content containers for B18 (keep collapsible headers enabled, disable only inner body)
         self.step2ContentWidget: Any = None
@@ -348,6 +410,10 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._vrDebounceTimer.stop()
         if self._panoPreviewTimer is not None:
             self._panoPreviewTimer.stop()
+        if self._agentPollTimer is not None:
+            self._agentPollTimer.stop()
+        if self._tangentialDebounceTimer is not None:
+            self._tangentialDebounceTimer.stop()
         self._observedCurveNodeIDs.clear()
         self.removeObservers()
 
@@ -382,7 +448,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         chipsRow = qt.QHBoxLayout()
         self.stepStatusLabels: list[Any] = []
-        for step in range(1, 8):
+        for step in range(1, 9):
             chip = qt.QLabel(f"{step} \u25cb")
             chip.setToolTip(f"Step {step} status")
             self.stepStatusLabels.append(chip)
@@ -1694,6 +1760,11 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnRunNativeVFACE.clicked.connect(self.onRunNativeVFACEClicked)
         self.btnRunAutoCropROI.clicked.connect(self.onRunAutoCropROIClicked)
 
+        # Step 8 (review agent + tangential sections) is built last so it can read every
+        # selection/plan widget that already exists.
+        self._buildAgentTangentialStep()
+        self._restoreAgentSettings()
+
     def _createOdontogramButton(self, fdi: int) -> Any:
         btn = qt.QToolButton()
         btn.setText(str(fdi))
@@ -2954,6 +3025,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self._parameterNode is not None:
             self._parameterNode.SetParameter("CursorArcMm", f"{arc_mm:.2f}")
         self._syncCursorToViews(arc_mm=arc_mm, sync_axial_slice=False)
+        self._scheduleTangentialRefresh()
 
     def onTiltSliderChanged(self, tilt_deg: float) -> None:
         if self._updatingGUIFromParameterNode:
@@ -3447,6 +3519,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         canals = [
             self._parameterNode.GetNodeReference(role) for role in ("RightCanalCurve", "LeftCanalCurve")
         ]
+        store = getattr(self, "annotationStore", None)
+        agent_ready = bool(store is not None and (len(store) > 0 or store.agent_comment_count() > 0))
         states = [
             vol is not None,
             curve is not None and curve.GetNumberOfControlPoints() >= 4,
@@ -3455,14 +3529,17 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             bool(getattr(self, "selectedTeeth", None)),
             any(node is not None for node in canals),
             False,
+            agent_ready,
         ]
         for index, done in enumerate(states, start=1):
+            if index > len(labels):
+                break
             label = labels[index - 1]
             label.setText(f"{index} \u2713" if done else f"{index} \u25cb")
             color = "#2e7d32" if done else "#9e9e9e"
             label.setStyleSheet(f"color: {color}; font-weight: bold;")
             label.setToolTip(
-                f"Step {index}: {'complete' if done else 'pending' if index < 7 else 'optional'}"
+                f"Step {index}: {'complete' if done else 'pending' if index < 8 else 'optional'}"
             )
 
     def onRunFullPipelineClicked(self) -> None:
@@ -4259,6 +4336,945 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self.onRunAutoCropROIClicked()
                 return
         self.step7HintLabel.setText(f"AutomatedDentalTools [{tool_name}]: {res['status']}")
+
+
+    # ==================================================================
+    # STEP 8: AI AGENT REVIEW, ANNOTATIONS & TANGENTIAL SECTIONS
+    # ==================================================================
+    @staticmethod
+    def _make_annotation_store() -> Any:
+        """Clinician/agent note store (None only when the core module cannot be imported)."""
+        try:
+            from CBCTPlannerLib.core.annotations import AnnotationStore
+
+            return AnnotationStore()
+        except Exception:
+            logger.warning("Annotation store unavailable; note editing is disabled", exc_info=True)
+            return None
+
+    @staticmethod
+    def _agent_core() -> Any:
+        """Lazily import the review-agent core so this GUI module stays importable headless."""
+        from CBCTPlannerLib.core import agent_review
+
+        return agent_review
+
+    def _buildAgentTangentialStep(self) -> None:
+        """Build Step 8: the review-agent panel plus the ridge-parallel tangential viewer."""
+        if qt is None or ctk is None:
+            return
+
+        self.agentStepBox = ctk.ctkCollapsibleButton()
+        self.agentStepBox.text = "Step 8: AI Agent Review, Annotations & Tangential Sections"
+        self.agentStepBox.collapsed = True
+        self.layout.addWidget(self.agentStepBox)
+        outer = qt.QVBoxLayout(self.agentStepBox)
+
+        self.agentHintLabel = qt.QLabel(
+            "Send the measured case (sites, provenance, warnings, existing notes and rendered slices) "
+            "to an agent API, then let it comment, annotate, or add/remove planned teeth. "
+            "The request is anonymised (no patient identifiers), and the API key is kept in QSettings "
+            "on this machine and only ever sent as a Bearer header."
+        )
+        self.agentHintLabel.setWordWrap(True)
+        outer.addWidget(self.agentHintLabel)
+
+        self.agentContentWidget = qt.QWidget()
+        content = qt.QVBoxLayout(self.agentContentWidget)
+        outer.addWidget(self.agentContentWidget)
+
+        # ---------------- endpoint ----------------
+        endpointBox = ctk.ctkCollapsibleButton()
+        endpointBox.text = "Agent endpoint (URL + API key, OpenAI-compatible)"
+        endpointBox.collapsed = False
+        content.addWidget(endpointBox)
+        endpointForm = qt.QFormLayout(endpointBox)
+
+        self.agentUrlEdit = qt.QLineEdit()
+        self.agentUrlEdit.setPlaceholderText("https://api.openai.com/v1")
+        self.agentUrlEdit.setToolTip(
+            "Base URL (or full /chat/completions URL) of an OpenAI-compatible endpoint: "
+            "OpenAI, an Azure gateway, vLLM, Ollama's OpenAI shim, or an internal proxy."
+        )
+        endpointForm.addRow("Endpoint URL:", self.agentUrlEdit)
+
+        self.agentKeyEdit = qt.QLineEdit()
+        self.agentKeyEdit.setEchoMode(qt.QLineEdit.Password)
+        self.agentKeyEdit.setPlaceholderText("sk-...")
+        self.agentKeyEdit.setToolTip("Stored in QSettings for this user account; never written into the scene.")
+        endpointForm.addRow("API key:", self.agentKeyEdit)
+
+        self.agentModelEdit = qt.QLineEdit("gpt-4o-mini")
+        self.agentModelEdit.setToolTip("Model or deployment name understood by that endpoint.")
+        endpointForm.addRow("Model:", self.agentModelEdit)
+
+        self.agentTimeoutSpin = qt.QDoubleSpinBox()
+        self.agentTimeoutSpin.minimum = 5.0
+        self.agentTimeoutSpin.maximum = 180.0
+        self.agentTimeoutSpin.singleStep = 5.0
+        self.agentTimeoutSpin.value = 45.0
+        self.agentTimeoutSpin.suffix = " s"
+        endpointForm.addRow("Timeout:", self.agentTimeoutSpin)
+
+        imageRow = qt.QHBoxLayout()
+        self.agentIncludeImagesCheck = qt.QCheckBox("Attach rendered slices")
+        self.agentIncludeImagesCheck.checked = True
+        self.agentIncludeImagesCheck.setToolTip(
+            "Send rendered cross-sections (and the tangential section) as vision inputs."
+        )
+        self.agentMaxImagesSpin = qt.QSpinBox()
+        self.agentMaxImagesSpin.minimum = 0
+        self.agentMaxImagesSpin.maximum = 8
+        self.agentMaxImagesSpin.value = 4
+        imageRow.addWidget(self.agentIncludeImagesCheck)
+        imageRow.addWidget(qt.QLabel("max:"))
+        imageRow.addWidget(self.agentMaxImagesSpin)
+        imageRow.addStretch(1)
+        endpointForm.addRow("Images:", imageRow)
+
+        endpointButtons = qt.QHBoxLayout()
+        self.btnAgentTest = qt.QPushButton("Test connection")
+        self.btnAgentTest.setToolTip("Send a one-line probe to verify URL, key and model.")
+        self.btnAgentSave = qt.QPushButton("Save as default")
+        self.btnAgentSave.setToolTip("Persist URL, key, model and limits in QSettings.")
+        endpointButtons.addWidget(self.btnAgentTest)
+        endpointButtons.addWidget(self.btnAgentSave)
+        endpointButtons.addStretch(1)
+        endpointForm.addRow("", endpointButtons)
+
+        self.agentStatusLabel = qt.QLabel("Not configured.")
+        self.agentStatusLabel.setWordWrap(True)
+        endpointForm.addRow("Status:", self.agentStatusLabel)
+
+        # ---------------- review request ----------------
+        reviewBox = ctk.ctkCollapsibleButton()
+        reviewBox.text = "Send the case for review"
+        reviewBox.collapsed = False
+        content.addWidget(reviewBox)
+        reviewLayout = qt.QVBoxLayout(reviewBox)
+
+        self.agentQuestionEdit = qt.QLineEdit()
+        self.agentQuestionEdit.setPlaceholderText(
+            "Optional question for the agent (e.g. \"Is #46 wide enough for a 4.1 mm implant?\")"
+        )
+        reviewLayout.addWidget(self.agentQuestionEdit)
+
+        reviewButtons = qt.QHBoxLayout()
+        self.btnAgentReview = qt.QPushButton("Send case to agent")
+        self.btnAgentReview.setToolTip(
+            "Send the planned teeth, measurements, warnings and rendered slices for review."
+        )
+        self.btnAgentReview.setStyleSheet(
+            "font-weight: bold; background-color: #6d28d9; color: white; padding: 4px 8px; border-radius: 3px;"
+        )
+        self.btnAgentApplyActions = qt.QPushButton("Apply agent changes")
+        self.btnAgentApplyActions.setToolTip(
+            "Apply the reviewed annotations and the whitelisted plan edits (tooth add/remove)."
+        )
+        self.btnAgentApplyActions.setEnabled(False)
+        self.btnAgentClearAi = qt.QPushButton("Remove agent notes")
+        self.btnAgentClearAi.setToolTip("Delete every annotation that came from the agent; clinician notes stay.")
+        reviewButtons.addWidget(self.btnAgentReview)
+        reviewButtons.addWidget(self.btnAgentApplyActions)
+        reviewButtons.addWidget(self.btnAgentClearAi)
+        reviewLayout.addLayout(reviewButtons)
+
+        self.agentSummaryText = qt.QPlainTextEdit()
+        self.agentSummaryText.setReadOnly(True)
+        self.agentSummaryText.setMinimumHeight(90)
+        self.agentSummaryText.setMaximumHeight(170)
+        self.agentSummaryText.setPlaceholderText("The agent's summary, question and proposed changes appear here.")
+        reviewLayout.addWidget(self.agentSummaryText)
+
+        # ---------------- annotations ----------------
+        notesBox = ctk.ctkCollapsibleButton()
+        notesBox.text = "Annotations (clinician + agent)"
+        notesBox.collapsed = False
+        content.addWidget(notesBox)
+        notesLayout = qt.QVBoxLayout(notesBox)
+
+        self.annotationCountLabel = qt.QLabel("No annotations yet.")
+        self.annotationCountLabel.setWordWrap(True)
+        notesLayout.addWidget(self.annotationCountLabel)
+
+        noteRow = qt.QHBoxLayout()
+        self.annotationTextEdit = qt.QLineEdit()
+        self.annotationTextEdit.setPlaceholderText(
+            "Note for the active tooth (no active tooth = general note)"
+        )
+        self.btnAnnotationAdd = qt.QPushButton("Add note")
+        noteRow.addWidget(self.annotationTextEdit, 1)
+        noteRow.addWidget(self.btnAnnotationAdd)
+        notesLayout.addLayout(noteRow)
+
+        self.annotationTable = qt.QTableWidget()
+        self.annotationTable.setColumnCount(5)
+        self.annotationTable.setHorizontalHeaderLabels(["FDI", "Kind", "Severity", "Author", "Text"])
+        self.annotationTable.horizontalHeader().setSectionResizeMode(qt.QHeaderView.ResizeToContents)
+        try:
+            self.annotationTable.horizontalHeader().setSectionResizeMode(4, qt.QHeaderView.Stretch)
+        except Exception:  # justification: 2-arg resize overload is optional on some Qt bindings
+            logger.debug("Annotation header stretch mode unavailable", exc_info=True)
+        self.annotationTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        self.annotationTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.annotationTable.setMinimumHeight(140)
+        notesLayout.addWidget(self.annotationTable)
+
+        noteButtons = qt.QHBoxLayout()
+        self.btnAnnotationRemove = qt.QPushButton("Remove selected")
+        self.btnAnnotationExport = qt.QPushButton("Export annotations JSON")
+        noteButtons.addWidget(self.btnAnnotationRemove)
+        noteButtons.addWidget(self.btnAnnotationExport)
+        noteButtons.addStretch(1)
+        notesLayout.addLayout(noteButtons)
+
+        # ---------------- tangential ----------------
+        self.tangentialBox = ctk.ctkCollapsibleButton()
+        self.tangentialBox.text = "Tangential (ridge-parallel) section"
+        self.tangentialBox.collapsed = False
+        content.addWidget(self.tangentialBox)
+        tangOuter = qt.QVBoxLayout(self.tangentialBox)
+        tangForm = qt.QFormLayout()
+
+        self.tangentialFollowCheck = qt.QCheckBox("Follow the cross-section cursor")
+        self.tangentialFollowCheck.checked = True
+        tangForm.addRow(self.tangentialFollowCheck)
+
+        self.tangentialArcSpin = qt.QDoubleSpinBox()
+        self.tangentialArcSpin.minimum = 0.0
+        self.tangentialArcSpin.maximum = 500.0
+        self.tangentialArcSpin.singleStep = 0.5
+        self.tangentialArcSpin.suffix = " mm"
+        self.tangentialArcSpin.setToolTip("Arch arc position of the ridge-parallel plane.")
+        tangForm.addRow("Arc position:", self.tangentialArcSpin)
+
+        sizeRow = qt.QHBoxLayout()
+        self.tangentialWidthSpin = qt.QDoubleSpinBox()
+        self.tangentialWidthSpin.minimum = 8.0
+        self.tangentialWidthSpin.maximum = 90.0
+        self.tangentialWidthSpin.singleStep = 2.0
+        self.tangentialWidthSpin.value = 42.0
+        self.tangentialWidthSpin.suffix = " mm"
+        self.tangentialHeightSpin = qt.QDoubleSpinBox()
+        self.tangentialHeightSpin.minimum = 8.0
+        self.tangentialHeightSpin.maximum = 70.0
+        self.tangentialHeightSpin.singleStep = 2.0
+        self.tangentialHeightSpin.value = 30.0
+        self.tangentialHeightSpin.suffix = " mm"
+        sizeRow.addWidget(self.tangentialWidthSpin)
+        sizeRow.addWidget(qt.QLabel("x"))
+        sizeRow.addWidget(self.tangentialHeightSpin)
+        sizeRow.addStretch(1)
+        tangForm.addRow("Width x height:", sizeRow)
+
+        slabRow = qt.QHBoxLayout()
+        self.tangentialThicknessSpin = qt.QDoubleSpinBox()
+        self.tangentialThicknessSpin.minimum = 0.3
+        self.tangentialThicknessSpin.maximum = 12.0
+        self.tangentialThicknessSpin.singleStep = 0.5
+        self.tangentialThicknessSpin.value = 2.0
+        self.tangentialThicknessSpin.suffix = " mm"
+        self.tangentialModeCombo = qt.QComboBox()
+        self.tangentialModeCombo.addItem("Mean", "mean")
+        self.tangentialModeCombo.addItem("Max", "max")
+        self.tangentialModeCombo.addItem("Min", "min")
+        slabRow.addWidget(self.tangentialThicknessSpin)
+        slabRow.addWidget(self.tangentialModeCombo)
+        slabRow.addStretch(1)
+        tangForm.addRow("Slab:", slabRow)
+        tangOuter.addLayout(tangForm)
+
+        self.tangentialImageLabel = qt.QLabel("Load a CBCT volume (Step 1) and fit an arch curve (Step 2).")
+        self.tangentialImageLabel.setAlignment(qt.Qt.AlignCenter)
+        self.tangentialImageLabel.setMinimumHeight(240)
+        self.tangentialImageLabel.setStyleSheet(
+            "background: #0b1120; border: 1px solid #334155; color: #94a3b8;"
+        )
+        tangOuter.addWidget(self.tangentialImageLabel)
+
+        tangButtons = qt.QHBoxLayout()
+        self.btnTangentialRefresh = qt.QPushButton("Refresh tangential view")
+        self.btnTangentialSavePng = qt.QPushButton("Save PNG")
+        tangButtons.addWidget(self.btnTangentialRefresh)
+        tangButtons.addWidget(self.btnTangentialSavePng)
+        tangButtons.addStretch(1)
+        tangOuter.addLayout(tangButtons)
+
+        self.tangentialStatusLabel = qt.QLabel("Tangential view idle.")
+        self.tangentialStatusLabel.setWordWrap(True)
+        tangOuter.addWidget(self.tangentialStatusLabel)
+
+        # ---------------- connections ----------------
+        self.btnAgentTest.clicked.connect(self.onAgentTestConnectionClicked)
+        self.btnAgentSave.clicked.connect(self.onSaveAgentCredentials)
+        self.btnAgentReview.clicked.connect(self.onAgentReviewClicked)
+        self.btnAgentApplyActions.clicked.connect(self.onAgentApplyActionsClicked)
+        self.btnAgentClearAi.clicked.connect(self.onAgentClearAiClicked)
+        self.btnAnnotationAdd.clicked.connect(self.onAddAnnotationClicked)
+        self.btnAnnotationRemove.clicked.connect(self.onRemoveAnnotationClicked)
+        self.btnAnnotationExport.clicked.connect(self.onExportAnnotationsClicked)
+        self.annotationTextEdit.returnPressed.connect(self.onAddAnnotationClicked)
+        self.tangentialFollowCheck.toggled.connect(self.onTangentialFollowChanged)
+        self.tangentialArcSpin.valueChanged.connect(self.onTangentialSettingsChanged)
+        self.tangentialWidthSpin.valueChanged.connect(self.onTangentialSettingsChanged)
+        self.tangentialHeightSpin.valueChanged.connect(self.onTangentialSettingsChanged)
+        self.tangentialThicknessSpin.valueChanged.connect(self.onTangentialSettingsChanged)
+        self.tangentialModeCombo.currentIndexChanged.connect(self.onTangentialSettingsChanged)
+        self.btnTangentialRefresh.clicked.connect(self._refreshTangentialView)
+        self.btnTangentialSavePng.clicked.connect(self.onSaveTangentialPngClicked)
+
+        self._refreshAnnotationTable()
+
+    # ------------------------------------------------------------------
+    # Agent endpoint settings
+    # ------------------------------------------------------------------
+    def _agentConfigFromUI(self) -> Any:
+        agent_review = self._agent_core()
+        return agent_review.AgentEndpointConfig(
+            url=self.agentUrlEdit.text if self.agentUrlEdit is not None else "",
+            api_key=self.agentKeyEdit.text if self.agentKeyEdit is not None else "",
+            model=self.agentModelEdit.text if self.agentModelEdit is not None else "",
+            timeout_s=self.agentTimeoutSpin.value if self.agentTimeoutSpin is not None else 45.0,
+            with_images=bool(self.agentIncludeImagesCheck.checked) if self.agentIncludeImagesCheck else True,
+            max_images=int(self.agentMaxImagesSpin.value) if self.agentMaxImagesSpin is not None else 4,
+        )
+
+    def _restoreAgentSettings(self) -> None:
+        """Load the persisted endpoint settings (keyword only; never written to the scene)."""
+        if qt is None or self.agentUrlEdit is None:
+            return
+        try:
+            settings = qt.QSettings()
+            self.agentUrlEdit.setText(str(settings.value(self.SETTINGS_PREFIX + "AgentUrl", "") or ""))
+            self.agentKeyEdit.setText(str(settings.value(self.SETTINGS_PREFIX + "AgentKey", "") or ""))
+            model = str(settings.value(self.SETTINGS_PREFIX + "AgentModel", "") or "")
+            if model:
+                self.agentModelEdit.setText(model)
+            timeout = float(settings.value(self.SETTINGS_PREFIX + "AgentTimeout", 45.0) or 45.0)
+            self.agentTimeoutSpin.value = timeout
+            with_images = str(settings.value(self.SETTINGS_PREFIX + "AgentImages", "true")).lower() != "false"
+            self.agentIncludeImagesCheck.checked = with_images
+            max_images = int(float(settings.value(self.SETTINGS_PREFIX + "AgentMaxImages", 4) or 4))
+            self.agentMaxImagesSpin.value = max(0, min(8, max_images))
+        except Exception:
+            logger.warning("Could not restore agent settings", exc_info=True)
+        config = self._agentConfigFromUI()
+        self.agentStatusLabel.setText(
+            "Ready: " + config.resolved_url() if config.is_configured() else "Not configured."
+        )
+
+    def onSaveAgentCredentials(self) -> None:
+        config = self._agentConfigFromUI()
+        if not config.is_configured():
+            if slicer is not None:
+                slicer.util.warningDisplay("Enter an http(s) endpoint URL and an API key first.")
+            return
+        try:
+            settings = qt.QSettings()
+            settings.setValue(self.SETTINGS_PREFIX + "AgentUrl", config.url)
+            settings.setValue(self.SETTINGS_PREFIX + "AgentKey", config.api_key)
+            settings.setValue(self.SETTINGS_PREFIX + "AgentModel", config.model)
+            settings.setValue(self.SETTINGS_PREFIX + "AgentTimeout", config.timeout_s)
+            settings.setValue(self.SETTINGS_PREFIX + "AgentImages", "true" if config.with_images else "false")
+            settings.setValue(self.SETTINGS_PREFIX + "AgentMaxImages", config.max_images)
+            if hasattr(settings, "sync"):
+                settings.sync()
+        except Exception:
+            logger.warning("Could not persist agent settings", exc_info=True)
+            return
+        self.agentStatusLabel.setText(f"Saved. Endpoint: {config.resolved_url()}")
+
+    # ------------------------------------------------------------------
+    # Agent requests (worker thread + poll timer; the UI never blocks)
+    # ------------------------------------------------------------------
+    def onAgentTestConnectionClicked(self) -> None:
+        self._startAgentWorker("test")
+
+    def onAgentReviewClicked(self) -> None:
+        store = self.annotationStore
+        if store is None:
+            return
+        context = self._collectAgentContext()
+        if not context.get("sites") and not self.selectedTeeth:
+            if slicer is not None:
+                slicer.util.warningDisplay(
+                    "Select at least one tooth in Step 5 (or set an active tooth) before asking the agent."
+                )
+            return
+        images = self._collectAgentImages(context)
+        self._startAgentWorker("review", context=context, images=images)
+
+    def _startAgentWorker(
+        self, kind: str, context: Optional[Dict[str, Any]] = None, images: Sequence[Any] = ()
+    ) -> None:
+        if qt is None or self.btnAgentReview is None:
+            return
+        if self._agentThread is not None and getattr(self._agentThread, "is_alive", lambda: False)():
+            self.agentStatusLabel.setText("A request is already running.")
+            return
+        config = self._agentConfigFromUI()
+        if not config.is_configured():
+            self.agentStatusLabel.setText("Not configured: enter an http(s) URL and an API key.")
+            return
+        agent_review = self._agent_core()
+        self.agentStatusLabel.setText(
+            "Testing " + config.resolved_url() if kind == "test" else "Sending the case to " + config.resolved_url()
+        )
+        self.btnAgentReview.setEnabled(False)
+        self.btnAgentTest.setEnabled(False)
+        self._agentWorkerOutcome = None
+
+        payload_context = dict(context or {})
+        payload_images = tuple(images)
+
+        def _work() -> None:
+            client = agent_review.AgentClient(config)
+            try:
+                if kind == "test":
+                    ok, message = client.test_connection()
+                    self._agentWorkerOutcome = (kind, ok, message)
+                else:
+                    result = client.review(payload_context, payload_images)
+                    self._agentWorkerOutcome = (kind, result, None)
+            except agent_review.AgentError as exc:
+                self._agentWorkerOutcome = ("error", kind, f"{exc.kind}: {exc}")
+            except Exception as exc:
+                logger.warning("Agent request failed", exc_info=True)
+                self._agentWorkerOutcome = (
+                    "error",
+                    kind,
+                    agent_review.redact_secrets(str(exc), [config.api_key]),
+                )
+
+        import threading
+
+        self._agentThread = threading.Thread(target=_work, name="CBCTPlannerAgentReview", daemon=True)
+        self._agentThread.start()
+
+        if self._agentPollTimer is None:
+            self._agentPollTimer = qt.QTimer()
+            self._agentPollTimer.setInterval(150)
+            self._agentPollTimer.timeout.connect(self._pollAgentWorker)
+        self._agentPollTimer.start()
+
+    def _pollAgentWorker(self) -> None:
+        if self._agentWorkerOutcome is None:
+            thread = self._agentThread
+            if thread is not None and not getattr(thread, "is_alive", lambda: True)():
+                # Thread died without publishing an outcome: surface it instead of hanging.
+                self._agentWorkerOutcome = ("error", "unknown", "the request ended without a result")
+            else:
+                return
+        outcome = self._agentWorkerOutcome
+        self._agentWorkerOutcome = None
+        if self._agentPollTimer is not None:
+            self._agentPollTimer.stop()
+        self.btnAgentReview.setEnabled(True)
+        self.btnAgentTest.setEnabled(True)
+
+        kind = outcome[0]
+        if kind == "test":
+            _kind, ok, message = outcome
+            self.agentStatusLabel.setText(("Connected. " if ok else "Failed: ") + str(message))
+        elif kind == "review":
+            self._finishAgentReview(outcome[1])
+        else:
+            _kind, failed_kind, message = outcome
+            self.agentStatusLabel.setText(f"Request failed ({failed_kind}): {message}")
+
+    def _finishAgentReview(self, result: Any) -> None:
+        self._pendingAgentResult = result
+        lines = []
+        if result.summary:
+            lines.append(result.summary)
+        if result.question:
+            lines.append("Question: " + result.question)
+        if result.comments:
+            lines.append("")
+            lines.append(f"Proposed comments ({len(result.comments)}):")
+            for comment in result.comments:
+                tag = f"#{comment.get('fdi')}" if comment.get("fdi") else "general"
+                lines.append(f"  - {tag} [{comment.get('severity')}] {comment.get('text')}")
+        if result.actions:
+            lines.append("")
+            lines.append(f"Proposed plan edits ({len(result.actions)}):")
+            for action in result.actions:
+                target = action.params.get("fdi") or action.params.get("id") or ""
+                lines.append(f"  - {action.op} {target}")
+        if result.skipped_actions:
+            lines.append("")
+            lines.append("Rejected (untrusted/invalid): " + str(result.skipped_actions))
+        if not lines:
+            lines.append("The agent returned no summary.")
+        if self.agentSummaryText is not None:
+            self.agentSummaryText.setPlainText("\n".join(lines))
+        self.btnAgentApplyActions.setEnabled(bool(result.comments or result.actions))
+        self.agentStatusLabel.setText(
+            f"Review ready: {len(result.comments)} comment(s), {len(result.actions)} action(s) - review, then apply."
+        )
+
+    def onAgentApplyActionsClicked(self) -> None:
+        result = self._pendingAgentResult
+        store = self.annotationStore
+        if result is None or store is None:
+            return
+        agent_review = self._agent_core()
+        outcome = agent_review.apply_agent_actions(result, store, _AgentPlanAdapter(self))
+        self._pendingAgentResult = None
+        self.btnAgentApplyActions.setEnabled(False)
+        self._refreshAnnotationTable()
+        self._syncSelectedTeethToParameterNode()
+        self._refreshPlanTableFromCache()
+        self._updateSelectionStatusLabel()
+        self._updateStepChips()
+        detail = outcome.summary()
+        if outcome.skipped:
+            detail += " | skipped: " + "; ".join(f"{op} ({reason})" for op, reason in outcome.skipped[:4])
+        self.agentStatusLabel.setText(detail)
+        if self.agentSummaryText is not None:
+            self.agentSummaryText.appendPlainText("\n\nApplied: " + detail)
+
+    def onAgentClearAiClicked(self) -> None:
+        store = self.annotationStore
+        if store is None:
+            return
+        removed = store.clear(kind="ai_comment")
+        self._refreshAnnotationTable()
+        self._updateStepChips()
+        self.agentStatusLabel.setText(f"Removed {removed} agent annotation(s).")
+
+    def _set_tooth_in_plan(self, fdi: int, member: bool) -> bool:
+        """Plan adapter target: true when the selection actually changed."""
+        fdi = int(fdi)
+        if member == (fdi in self.selectedTeeth):
+            return False
+        self.toggleToothPlanMembership(fdi)
+        return True
+
+    # ------------------------------------------------------------------
+    # Annotations
+    # ------------------------------------------------------------------
+    def _refreshAnnotationTable(self) -> None:
+        table = getattr(self, "annotationTable", None)
+        if table is None or qt is None:
+            return
+        store = self.annotationStore
+        items = [] if store is None else list(store)
+        items.sort(key=lambda a: (a.fdi is None, a.fdi or 0, a.created))
+        # Row -> annotation id, kept Qt-free so the remove handler works without a data role.
+        self._annotationRowIds = [ann.id for ann in items]
+        table.setRowCount(len(items))
+        for row_index, ann in enumerate(items):
+            values = [
+                "" if ann.fdi is None else str(ann.fdi),
+                ann.kind,
+                ann.severity,
+                ann.author,
+                ann.text,
+            ]
+            for col_index, text in enumerate(values):
+                cell = qt.QTableWidgetItem(str(text))
+                if col_index == 0:
+                    cell.setData(qt.Qt.UserRole, ann.id)
+                table.setItem(row_index, col_index, cell)
+        if self.annotationCountLabel is not None:
+            if store is None:
+                self.annotationCountLabel.setText("Annotations unavailable.")
+            else:
+                counts = store.counts()
+                self.annotationCountLabel.setText(
+                    f"{counts.get('total', 0)} annotation(s); {store.agent_comment_count()} from the agent."
+                )
+
+    def _activeFdiForAnnotation(self) -> Optional[int]:
+        fdi = self.activeToothFDI
+        if fdi is None and hasattr(self, "lockFdiCombo"):
+            lock = str(self.lockFdiCombo.currentData or "")
+            fdi = int(lock) if lock.isdigit() else None
+        if fdi is None and len(self.selectedTeeth) == 1:
+            fdi = next(iter(self.selectedTeeth))
+        return None if fdi is None else int(fdi)
+
+    def onAddAnnotationClicked(self) -> None:
+        store = self.annotationStore
+        if store is None:
+            return
+        text = self.annotationTextEdit.text if self.annotationTextEdit is not None else ""
+        if not str(text).strip():
+            self.agentStatusLabel.setText("Type a note first.")
+            return
+        fdi = self._activeFdiForAnnotation()
+        try:
+            store.add(text, fdi=fdi, kind="comment", author="clinician", source="manual")
+        except ValueError:
+            self.agentStatusLabel.setText("Note text was empty.")
+            return
+        if self.annotationTextEdit is not None:
+            self.annotationTextEdit.setText("")
+        self._refreshAnnotationTable()
+        self._updateStepChips()
+        self.agentStatusLabel.setText(
+            f"Note added for #{fdi}." if fdi is not None else "General note added."
+        )
+
+    def onRemoveAnnotationClicked(self) -> None:
+        store = self.annotationStore
+        table = getattr(self, "annotationTable", None)
+        if store is None or table is None:
+            return
+        row = int(table.currentRow)
+        row_ids = list(getattr(self, "_annotationRowIds", []))
+        annotation_id = row_ids[row] if 0 <= row < len(row_ids) else ""
+        if not annotation_id or not store.remove(annotation_id):
+            self.agentStatusLabel.setText("Select an annotation row first.")
+            return
+        self._refreshAnnotationTable()
+        self._updateStepChips()
+        self.agentStatusLabel.setText("Annotation removed.")
+
+    def onExportAnnotationsClicked(self) -> None:
+        store = self.annotationStore
+        if store is None or qt is None:
+            return
+        if len(store) == 0:
+            self.agentStatusLabel.setText("No annotations to export.")
+            return
+        start_dir = ""
+        if hasattr(self, "printOutputDirEdit"):
+            start_dir = str(self.printOutputDirEdit.text or "")
+        default_name = (
+            str(Path(start_dir) / "cbct_annotations.json") if start_dir else "cbct_annotations.json"
+        )
+        chosen = qt.QFileDialog.getSaveFileName(
+            None, "Export annotations JSON", default_name, "JSON (*.json)"
+        )
+        if isinstance(chosen, (tuple, list)):
+            chosen = chosen[0] if chosen else ""
+        if not chosen:
+            return
+        try:
+            saved = store.save(str(chosen))
+        except OSError as exc:
+            logger.warning("Annotation export failed", exc_info=True)
+            self.agentStatusLabel.setText(f"Could not write {chosen}: {exc}")
+            return
+        self.agentStatusLabel.setText(f"Exported {len(store)} annotation(s) to {saved}.")
+
+    # ------------------------------------------------------------------
+    # Case context for the agent
+    # ------------------------------------------------------------------
+    def _collectAgentContext(self) -> Dict[str, Any]:
+        """Assemble the anonymised case context (measurements + provenance + notes)."""
+        agent_review = self._agent_core()
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        fdis = sort_teeth_anatomically(sorted(self.selectedTeeth))
+        rows: List[Dict[str, Any]] = []
+        if volNode is not None and self.logic is not None and fdis:
+            try:
+                rows = self.logic.analyze_selected_teeth(fdis, volNode, segmentationNode=segNode)
+            except Exception:
+                logger.warning("Could not analyse planned teeth for the agent", exc_info=True)
+        sites: List[Dict[str, Any]] = []
+        for row in rows or []:
+            implant = None
+            if row.get("rec_diameter") is not None and row.get("rec_length") is not None:
+                implant = f"D{float(row['rec_diameter']):.1f} x L{float(row['rec_length']):.1f} mm"
+            sites.append(
+                {
+                    "fdi": row.get("fdi"),
+                    "jaw": row.get("jaw"),
+                    "h_mm": row.get("height_mm"),
+                    "w0_mm": row.get("w_crest_mm"),
+                    "w3_mm": row.get("w_3mm"),
+                    "w5_mm": row.get("w_5mm"),
+                    "ian_mm": row.get("nerve_clearance_mm"),
+                    "hu": row.get("hu"),
+                    "implant": implant,
+                    "provenance": row.get("source"),
+                    "withheld": row.get("withheld_reason"),
+                }
+            )
+        jaw_key = str(self._effectiveJawKey() or "lower").lower()
+        arch_len = None
+        occlusal = None
+        try:
+            arch = self._arch_for_tangential(jaw_key)
+            if arch is not None:
+                arch_len = round(float(arch.total_arc_length), 1)
+            if self.logic is not None:
+                occlusal = [round(float(v), 2) for v in self.logic.get_occlusal_normal()]
+        except Exception:
+            logger.debug("Arch metadata for the agent was unavailable", exc_info=True)
+        store = self.annotationStore
+        return {
+            "patient": {"name": "Anonymous", "id": "Anonymous"},
+            "modality": "CBCT",
+            "arch": {"jaw": jaw_key, "length_mm": arch_len, "occlusal_normal": occlusal},
+            "selected_teeth": list(fdis),
+            "active_arc_mm": float(self.arcMmSlider.value) if hasattr(self, "arcMmSlider") else None,
+            "workspace": self.roleModeCombo.currentText if hasattr(self, "roleModeCombo") else "",
+            "sites": sites,
+            "annotations": [] if store is None else store.to_dicts(),
+            "warnings": agent_review.context_warnings({"sites": sites}),
+            "question": self.agentQuestionEdit.text.strip() if self.agentQuestionEdit is not None else "",
+        }
+
+    def _render_site_tile_png(self, engine: Any, fdi: int) -> Optional[bytes]:
+        """Render one measured cross-section at a tooth site and return PNG bytes."""
+        import io
+
+        try:
+            from CBCTPlannerLib.core.labels import is_mandibular_fdi
+            from CBCTPlannerLib.core_print_render import render_cross_section
+
+            jaw = "lower" if is_mandibular_fdi(int(fdi)) else "upper"
+            arches = getattr(engine, "arches", {}) or {}
+            arch = arches.get(jaw) or getattr(engine, "arch", None)
+            if arch is None:
+                return None
+            resolved = engine._site_center_with_provenance(str(fdi))
+            if resolved is None:
+                return None
+            point = np.asarray(resolved[0], dtype=np.float64)
+            t_param, _dist = arch.find_closest_parameter(point)
+            arc_mm = float(t_param) * float(arch.total_arc_length)
+            meas, cs = engine.measure_at_arc_mm(jaw, arc_mm, fdi_hint=str(fdi))
+            if cs is None:
+                return None
+            render = render_cross_section(
+                cs, meas, scale=2, show_masks=False, show_implant_guides=False, monochrome=True
+            )
+            if not render.available or render.image is None:
+                return None
+            buffer = io.BytesIO()
+            render.image.convert("RGB").save(buffer, format="PNG")
+            return buffer.getvalue()
+        except Exception:
+            logger.debug("Could not render an agent slice for FDI %s", fdi, exc_info=True)
+            return None
+
+    def _collectAgentImages(self, context: Dict[str, Any]) -> List[Any]:
+        """Rendered slices for the agent: measured cross-sections plus the tangential view."""
+        import io
+
+        agent_review = self._agent_core()
+        config = self._agentConfigFromUI()
+        if not config.with_images or config.max_images <= 0:
+            return []
+        budget = int(config.max_images)
+        images: List[Any] = []
+        fdis = sort_teeth_anatomically(sorted(self.selectedTeeth))
+        if not fdis and self.activeToothFDI is not None:
+            fdis = [int(self.activeToothFDI)]
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        engine = None
+        if fdis and volNode is not None and segNode is not None and self.logic is not None:
+            try:
+                engine = self.logic._get_or_build_measurement_engine(volNode, segNode)
+            except Exception:
+                logger.warning("Measurement engine unavailable for agent images", exc_info=True)
+        for fdi in fdis[:budget]:
+            png = self._render_site_tile_png(engine, int(fdi)) if engine is not None else None
+            if png:
+                images.append(agent_review.AgentImage(label=f"cross-section FDI {fdi}", png_bytes=png))
+        section = self._lastTangentialSection
+        if len(images) < budget and section is not None and section.available:
+            try:
+                from CBCTPlannerLib.core.tangential import render_tangential_section
+
+                render = render_tangential_section(section, scale=1, monochrome=True, transparent_bg=False)
+                if render.available and render.image is not None:
+                    buffer = io.BytesIO()
+                    render.image.convert("RGB").save(buffer, format="PNG")
+                    images.append(
+                        agent_review.AgentImage(
+                            label=f"tangential section at arc {section.arc_mm:.1f} mm",
+                            png_bytes=buffer.getvalue(),
+                        )
+                    )
+            except Exception:
+                logger.debug("Tangential image for the agent failed", exc_info=True)
+        return images
+
+    # ------------------------------------------------------------------
+    # Tangential view
+    # ------------------------------------------------------------------
+    def _arch_for_tangential(self, jaw_key: str) -> Any:
+        """DentalArch for the active jaw (falls back to the shared curve)."""
+        if self.logic is None or not hasattr(self, "volumeSelector"):
+            return None
+        volNode = self.volumeSelector.currentNode()
+        if volNode is None:
+            return None
+        jaw = "upper" if str(jaw_key).lower().startswith("u") else "lower"
+        for candidate in (jaw, "Shared"):
+            try:
+                curve = self.logic.get_curve_node_for_jaw(
+                    volNode, candidate, parameterNode=self._parameterNode
+                )
+            except Exception:
+                logger.debug("Curve lookup failed for %s", candidate, exc_info=True)
+                continue
+            if curve is None or curve.GetNumberOfControlPoints() < 4:
+                continue
+            points = self.logic.panoramic.extract_world_points_from_curve_node(curve)
+            if len(points) >= 4:
+                return DentalArch(
+                    points,
+                    jaw_type=jaw,
+                    occlusal_normal=self.logic.get_occlusal_normal(),
+                    ras_convention=True,
+                )
+        return None
+
+    def _scheduleTangentialRefresh(self) -> None:
+        if qt is None or getattr(self, "tangentialImageLabel", None) is None:
+            return
+        if self._tangentialDebounceTimer is None:
+            self._tangentialDebounceTimer = qt.QTimer()
+            self._tangentialDebounceTimer.setSingleShot(True)
+            self._tangentialDebounceTimer.setInterval(180)
+            self._tangentialDebounceTimer.timeout.connect(self._refreshTangentialView)
+        self._tangentialDebounceTimer.start()
+
+    def onTangentialFollowChanged(self, checked: bool) -> None:
+        if self.tangentialArcSpin is not None:
+            self.tangentialArcSpin.setEnabled(not bool(checked))
+        self._scheduleTangentialRefresh()
+
+    def onTangentialSettingsChanged(self, *_args: Any) -> None:
+        self._scheduleTangentialRefresh()
+
+    def _refreshTangentialView(self) -> None:
+        """Sample and render the ridge-parallel section at the current arc position."""
+        if qt is None or self.tangentialImageLabel is None:
+            return
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        if volNode is None:
+            self.tangentialImageLabel.setText("Load a CBCT volume in Step 1.")
+            self.tangentialStatusLabel.setText("No volume selected.")
+            return
+        jaw_key = str(self._effectiveJawKey() or "lower").lower()
+        arch = self._arch_for_tangential(jaw_key)
+        if arch is None:
+            self.tangentialImageLabel.setText("Fit an arch curve in Step 2.")
+            self.tangentialStatusLabel.setText("A dental arch curve (>= 4 points) is required.")
+            return
+        follow = bool(self.tangentialFollowCheck.checked) if self.tangentialFollowCheck is not None else True
+        if follow and hasattr(self, "arcMmSlider"):
+            arc_mm = float(self.arcMmSlider.value)
+            if self.tangentialArcSpin is not None:
+                self.tangentialArcSpin.blockSignals(True)
+                self.tangentialArcSpin.setValue(arc_mm)
+                self.tangentialArcSpin.blockSignals(False)
+        else:
+            arc_mm = float(self.tangentialArcSpin.value) if self.tangentialArcSpin is not None else 0.0
+        try:
+            from CBCTPlannerLib.core.tangential import (
+                crest_drop_mm,
+                render_tangential_section,
+                sample_tangential_section,
+            )
+            from CBCTPlannerLib.core.volume_loader import CBCTVolume
+
+            volume = CBCTVolume.from_slicer_volume_node(volNode, copy_image=False)
+        except Exception:
+            logger.warning("Could not open the volume for the tangential view", exc_info=True)
+            self.tangentialStatusLabel.setText("Could not read the volume array.")
+            return
+        mask = None
+        engine = None
+        if self.logic is not None:
+            engine = getattr(self.logic, "_cached_engine", None)
+        if engine is not None and getattr(engine, "mask", None) is not None:
+            mask = engine.mask
+        mode = str(self.tangentialModeCombo.currentData or "mean") if self.tangentialModeCombo is not None else "mean"
+        try:
+            section = sample_tangential_section(
+                volume,
+                arch,
+                arc_mm,
+                width_mm=self.tangentialWidthSpin.value if self.tangentialWidthSpin is not None else 42.0,
+                height_mm=self.tangentialHeightSpin.value if self.tangentialHeightSpin is not None else 30.0,
+                thickness_mm=(
+                    self.tangentialThicknessSpin.value if self.tangentialThicknessSpin is not None else 2.0
+                ),
+                mode=mode,
+                mask=mask,
+                is_mandible=(jaw_key != "upper"),
+            )
+        except Exception as exc:
+            logger.warning("Tangential sampling failed", exc_info=True)
+            self.tangentialStatusLabel.setText(f"Tangential sampling failed: {exc}")
+            return
+        self._lastTangentialSection = section
+        if not section.available or section.array is None:
+            self.tangentialImageLabel.setText("Tangential section unavailable.")
+            self.tangentialStatusLabel.setText(section.reason or "unavailable")
+            return
+        render = render_tangential_section(
+            section, scale=2, footer_text=f"Tangential {section.arc_mm:.1f} mm"
+        )
+        if not render.available or render.image is None:
+            self.tangentialStatusLabel.setText(render.reason or "render failed")
+            return
+        try:
+            import io
+
+            buffer = io.BytesIO()
+            render.image.save(buffer, format="PNG")
+            qimage = qt.QImage.fromData(qt.QByteArray(buffer.getvalue()))
+            if not qimage.isNull():
+                pixmap = qt.QPixmap.fromImage(qimage)
+                self.tangentialImageLabel.setPixmap(
+                    pixmap.scaled(560, 320, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+                )
+            else:
+                self.tangentialImageLabel.setText("Tangential image could not be displayed.")
+        except Exception:
+            logger.warning("Could not display the tangential section", exc_info=True)
+        drop = crest_drop_mm(section)
+        drop_txt = f" | crest drop {drop:.1f} mm" if drop is not None else ""
+        self.tangentialStatusLabel.setText(
+            f"arc {section.arc_mm:.1f} mm | {section.width_mm:.0f}x{section.height_mm:.0f} mm | "
+            f"{section.thickness_mm:.1f} mm {section.thickness_mode} slab | "
+            f"{section.mm_per_px:.2f} mm/px{drop_txt}"
+        )
+
+    def onSaveTangentialPngClicked(self) -> None:
+        section = self._lastTangentialSection
+        if section is None or not section.available or section.array is None:
+            if slicer is not None:
+                slicer.util.warningDisplay("Refresh the tangential view before saving it.")
+            return
+        from CBCTPlannerLib.core.tangential import render_tangential_section
+
+        render = render_tangential_section(
+            section, scale=3, footer_text=f"Tangential {section.arc_mm:.1f} mm"
+        )
+        if not render.available or render.image is None:
+            return
+        start_dir = ""
+        if hasattr(self, "printOutputDirEdit"):
+            start_dir = str(self.printOutputDirEdit.text or "")
+        default_name = (
+            str(Path(start_dir) / f"tangential_{section.arc_mm:.0f}mm.png")
+            if start_dir
+            else f"tangential_{section.arc_mm:.0f}mm.png"
+        )
+        chosen = qt.QFileDialog.getSaveFileName(None, "Save tangential section", default_name, "PNG (*.png)")
+        if isinstance(chosen, (tuple, list)):
+            chosen = chosen[0] if chosen else ""
+        if not chosen:
+            return
+        try:
+            render.image.convert("RGBA").save(str(chosen), format="PNG")
+        except OSError:
+            logger.warning("Could not save tangential PNG", exc_info=True)
+            return
+        self.tangentialStatusLabel.setText(f"Saved {chosen}")
 
 
 class CBCTPlannerLogic(ScriptedLoadableModuleLogic):

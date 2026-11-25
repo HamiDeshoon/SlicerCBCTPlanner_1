@@ -191,3 +191,137 @@ NumPy 2.4.6, SciPy 1.17.1) on `ToothFairy3S_0021_0000.nii.gz` + `ToothFairy3S_00
 
 The panoramic sampler is already interactive on a full-FOV CBCT; the 3D MIP card is the only second-scale path
 (one downward `max` over 169 slices + PIL mask composition), so OPT-01 caching is not currently warranted.
+
+---
+
+## 9. Follow-up refinements (UI + frontal W0), 2026-11-24
+
+User feedback after the first merge: frontal teeth still produced a one-sided `W0`, measurement captions sat on the
+anatomy, `W3`/`W5` calipers crossed the jaw, `H` ran to the periosteal jaw surface, the footer overlapped annotations,
+and the 8×10 band gave the whole width to the OPG.
+
+### Measurement engine (`core/measurements.py`)
+
+| Change | Why |
+|--------|-----|
+| Crestal `W0` samples a 0.5/1.0/1.5 mm band and keeps the **widest bridged** span | One crestal height reported whichever plate the plane happened to catch |
+| New post-pass: when `W0` is a single cortical run < 3 mm and a deeper caliper does span both walls, `W0` is re-anchored to that caliper's two wall u-endpoints at **each wall's own crest rim** | Frontal incisors: the incisal crown's labial/lingual air gap stopped the crestal bridge, collapsing `W0` to one plate |
+| `SOCKET_RIM_MAX_V_OFFSET_MM = 2.5` (was a hard-coded 4.5) + vertical bone-support test per rim | Keeps the rim-pair branch near the crest and rejects stray voxels |
+| `JAW_END_CORTEX_INSET_MM = 1.5` — the jaw-end stop is inset along `d_apical` | `H` now ends at the **internal** cortical border, never flush with the periosteal surface. Canal-limited stops are untouched |
+
+### Print renderer (`core_print_render.py`)
+
+- Tile canvas is `img_h + footer_h`: the footer has its own band, so it can never cover a caption or a deep basal end-cap.
+- A reserved right-hand caption gutter (`max(64, 14·scale)` px) holds the `H`, `W0`, `IAN` and `SINUS` pills, stacked with
+  collision avoidance and a short colour stub; nothing is drawn on the tooth or jaw any more.
+- `W3`/`W5` are no longer calipers across the anatomy: they render as a compact corner depth-key box with coloured dashes.
+
+### 8×10 layout (`PrintLayoutEngine.py`)
+
+- `_compose_page_image`: the reference band is split 50/50 — OPG left, 3D VR right — and the VR now also renders on the
+  grayscale film page; the colour key keeps the full width.
+- `_build_8x10_html`: `.pano-section` is a two-column row (`.pano-card` + `.vr-card` at `flex: 1 1 50%`); the VR card left
+  the bottom section.
+
+### Verification (same real CT, `verify_real_ct.py`, 20 checks)
+
+- `W0` two-wall sockets: 20/20 bridged (molars 12/12 ≥ 6 mm, W0 median 9.0 mm). 185/205 sections still clip a single wall.
+- **Frontal sites: 31 = 7.19, 32 = 6.56, 33 = 8.26, 41 = 6.79, 42 = 7.16, 43 = 7.90 mm** (before: 32 = 1.53, 43 = 0.98).
+  New permanent check: `frontal sockets never report one side of the tooth as W0`.
+- `H`: 65/68 non-canal slices end inside the jaw, gap p10/p50/p90 = 1.26/2.53/3.15 mm against the 1.5 mm cortical inset;
+  IAN clearance unchanged (137/137 clear, min 0.09 mm).
+- `python -m unittest discover -s tests` → 167 tests OK (the `H`-to-jaw-base assertions now subtract
+  `JAW_END_CORTEX_INSET_MM`, and the tile-size assertion allows the extra footer band).
+- Visual: the exported 8×10 page and a 300 DPI cross-section tile were inspected — captions in the gutter, depth key in the
+  corner, footer in its own band, OPG/VR side by side.
+
+Residual: one interproximal section at the FDI 43 edge (arc 39.9 mm) still reads a 1.75 mm plate because its buccal plate
+top lies below the sampled crest band; the site itself and its neighbours bridge 7.6–7.9 mm.
+
+---
+
+## 10. Step 8: review agent, annotations & tangential sections (2026-11-24)
+
+Big feature pass: a remote review agent, an annotation store, and ridge-parallel sections.
+
+### New core modules (Qt-free, unit-tested)
+
+| Module | Responsibility |
+|--------|----------------|
+| `core/annotations.py` | `Annotation` + `AnnotationStore`: id, FDI (11-48), arc mm, kind (comment/ai_comment/flag/question/plan_change), severity, author, source, created/edited; add/update/upsert/remove/clear, per-FDI grouping, JSON round-trip |
+| `core/agent_review.py` | `AgentEndpointConfig` (URL normalisation for `/`, `/v1`, `/v1/chat/completions`, bare hosts; key redaction), `build_review_payload` (text + image parts), `parse_agent_response` (fenced/prose/brace-balanced JSON, comment + action extraction), `AgentAction` validation, `apply_agent_actions` (whitelist → store/plan), `AgentClient` over `urllib` with `MockTransport`, `context_warnings` |
+| `core/tangential.py` | `sample_tangential_section` (plane spanned by arch tangent + occlusal binormal, slab mean/max/min along the buccal normal, row 0 = superior, optional cortical crest line), `crest_drop_mm`, `render_tangential_section` (RGBA with transparent air, crest line, HUD, scale bar, optional footer) |
+
+### GUI (`CBCTPlanner.py`)
+
+- New collapsible **Step 8: AI Agent Review, Annotations & Tangential Sections** (built last, after Step 7), plus an
+  8th step-status chip. `agentStepBox` added to all four workspace role profiles in `WorkflowUIHelpers.py`.
+- Endpoint form (URL, key with `Password` echo, model, timeout, image toggle/max), `Test connection`, `Save as default`
+  (QSettings only), question field, `Send case to agent`, `Apply agent changes`, `Remove agent notes`.
+- Annotation table (FDI/Kind/Severity/Author/Text) with add/remove/export; row → id mapping kept Qt-free in
+  `_annotationRowIds` so the handlers are testable headless.
+- Network work runs on a `threading.Thread` with a 150 ms `QTimer` poll (`_agentThread`, `_agentPollTimer`,
+  `_agentWorkerOutcome`); both timers are stopped in `cleanup()`. The tangential view refreshes through a 180 ms
+  debounce timer and follows the cross-section cursor.
+- `_AgentPlanAdapter` exposes only `add_tooth`/`remove_tooth`; implant diameter edits are reported as skipped instead of
+  pretending to change a measurement-derived plan row.
+- Context is anonymised (`patient.name = "Anonymous"`), and the key is only ever a header value.
+
+### Verification
+
+- `python -m unittest discover -s tests` → **219 tests OK** (new: `test_agent_review.py` 27, `test_tangential_view.py` 11,
+  `test_agent_step_glue.py` 14; `test_autofit_widget.py` updated for the 8th chip).
+- `PythonSlicer verify_real_ct.py` → **23/23 PASS**, including on the real ToothFairy3S_0021 CT:
+  - tangential section `(101, 141)` at 0.30 mm/px, arc 20.0 mm, 57 % bone pixels, 125 crest samples, crest drop 11.1 mm, 0.03 s;
+  - tangential RGBA render with transparent air;
+  - full agent round trip with a mock transport: real context + image → 49 KB payload, key only in `Authorization`,
+    1 comment parsed, 3 changes applied (comment, annotation, tooth add), 1 invalid op rejected, plan adapter called.
+- Not verified: the Qt panel was never rendered (headless environment). Handlers are covered by
+  `test_agent_step_glue.py`; the widget construction path is covered by `tests/test_static_attrs.py`.
+
+### Known gaps / follow-ups
+
+- Implant diameter/length edits from the agent are skipped (the plan table is derived from measurements).
+- Annotations are not yet printed into the 8x10 film or the HTML report.
+- No retry/backoff loop on rate limits (`AgentError.is_retryable` is exposed for that).
+
+---
+
+## 11. MCP server for 3D Slicer (2026-11-25)
+
+Installed [zhaoyouj/mcp-slicer](https://github.com/zhaoyouj/mcp-slicer) 0.3.1 (`uv tool install mcp-slicer`) and
+verified it end to end against the local **Slicer 5.12.3** (upstream asks for 5.8+).
+
+### What the package is
+
+Three MCP tools over Slicer's built-in Web Server REST API (`http://localhost:2016/slicer`, hardcoded):
+`list_nodes` (`/mrml/names|ids|properties`), `execute_python_code` (`/exec`, raw POST body), `capture_screenshot`
+(`/screenshot`, `/threeD`, and a `/exec`-based slice-widget grab). Python >= 3.13, deps `mcp[cli]`, `requests`, `pillow`.
+
+### Repo additions
+
+| File | Purpose |
+|------|---------|
+| `.mcp.json` | Root MCP client config: `uvx mcp-slicer` (portable, no absolute machine paths) |
+| `analysis/mcp_slicer_check/slicer_webserver_boot.py` | Slicer launcher: REST API on **127.0.0.1:2016** with `exec` enabled (the GUI leaves it off), maximises the window, and optionally seeds a probe volume + quit sentinel. Python-only, no firewall prompt |
+| `analysis/mcp_slicer_check/verify_mcp_slicer.py` | 11-check harness: boots Slicer with `--additional-module-paths ./CBCTPlanner`, speaks MCP JSON-RPC over stdio, calls every tool, prints a PASS/FAIL table, exits non-zero on failure |
+
+### Findings against Slicer 5.12.3 (11/11 PASS)
+
+- `/exec` accepts a **raw text body** in 5.12 (`if requestBody: source = requestBody`), which is what the package
+  sends — the older `__exec__` JSON envelope is not needed. Errors come back as `{"success": false,
+  "message": "Server error: division by zero"}` and the tool surfaces them instead of raising.
+- `list_nodes` works for all three filter types. `/mrml/properties` parses `node.__str__()`, so keys are the printed
+  ones (`Name`, not `name`) — callers filtering by name must use `Name`.
+- Screenshots: application 41 KiB; Red slice grab equals the slice *view* widget size (307x68 in this session); 3D from
+  axis A returns a valid JPEG. **A restored 965x400 window gives a 300x70 slice capture**, so the launcher maximises
+  the window — an agent gets a usable image only when the view is actually big on screen.
+- `CBCTPlanner` is registered and visible to the agent (`slicer.util.moduleNames()`), so `execute_python_code` can
+  drive this module's logic directly.
+- Unchanged upstream limitation: the Slicer URL is hardcoded to `localhost:2016`, so a non-default web-server port
+  needs a patched copy (not vendored here).
+
+### Harness notes (bugs that were in the harness, not the product)
+
+- `sys` is not in Slicer's `/exec` globals: probe code must `import sys` itself.
+- First launch of a fresh `.exe` can exceed 30 s (antivirus scan) — the initialize timeout is 120 s.

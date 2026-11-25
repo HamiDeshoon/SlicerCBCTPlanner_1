@@ -72,6 +72,15 @@ logger = logging.getLogger("CBCTPlanner.measurements")
 # the lateral border, or spans most of the field, means the jaw mask is missing or misaligned
 # at this site: measuring it would print invented millimetres on the clinical film.
 _CS_BORDER_TOL_MM = 0.75
+
+# The height caliper stops at the INTERNAL border of the basal cortex (the medullary side of the
+# inferior cortical shell) instead of the periosteal surface, so an osteotomy is never planned
+# flush against the outer cortical plate.
+JAW_END_CORTEX_INSET_MM = 1.5
+
+# Front teeth often carry one crest rim several millimetres deeper than the other (thin buccal
+# plate). Bridging is allowed across that height difference as long as both rims rest on real bone.
+SOCKET_RIM_MAX_V_OFFSET_MM = 2.5
 _MAX_RIDGE_WIDTH_FRACTION = 0.80
 _MAX_RIDGE_HEIGHT_FRACTION = 0.90
 
@@ -1009,8 +1018,14 @@ class MeasurementEngine:
             side_v = smooth_v[side_indices]
             best_local = int(np.argmax(side_v)) if is_mandible else int(np.argmin(side_v))
             rim_v = float(side_v[best_local])
-            # Reject deep basal bone below a missing wall (e.g. single-plate defect).
-            if abs(peak_v - rim_v) > 4.5:
+            # Reject deep basal bone below a missing wall (e.g. single-plate defect). Frontal teeth
+            # legitimately have rims at different heights, so the tolerance is wider than the old
+            # 4.5 mm; a vertical bone-support test below keeps stray voxels out.
+            if abs(peak_v - rim_v) > SOCKET_RIM_MAX_V_OFFSET_MM:
+                return None
+            ui = int(np.argmin(np.abs(u_coords - float(surf_u[side_indices[best_local]]))))
+            dv = abs(float(v_coords[1] - v_coords[0])) if len(v_coords) > 1 else 0.25
+            if float(np.count_nonzero(np.asarray(bone_mask)[:, ui])) * dv < 0.75:
                 return None
             if is_mandible:
                 plat = side_indices[side_v >= rim_v - 0.15]
@@ -1029,8 +1044,6 @@ class MeasurementEngine:
             return None
         if not (2.0 <= (right_rim[0] - left_rim[0]) <= 14.0):
             return None
-        # Confirm jawbone actually exists near both rim peaks inside bone_mask.
-        _ = bone_mask
         return left_rim, right_rim
 
     @staticmethod
@@ -1356,8 +1369,11 @@ class MeasurementEngine:
                         PROVENANCE_LABEL_DERIVED,
                     )
 
+        # Stop at the internal border of the basal cortex, never flush with the periosteal surface.
+        inset_h = max(0.0, float(full_h) - JAW_END_CORTEX_INSET_MM)
+        basal_uv = (u0 + inset_h * au, v0 + inset_h * av)
         return (
-            round(full_h, 2),
+            round(inset_h, 2),
             (round(vital_dist, 2) if vital_dist is not None else None),
             basal_uv,
             vital_boundary_uv,
@@ -1619,30 +1635,40 @@ class MeasurementEngine:
                         continue
 
             if fdepth == 0.0:
-                eff_d = 0.5
-                cx = u0 + eff_d * au
-                cy = v0 + eff_d * av
-                if cy < v_min - 0.5 or cy > v_max + 0.5:
-                    continue
-                cand_rot = _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
-                best = cand_rot
-                # On flat-topped tilted ridges (e.g. test_13), a tilted d_bl clips into air above
-                # the crest; compare against a horizontal crestal caliper at v0 -/+ 0.5 mm.
-                if abs(bv) > 0.05:
-                    v_h = v0 - 0.5 if is_mandible else v0 + 0.5
-                    if v_min - 0.5 <= v_h <= v_max + 0.5:
-                        cand_h = _measure_caliper(
-                            u0, v_h, 0.0, -1.0 if is_mandible else 1.0, 1.0, 0.0, allow_bridge=True
-                        )
-                        if cand_h is not None:
-                            w_h = math.hypot(cand_h[1][0] - cand_h[0][0], cand_h[1][1] - cand_h[0][1])
-                            w_r = (
-                                math.hypot(cand_rot[1][0] - cand_rot[0][0], cand_rot[1][1] - cand_rot[0][1])
-                                if cand_rot is not None
-                                else 0.0
+                # W0 must span BOTH cortical walls. A single crestal height reports whichever
+                # plate the plane happens to catch, which on frontal teeth (thin buccal plate,
+                # rims at different heights) collapses W0 to one side of the tooth. Sample the
+                # crestal band and keep the WIDEST bridged span that still starts at the crest.
+                best: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None
+                best_w = 0.0
+                for eff_d in (0.5, 1.0, 1.5):
+                    cx = u0 + eff_d * au
+                    cy = v0 + eff_d * av
+                    if cy < v_min - 0.5 or cy > v_max + 0.5:
+                        continue
+                    cands: List[Optional[Tuple[Tuple[float, float], Tuple[float, float]]]] = [
+                        _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
+                    ]
+                    # On flat-topped tilted ridges a tilted d_bl clips into air above the crest;
+                    # compare against a horizontal crestal caliper at the same height.
+                    if abs(bv) > 0.05:
+                        cands.append(
+                            _measure_caliper(
+                                u0,
+                                cy,
+                                0.0,
+                                -1.0 if is_mandible else 1.0,
+                                1.0,
+                                0.0,
+                                allow_bridge=True,
                             )
-                            if w_h > w_r + 0.5:
-                                best = cand_h
+                        )
+                    for cand in cands:
+                        if cand is None:
+                            continue
+                        w_c = math.hypot(cand[1][0] - cand[0][0], cand[1][1] - cand[0][1])
+                        if w_c > best_w:
+                            best, best_w = cand, w_c
                 if best is not None:
                     segments[fdepth] = (float(best[0][0]), float(best[1][0]))
                     endpoints_uv[fdepth] = best
@@ -1656,6 +1682,70 @@ class MeasurementEngine:
             if res is not None:
                 segments[fdepth] = (float(res[0][0]), float(res[1][0]))
                 endpoints_uv[fdepth] = res
+
+        def _span_bone_runs(seg: Tuple[Tuple[float, float], Tuple[float, float]]) -> int:
+            """Count separate cortical runs crossed by a caliper span (1 == a single plate)."""
+            (x0, y0), (x1, y1) = seg
+            n = max(2, int(math.hypot(x1 - x0, y1 - y0) / max(step, 1e-3)) + 1)
+            ts = np.linspace(0.0, 1.0, n)
+            cols = np.rint(np.interp(x0 + ts * (x1 - x0), u_coords, np.arange(len(u_coords)))).astype(int)
+            rows = np.rint(np.interp(y0 + ts * (y1 - y0), v_coords, np.arange(len(v_coords)))).astype(int)
+            flags = ridge_mask[
+                np.clip(rows, 0, len(v_coords) - 1), np.clip(cols, 0, len(u_coords) - 1)
+            ].astype(np.int8)
+            if flags.size == 0:
+                return 0
+            edges = np.diff(np.concatenate(([0], flags, [0])))
+            return int(np.count_nonzero(edges == 1))
+
+        def _wall_crest_at(col_u: float) -> Optional[float]:
+            """Coronal-most bone v within the crestal band of a column (that wall's own rim)."""
+            if len(u_coords) == 0:
+                return None
+            ci = int(np.argmin(np.abs(u_coords - col_u)))
+            col = ridge_mask[:, max(0, ci - 1) : ci + 2].any(axis=1)
+            idx = np.where(col)[0]
+            if idx.size == 0:
+                return None
+            lo, hi = (v0 - 8.0, v0 + 2.0) if is_mandible else (v0 - 2.0, v0 + 8.0)
+            band = [int(i) for i in idx if lo <= float(v_coords[i]) <= hi]
+            if not band:
+                return None
+            return float(v_coords[band[-1] if is_mandible else band[0]])
+
+        # Anterior sockets: the incisal crown's labial/lingual lobes leave an air gap that can stop
+        # the crestal bridge on ONE cortical plate, collapsing W0 to that plate's thickness ("one
+        # side of the tooth"). When a valid deeper caliper does span both walls, interpolate W0
+        # from one wall to the other, each at its own crest rim (the rims often differ in height).
+        w0 = endpoints_uv.get(0.0)
+        if w0 is not None:
+            w0_len = math.hypot(w0[1][0] - w0[0][0], w0[1][1] - w0[0][1])
+            if w0_len < 3.0 and _span_bone_runs(w0) <= 1:
+                for deeper in sorted(float(d) for d in endpoints_uv if float(d) > 0.0):
+                    cand = endpoints_uv[deeper]
+                    c_len = math.hypot(cand[1][0] - cand[0][0], cand[1][1] - cand[0][1])
+                    if c_len < 3.0 or _span_bone_runs(cand) < 2:
+                        continue
+                    v_l = _wall_crest_at(float(cand[0][0]))
+                    v_r = _wall_crest_at(float(cand[1][0]))
+                    if v_l is None or v_r is None:
+                        continue
+                    interp = ((float(cand[0][0]), v_l), (float(cand[1][0]), v_r))
+                    i_len = math.hypot(
+                        interp[1][0] - interp[0][0], interp[1][1] - interp[0][1]
+                    )
+                    if i_len < 3.0:
+                        continue
+                    if (
+                        interp[0][0] <= u_min + _CS_BORDER_TOL_MM
+                        or interp[1][0] >= u_max - _CS_BORDER_TOL_MM
+                    ):
+                        continue
+                    if _span_bone_runs(interp) < 2:
+                        continue
+                    segments[0.0] = (interp[0][0], interp[1][0])
+                    endpoints_uv[0.0] = interp
+                    break
 
         return segments, endpoints_uv
 

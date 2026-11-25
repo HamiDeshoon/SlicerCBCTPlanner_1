@@ -679,19 +679,31 @@ class PrintLayoutEngine:
         draw.text((margin, 112), record.get("calibration", ""), fill=muted, font=font_disc)
         draw.line([(margin, 136), (page_w - margin, 136)], fill=line_col, width=2)
 
-        # Panoramic reference strip (aspect-ratio preserved)
+        # Reference band: the OPG takes the left half, the 3D volume rendering the right half.
         pano_top = 150
         pano_h = 560
-        pano_w = page_w - 2 * margin
-        draw.rectangle(
-            [(margin, pano_top), (margin + pano_w, pano_top + pano_h)],
-            fill=panel,
-            outline=line_col,
-            width=1,
-        )
+        band_w = page_w - 2 * margin
+        half_gap = 12
+        pano_w = (band_w - half_gap) // 2
+        vr_w = band_w - pano_w - half_gap
+        for x_off, w_box in ((0, pano_w), (pano_w + half_gap, vr_w)):
+            draw.rectangle(
+                [(margin + x_off, pano_top), (margin + x_off + w_box, pano_top + pano_h)],
+                fill=panel,
+                outline=line_col,
+                width=1,
+            )
         pano = _data_uri_to_image(record["pano_b64"])
         if pano is not None:
             _paste_contain(page, pano, (margin + 4, pano_top + 4, pano_w - 8, pano_h - 8), bg=panel)
+        vr = _data_uri_to_image(record.get("vr_b64") or "")
+        if vr is not None:
+            _paste_contain(
+                page,
+                vr,
+                (margin + pano_w + half_gap + 4, pano_top + 4, vr_w - 8, pano_h - 8),
+                bg=panel,
+            )
 
         # Cross-section grid (aspect-ratio preserved so 10 mm scale bars stay true)
         specs: List[CrossSectionSliceSpec] = record["slices"]
@@ -754,11 +766,10 @@ class PrintLayoutEngine:
                 draw.text((x + 6, fy + 20), f"W3:{w3_txt}{ian_part}", fill=muted, font=font_card_ftr)
 
         if not grayscale:
-            # Optional colour review page: compact key + 3D VR panel.
-            vr_w = 780
+            # Optional colour review page: compact key (the 3D VR lives in the reference band).
             key_h = 280
             key_top = footer_top - key_h - 18
-            key_w = page_w - 2 * margin - vr_w - 20
+            key_w = page_w - 2 * margin
             draw.rectangle(
                 [(margin, key_top), (margin + key_w, key_top + key_h)],
                 fill=panel,
@@ -782,17 +793,6 @@ class PrintLayoutEngine:
                 draw.rectangle([(margin + 18, ly + 4), (margin + 36, ly + 22)], fill=rgb_col)
                 draw.text((margin + 48, ly), desc, fill=text, font=font_key)
                 ly += 40
-
-            vr_x = margin + key_w + 20
-            draw.rectangle(
-                [(vr_x, key_top), (vr_x + vr_w, key_top + key_h)],
-                fill=panel,
-                outline=line_col,
-                width=2,
-            )
-            vr = _data_uri_to_image(record["vr_b64"])
-            if vr is not None:
-                _paste_contain(page, vr, (vr_x + 4, key_top + 4, vr_w - 8, key_h - 8), bg=panel)
 
         # Footer disclaimer & page number
         draw.line([(margin, footer_top), (page_w - margin, footer_top)], fill=line_col, width=1)
@@ -937,6 +937,13 @@ body {{
     font-weight: 600;
 }}
 .pano-section {{
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}}
+.pano-card, .pano-section .vr-card {{
+    flex: 1 1 50%;
+    min-width: 0;
     border: 1px solid #334155;
     background: transparent;
     border-radius: 4px;
@@ -1041,10 +1048,16 @@ body {{
 
     <div class="banner-disclaimer">{html.escape(CLINICAL_DISCLAIMER_TEXT)}</div>
 
-    <!-- Panoramic View Strip -->
+    <!-- Panoramic (left half) + 3D Volume Rendering (right half) -->
     <div class="pano-section">
-        <div class="section-label">Panoramic View with Cross-Section Indicator Ticks (Slices 1 to {len(slices)})</div>
-        <img class="pano-img" src="{pano_b64}" alt="Panoramic Reformat"/>
+        <div class="pano-card">
+            <div class="section-label">Panoramic View with Cross-Section Indicator Ticks (Slices 1 to {len(slices)})</div>
+            <img class="pano-img" src="{pano_b64}" alt="Panoramic Reformat"/>
+        </div>
+        <div class="vr-card">
+            <div class="section-label">3D Anatomical Volume Rendering ({html.escape(q_label)})</div>
+            <img class="vr-img" src="{vr_b64}" alt="3D Quadrant VR"/>
+        </div>
     </div>
 
     <!-- Sequential Cross-Sectional Slices Grid -->
@@ -1055,12 +1068,8 @@ body {{
         </div>
     </div>
 
-    <!-- Bottom Section: 3D Volume Rendering + Clinical Key -->
+    <!-- Bottom Section: Clinical Key (the 3D VR shares the panoramic band above) -->
     <div class="bottom-section">
-        <div class="vr-card">
-            <div class="section-label">3D Anatomical Volume Rendering ({html.escape(q_label)})</div>
-            <img class="vr-img" src="{vr_b64}" alt="3D Quadrant VR"/>
-        </div>
         <div class="summary-card">
             <div class="section-label" style="background: transparent; padding: 0; color: #38bdf8; margin-bottom: 4px;">
                 Measurement Key & Verification Protocol
