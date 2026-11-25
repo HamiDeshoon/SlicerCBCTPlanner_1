@@ -56,22 +56,40 @@ MAX_CONTEXT_CHARS = 14000
 MAX_IMAGES = 8
 KEY_PLACEHOLDER = "********"
 
+DEFAULT_REVIEW_QUESTION = (
+    "Verify H and W0 caliper placement on every planned site, inspect any flagged cross-slice "
+    "discrepancies, mark any abnormal pathology for manual clinician review (without diagnosing), "
+    "and propose edit_measurement only where a line is visibly off-cortex."
+)
+
 SYSTEM_PROMPT = (
-    "You are a dental CBCT review agent embedded in a surgical planning workstation. "
-    "You get anonymised case context (arch, measured implant sites, provenance, warnings) "
-    "and, when enabled, rendered cross-section images of the requested teeth. "
-    "Review the case like a senior implantologist: flag anatomical risks (thin crest, "
-    "insufficient height, canal or sinus proximity, unfavourable angulation), comment on "
-    "the stated plan, and answer the clinician's question if one is given.\n\n"
+    "You are the embedded CBCT review agent inside SlicerCBCTPlanner (a 3D Slicer pre-implant "
+    "radiology & film-print workstation). Your job is to verify automated cross-section "
+    "measurements before final 8x10 clinical film print. You are an advisory reviewer — nothing "
+    "you propose is applied until the clinician reviews and approves it.\n\n"
+    "Your available editing tools (whitelisted actions[]):\n"
+    "- edit_measurement: edit or redraw W0 and H values/lines for a site "
+    "(fdi + any of h_mm, w0_mm, h_start_uv, h_end_uv, w0_start_uv, w0_end_uv as [u_mm, v_mm]).\n"
+    "- flag_site: mark a site for manual clinician review (fdi, severity, text).\n"
+    "- add_annotation / update_annotation / remove_annotation: add, edit, or delete clinical notes "
+    "(use existing ids for update/remove).\n"
+    "- add_tooth / remove_tooth: add or remove an FDI tooth from the planned print/implant list.\n"
+    "- set_implant_diameter: suggest an implant diameter override (fdi, diameter_mm).\n\n"
+    "Clinical & engineering rules (Karpathy + Ponytail discipline):\n"
+    "1. Abnormal pathology: if you see any abnormal finding (e.g., radiolucency, cyst, lesion, "
+    "root fracture, mucosal thickening, foreign body), do NOT diagnose or identify what it is — "
+    "simply mark it for manual review via flag_site (severity 'warning' or 'critical', "
+    "text 'Abnormal finding - manual clinician review required').\n"
+    "2. Discrepancies: pay close attention to SLICE DISCREPANCY warnings (large jumps in W0 or "
+    "non-sinus H between adjacent slices) and verify or edit the offending caliper.\n"
+    "3. Minimal surgical edits: propose edit_measurement only when visually/anatomically justified; "
+    "never fabricate unmeasured values; keep H anchored to the W0 midline when redrawing W0/H.\n"
+    "4. Keep every comment specific, clinically useful, and under 300 characters.\n\n"
     "Answer with ONE JSON object and nothing else (no prose, no code fence):\n"
     '{"summary": "<2-4 sentences>",\n'
     ' "comments": [{"fdi": 46, "severity": "info|warning|critical", "text": "..."}],\n'
-    ' "actions": [{"op": "add_annotation", "fdi": 46, "text": "...", "severity": "warning"}],\n'
-    ' "question": "<optional clarifying question>"}\n\n'
-    "Allowed action ops: add_annotation, update_annotation, remove_annotation, add_tooth, "
-    "remove_tooth, set_implant_diameter, flag_site. Use ids you were given for "
-    "update_annotation/remove_annotation. Keep every comment specific, clinically useful and "
-    "under 300 characters. Never invent measurements that are not in the context."
+    ' "actions": [{"op": "flag_site", "fdi": 46, "text": "...", "severity": "warning"}],\n'
+    ' "question": "<optional clarifying question>"}'
 )
 
 ALLOWED_ACTION_OPS: Tuple[str, ...] = (
@@ -82,6 +100,7 @@ ALLOWED_ACTION_OPS: Tuple[str, ...] = (
     "remove_tooth",
     "set_implant_diameter",
     "flag_site",
+    "edit_measurement",
 )
 
 _ERROR_KIND_CONFIG = "config"
@@ -96,10 +115,18 @@ _ERROR_KIND_PARSE = "parse"
 class AgentError(RuntimeError):
     """Transport/parse failure with a coarse ``kind`` for the UI to act on."""
 
-    def __init__(self, message: str, *, kind: str = _ERROR_KIND_HTTP, status: Optional[int] = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = _ERROR_KIND_HTTP,
+        status: Optional[int] = None,
+        retry_after_s: Optional[float] = None,
+    ):
         super().__init__(message)
         self.kind = kind
         self.status = status
+        self.retry_after_s = retry_after_s
 
     @property
     def is_retryable(self) -> bool:
@@ -148,42 +175,74 @@ class AgentEndpointConfig:
             self.max_images = 4
         self.max_images = min(MAX_IMAGES, max(0, self.max_images))
 
+    @staticmethod
+    def _is_loopback_host(hostname: Optional[str]) -> bool:
+        return (hostname or "").lower() in ("localhost", "127.0.0.1", "::1")
+
+    @staticmethod
+    def redact_url(url: str) -> str:
+        if not url:
+            return ""
+        parts = urllib.parse.urlsplit(url)
+        netloc = parts.netloc
+        if "@" in netloc:
+            netloc = KEY_PLACEHOLDER + "@" + netloc.rsplit("@", 1)[1]
+        query = parts.query
+        if query:
+            pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+            masked = [
+                (k, KEY_PLACEHOLDER if k.lower() in ("key", "api_key", "api-key", "token", "access_token") else v)
+                for k, v in pairs
+            ]
+            query = urllib.parse.urlencode(masked)
+        return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+
     def is_configured(self) -> bool:
-        return bool(self.url) and self.url.startswith(("http://", "https://")) and bool(self.api_key)
+        raw = self.url.strip()
+        if not raw:
+            return False
+        parts = urllib.parse.urlsplit(raw)
+        if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+            return False
+        return bool(self.api_key) or self._is_loopback_host(parts.hostname)
 
     def resolved_url(self) -> str:
         """Return the chat-completions endpoint for the configured base URL.
 
-        Accepts any of ``https://host``, ``https://host/v1``, ``https://host/v1/`` or a full
-        ``.../chat/completions`` URL, which is what most providers hand out.
+        Parses with ``urlsplit`` so query parameters (e.g., Azure ``?api-version=...``) stay
+        intact after path normalization, and strips URL fragments.
         """
         raw = self.url.strip()
         if not raw:
             return ""
-        base = raw.rstrip("/")
-        if not base.startswith(("http://", "https://")):
-            base = "https://" + base.lstrip("/")
-        low = base.lower()
-        if low.endswith("/chat/completions"):
-            return base
-        if re.search(r"/v\d+(?:beta)?$", low) or low.endswith("/openai"):
-            return base + "/chat/completions"
-        # Bare host (or a host with an unrelated path): assume an OpenAI-compatible /v1 root.
-        path = urllib.parse.urlsplit(base).path
-        if path in ("", "/"):
-            return base + "/v1/chat/completions"
-        return base + "/chat/completions"
+        candidate = raw if re.match(r"^https?://", raw, re.IGNORECASE) else ("https://" + raw.lstrip("/"))
+        parts = urllib.parse.urlsplit(candidate)
+        scheme = parts.scheme.lower()
+        path = parts.path.rstrip("/")
+        low_path = path.lower()
+        if low_path.endswith("/chat/completions"):
+            norm_path = path
+        elif re.search(r"/v\d+(?:beta)?$", low_path) or low_path.endswith("/openai"):
+            norm_path = path + "/chat/completions"
+        elif path in ("", "/"):
+            norm_path = "/v1/chat/completions"
+        else:
+            norm_path = path + "/chat/completions"
+        return urllib.parse.urlunsplit((scheme, parts.netloc, norm_path, parts.query, ""))
 
     def headers(self) -> Dict[str, str]:
-        return {
+        hdrs = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
+            "User-Agent": "SlicerCBCTPlanner/3.1",
         }
+        if self.api_key:
+            hdrs["Authorization"] = f"Bearer {self.api_key}"
+        return hdrs
 
     def redacted(self) -> Dict[str, Any]:
         return {
-            "url": self.resolved_url(),
+            "url": self.redact_url(self.resolved_url()),
             "model": self.model,
             "api_key": KEY_PLACEHOLDER if self.api_key else "",
             "timeout_s": self.timeout_s,
@@ -380,10 +439,20 @@ class AgentAction:
             params.get("id") or params.get("annotation_id") or ""
         ).strip():
             return None, "missing annotation id"
-        if op in ("add_tooth", "remove_tooth", "set_implant_diameter") and normalize_fdi(
+        if op in ("add_tooth", "remove_tooth", "set_implant_diameter", "edit_measurement") and normalize_fdi(
             params.get("fdi")
         ) is None:
             return None, "missing/invalid fdi"
+        if op == "edit_measurement":
+            has_scalar = any(
+                params.get(k) is not None for k in ("h_mm", "w0_mm")
+            )
+            has_uv = any(
+                isinstance(params.get(k), (list, tuple)) and len(params.get(k)) == 2
+                for k in ("h_start_uv", "h_end_uv", "w0_start_uv", "w0_end_uv")
+            )
+            if not (has_scalar or has_uv):
+                return None, "edit_measurement requires h_mm/w0_mm or *_uv endpoints"
         return cls(op=op, params=params), ""
 
 
@@ -562,10 +631,18 @@ def urllib_transport(
             kind = _ERROR_KIND_RATE_LIMIT
         elif status >= 500:
             kind = _ERROR_KIND_SERVER
+        retry_after: Optional[float] = None
+        try:
+            ra_hdr = exc.headers.get("Retry-After") if getattr(exc, "headers", None) else None
+            if ra_hdr is not None:
+                retry_after = max(0.0, min(30.0, float(ra_hdr)))
+        except (TypeError, ValueError):
+            retry_after = None
         raise AgentError(
             redact_secrets(f"HTTP {status}: {detail or exc.reason}", [token]),
             kind=kind,
             status=status,
+            retry_after_s=retry_after,
         ) from exc
     except urllib.error.URLError as exc:
         raise AgentError(
@@ -632,9 +709,20 @@ def _message_text(response: Dict[str, Any]) -> str:
 class AgentClient:
     """Thin client around a chat-completions endpoint."""
 
-    def __init__(self, config: AgentEndpointConfig, transport: Optional[Transport] = None) -> None:
+    def __init__(
+        self,
+        config: AgentEndpointConfig,
+        transport: Optional[Transport] = None,
+        *,
+        max_retries: Optional[int] = None,
+        retry_delay_s: Optional[float] = None,
+    ) -> None:
         self.config = config
         self._transport: Transport = transport or urllib_transport
+        self._max_retries = max(0, int((2 if transport is None else 0) if max_retries is None else max_retries))
+        self._retry_delay_s = 0.0 if (retry_delay_s is None and transport is not None) else float(
+            0.5 if retry_delay_s is None else max(0.0, retry_delay_s)
+        )
 
     # -- helpers ----------------------------------------------------------
     def _require_configured(self) -> str:
@@ -649,7 +737,22 @@ class AgentClient:
         url = self._require_configured()
         headers = self.config.headers()
         started = time.perf_counter()
-        response = self._transport(url, payload, headers, self.config.timeout_s)
+        attempt = 0
+        while True:
+            try:
+                response = self._transport(url, payload, headers, self.config.timeout_s)
+                break
+            except AgentError as exc:
+                if not exc.is_retryable or attempt >= self._max_retries:
+                    raise
+                delay = (
+                    exc.retry_after_s
+                    if exc.retry_after_s is not None
+                    else self._retry_delay_s * (2**attempt)
+                )
+                if delay > 0.0:
+                    time.sleep(delay)
+                attempt += 1
         self.last_latency_s = time.perf_counter() - started
         if not isinstance(response, dict):
             raise AgentError("agent returned a non-object response", kind=_ERROR_KIND_PARSE)
@@ -814,16 +917,120 @@ def apply_agent_actions(
                 outcome.applied.append({"op": op, "fdi": int(fdi), "diameter_mm": diameter})
             else:
                 outcome.skipped.append((op, f"no plan row for FDI {fdi}"))
+        elif op == "edit_measurement":
+            handler = getattr(plan, "edit_measurement", None)
+            fdi = action.fdi
+            edits: Dict[str, Any] = {}
+            for k in ("h_mm", "w0_mm"):
+                if params.get(k) is not None:
+                    try:
+                        val = float(params[k])
+                    except (TypeError, ValueError):
+                        continue
+                    if val > 0.0:
+                        edits[k] = val
+            for k in ("h_start_uv", "h_end_uv", "w0_start_uv", "w0_end_uv"):
+                raw_pt = params.get(k)
+                if isinstance(raw_pt, (list, tuple)) and len(raw_pt) == 2:
+                    try:
+                        edits[k] = (float(raw_pt[0]), float(raw_pt[1]))
+                    except (TypeError, ValueError):
+                        continue
+            if handler is None or fdi is None or not edits:
+                outcome.skipped.append((op, "measurement edits are not supported by this plan or empty"))
+                continue
+            try:
+                changed = bool(handler(int(fdi), edits))
+            except Exception as exc:  # justification: a plan edit must not abort the review
+                logger.debug("agent measurement edit failed", exc_info=True)
+                outcome.skipped.append((op, f"plan error: {exc}"))
+                continue
+            if changed:
+                outcome.applied.append({"op": op, "fdi": int(fdi), **edits})
+            else:
+                outcome.skipped.append((op, f"no measurement change for FDI {fdi}"))
         else:  # pragma: no cover - guarded by AgentAction validation
             outcome.skipped.append((op, "unsupported op"))
 
     return outcome
 
 
+_MAXILLARY_SINUS_FDIS = frozenset({14, 15, 16, 17, 18, 24, 25, 26, 27, 28})
+
+
+def _is_below_maxillary_sinus(site: Dict[str, Any]) -> bool:
+    """True when a site sits under the maxillary sinus (height jumps there are anatomically normal)."""
+    fdi = normalize_fdi(site.get("fdi"))
+    if fdi in _MAXILLARY_SINUS_FDIS:
+        return True
+    if site.get("sinus_mm") is not None:
+        return True
+    return False
+
+
+def detect_slice_discrepancies(
+    sites: Sequence[Dict[str, Any]],
+    *,
+    h_delta_mm: float = 3.0,
+    w0_delta_mm: float = 2.5,
+) -> List[Dict[str, Any]]:
+    """Flag adjacent slices/sites with significant H or W0 jumps for agent/manual review.
+
+    Height jumps below the maxillary sinus (posterior maxilla or sites with sinus_mm) are
+    explicitly excluded because rapid height changes under the sinus floor are expected.
+    """
+    flags: List[Dict[str, Any]] = []
+    by_jaw: Dict[str, List[Dict[str, Any]]] = {"upper": [], "lower": []}
+    for site in sites:
+        fdi = normalize_fdi(site.get("fdi"))
+        jaw = "upper" if (fdi is not None and fdi < 30) else "lower"
+        by_jaw[jaw].append(site)
+
+    for group in by_jaw.values():
+        for prev, curr in zip(group, group[1:]):
+            f_prev = prev.get("fdi", "?")
+            f_curr = curr.get("fdi", "?")
+            w_prev, w_curr = prev.get("w0_mm"), curr.get("w0_mm")
+            if isinstance(w_prev, (int, float)) and isinstance(w_curr, (int, float)):
+                dw = abs(float(w_curr) - float(w_prev))
+                if dw >= w0_delta_mm:
+                    flags.append(
+                        {
+                            "fdi": f_curr,
+                            "neighbor_fdi": f_prev,
+                            "metric": "W0",
+                            "delta_mm": round(dw, 2),
+                            "message": (
+                                f"SLICE DISCREPANCY (review with agent): FDI {f_curr} W0 {w_curr:.1f} mm "
+                                f"differs by {dw:.1f} mm from adjacent FDI {f_prev} ({w_prev:.1f} mm)"
+                            ),
+                        }
+                    )
+            if not (_is_below_maxillary_sinus(prev) or _is_below_maxillary_sinus(curr)):
+                h_prev, h_curr = prev.get("h_mm"), curr.get("h_mm")
+                if isinstance(h_prev, (int, float)) and isinstance(h_curr, (int, float)):
+                    dh = abs(float(h_curr) - float(h_prev))
+                    if dh >= h_delta_mm:
+                        flags.append(
+                            {
+                                "fdi": f_curr,
+                                "neighbor_fdi": f_prev,
+                                "metric": "H",
+                                "delta_mm": round(dh, 2),
+                                "message": (
+                                    f"SLICE DISCREPANCY (review with agent): FDI {f_curr} H {h_curr:.1f} mm "
+                                    f"differs by {dh:.1f} mm from adjacent FDI {f_prev} ({h_prev:.1f} mm)"
+                                ),
+                            }
+                        )
+    return flags
+
+
 def context_warnings(context: Dict[str, Any]) -> List[str]:
     """Derive reviewer-facing warnings from the measured sites (no agent needed)."""
     warnings: List[str] = []
-    for site in context.get("sites") or []:
+    sites = context.get("sites") or []
+    for site in sites:
         fdi = site.get("fdi")
         if site.get("withheld"):
             warnings.append(f"FDI {fdi}: measurement withheld ({site.get('withheld')})")
@@ -836,4 +1043,6 @@ def context_warnings(context: Dict[str, Any]) -> List[str]:
         h = site.get("h_mm")
         if isinstance(h, (int, float)) and h < 8.0:
             warnings.append(f"FDI {fdi}: available height {h:.1f} mm is short for a standard implant")
+    for flag in detect_slice_discrepancies(sites):
+        warnings.append(flag["message"])
     return warnings

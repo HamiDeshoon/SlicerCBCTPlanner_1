@@ -7,7 +7,7 @@
 ### 1. Fixed Print File Generation & Live Measured Cross-Section Gallery
 - **Root-Cause Fixes**:
   - Resolved `CBCTPlannerWidget.getParameterNode()` `AttributeError` in `onGenerate8x10PrintLayout` by introducing a safe `getParameterNode()` helper on `CBCTPlannerWidget`.
-  - Fixed `AnatomicalLabel.color` attribute availability across all 55 ToothFairy3 and DentalSegmentator labels (`CBCTPlannerLib/core/labels.py`).
+  - Fixed `AnatomicalLabel.color` attribute availability across all 77 ToothFairy3 and DentalSegmentator labels (`CBCTPlannerLib/core/labels.py`).
   - Fixed 32-tooth `ToothFairy3` segmentations being misclassified as 5-class masks via `resolve_combined_mask_scheme()`, ensuring all FDI teeth (`11..48`), split Left/Right IAN canals, and maxillary sinuses are preserved during arch fitting and cross-sectional morphometry.
   - Fixed VTK 2-argument `segment.GetTag(key, vtk.reference(""))` compatibility via `safe_get_segment_tag()` and fixed `segmentationNode.GetDisplayNode().GetSegmentVisibility()` in `quadrant_vr_isolation`.
   - Fixed `vtkUnsignedCharArray` to `bytes` conversion in `capture_3d_view_png_base64()`.
@@ -19,7 +19,7 @@
   - Displays rendered cross-sectional images with `H`, `W0`, `W3`, `W5`, and nerve clearance overlays directly inside the Step 5 module panel (`Refresh Measured Images` button + tooth site selector + 3-offset `-2 / 0 / +2 mm` strip).
 
 ### 2. Radiologist & Dentist Clinical Command Bar
-- Role-aware workspace selector (**Radiologist**, **Implant Dentist**, **Orthodontist / Oral Surgeon**) and 4 one-click action buttons at the top of the module:
+- Role-aware workspace selector (**Full Clinical Suite**, **Radiologist**, **Implant & Surgical Dentist**, **Ortho & Craniofacial**) and 4 one-click action buttons at the top of the module:
   - `🦷 Vivid Teeth & Roots 3D`
   - `🧲 RISE-MAR (Artifact Reduction)`
   - `📐 Measure & Show Slices`
@@ -28,11 +28,11 @@
 ### 3. Vivid Teeth & Roots 3D Visualization ([gaudot/SlicerDentalSegmentator](https://github.com/gaudot/SlicerDentalSegmentator))
 - Implements **SlicerDentalSegmentator**-inspired 3D surface and Volume Rendering presets (`CBCTPlannerLib/VRVisualization.py`):
   - **Translucent Glass-Bone Jaw (`0.25` default opacity)** with a live `0.00–1.00` slider so tooth roots, pulp chambers, and the mandibular canal shine vividly through the cortical bone.
-  - **Vivid Enamel & Root Surface Colors (`1.00` opacity)** with Phong specular highlights (`Specular=0.38`, `SpecularPower=28`, `Ambient=0.22`, `Diffuse=0.78`).
+  - **Vivid Enamel & Root Surface Colors (`1.00` opacity)** with Phong specular VR shading (`Ambient=0.25`, `Diffuse=0.88`, `Specular=0.45`, `SpecularPower=26.0` for Vivid Roots VR; `Specular=0.35`, `SpecularPower=18.0` for Teeth & Bone).
   - Dedicated **"DentalSegmentator Vivid Roots (VR)"** transfer function preset ramping root dentin (`700–1350 HU`) and crown enamel (`1500–2600 HU`) while keeping trabecular/cortical jawbone semi-transparent.
 
 ### 4. Automated Dental Tools Suite ([DCBIA-OrthoLab/SlicerAutomatedDentalTools](https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalTools))
-- Implemented in `CBCTPlannerLib/AutomatedDentalToolsEngine.py` and exposed in **Step 5B**:
+- Implemented in `CBCTPlannerLib/AutomatedDentalToolsEngine.py` and exposed in **Step 7** (`Step 7: 3D Cephalometry & Automated Dental Tools`):
   - **ALI (Automatic Landmark Identification)**: Extracts 3D cephalometric (`Me`, `Gn`, `Pg`, `B`, `ANS`, `PNS`, `U1`, `L1`, `Go_R/L`, `Co_R/L`, `MF_R/L`) and per-tooth crown/apex landmarks, creates a Slicer `vtkMRMLMarkupsFiducialNode`, and exports `.mrk.json`.
   - **ASO (Automated Standardized Orientation)**: Computes a 4×4 rigid RAS transformation matrix aligning the midsagittal plane and occlusal plane with Pitch/Roll/Yaw readout.
   - **CLI-C (Impacted Canine & Molar Classification)**: Evaluates bilateral asymmetry, sector, angulation, and Buccal/Bicortical/Palatal position for canines (`13, 23, 33, 43`) and third molars (`18, 28, 38, 48`).
@@ -50,9 +50,10 @@ A new wizard step (`Step 8`, after the canal/guide and cephalometry steps) turns
 something a remote review agent can work with, and adds a ridge-parallel section view.
 
 **Review agent (URL + API key)**
-- Any **OpenAI-compatible** endpoint works: `https://api.openai.com/v1`, an Azure gateway, vLLM, Ollama's OpenAI
-  shim, or an internal proxy. Enter the base URL (a full `.../chat/completions` URL is also accepted), the key, the
-  model/deployment name, and a timeout.
+- Any **OpenAI-compatible** path-based endpoint works: `https://api.openai.com/v1`, vLLM, Ollama's OpenAI shim
+  (with a placeholder key), or an internal proxy. Enter an `http(s)://` base URL (a full `.../chat/completions` URL
+  without query parameters is also accepted), the API key, the model/deployment name, and a timeout (query-string
+  gateways such as Azure `?api-version=...` are tracked in `BL-17`).
 - The request carries the *clinical context* (`core/agent_review.py`): jaw and arch geometry, every planned site with
   `H / W0 / W3 / W5`, IAN clearance, HU/density class, suggested implant, measurement provenance and withheld
   reasons, the automated warnings, the existing annotations, and an optional clinician question — plus up to 8
@@ -123,6 +124,9 @@ the measurement items are tracked as `BL-*` in `analysis/slicercbctplanner_1/BUS
   the plan table is derived from measurements; the plan needs an explicit override column first (`BL-13`).
 - **Retry/backoff on rate limits** — a `429`/`5xx` answer currently surfaces as a failed request; `AgentError.is_retryable`
   is already exposed for a backoff loop (`BL-15`).
+- **Endpoint URL normalization & gateway compatibility** — parse with `urlsplit` so query-string URLs (e.g., Azure
+  `?api-version=...`) are not mangled, align `is_configured()` with `resolved_url()`, allow keyless localhost shims,
+  redact URL credentials/query keys, and send an explicit `User-Agent` header (`BL-17`).
 - **Token/image budget** — the payload is built once with up to 8 images; long cases would benefit from a per-image
   budget and a size estimate before sending.
 - **Review history** — one request/response pair is kept in memory; a per-case log (request id, model, latency, applied
@@ -136,6 +140,8 @@ the measurement items are tracked as `BL-*` in `analysis/slicercbctplanner_1/BUS
 - **Dynamic `half_v_mm`** (`BL-05`) for very tall anterior mandibles, and **PDL gap validation** on real molars (`BL-06`).
 - **One residual interproximal section** at the FDI 43 edge (arc 39.9 mm) still reads a 1.75 mm plate while its
   neighbours bridge 7.6–7.9 mm.
+- **Anchor bone height `H` from the `W0` midline** (`BL-18`) — start the vertical/apical height line at the midpoint
+  of the `W0` segment instead of the initial `crest_uv` point.
 
 ### Rendering & performance
 - `1.0×` vs `1.25×` RaySum scale and gamma/CLAHE post-processing (`BL-03`); user-adjustable VR `Zoom` (`BL-04`).
@@ -148,7 +154,7 @@ the measurement items are tracked as `BL-*` in `analysis/slicercbctplanner_1/BUS
 
 ## Running Tests
 ```bash
-python -m unittest discover -s tests -v      # 219 tests
+python -m unittest discover -s tests -v      # 219 tests (1 skipped if external ToothFairy3 NIfTI is absent)
 ```
 
 Two headless harnesses run inside 3D Slicer's *own* Python (they need VTK/Qt, so the plain interpreter cannot run them):

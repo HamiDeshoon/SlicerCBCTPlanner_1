@@ -224,5 +224,109 @@ class TestPrintLayoutRules(unittest.TestCase):
             )
 
 
+    def test_grayscale_layout_includes_vr_and_omits_redundant_card_footer(self) -> None:
+        from types import SimpleNamespace
+        from CBCTPlannerLib.PrintLayoutEngine import CrossSectionSliceSpec
+
+        ple = PrintLayoutEngine(logic=None)
+        spec = CrossSectionSliceSpec(
+            slice_index=1,
+            total_slices=1,
+            offset_mm=0.0,
+            fdi=46,
+            image_data_uri="data:image/png;base64,AA==",
+            height_mm=12.0,
+            crest_width_mm=7.5,
+            width_3mm=8.0,
+            width_5mm=8.5,
+        )
+        html_doc = ple._build_8x10_html(
+            slices=[spec],
+            pano_b64="data:image/png;base64,AA==",
+            vr_b64="data:image/png;base64,BB==",
+            quadrant=4,
+            jaw_label="Mandible",
+            fdis=[46],
+            patient_name="Anonymous",
+            patient_id="Anonymous",
+            grayscale=True,
+        )
+        self.assertIn("data:image/png;base64,BB==", html_doc)
+        self.assertNotIn("<div class='cs-ftr'>", html_doc)
+
+
+    def test_generate_8x10_layout_applies_measurement_overrides(self) -> None:
+        from types import SimpleNamespace
+        from CBCTPlannerLib.core.measurements import CrossSectionData, ImplantSiteMeasurement
+        from CBCTPlannerLib.core.arch_detector import DentalArch
+
+        mask_arr = np.zeros((40, 40, 40), dtype=np.int16)
+        img_arr = np.full((40, 40, 40), -500.0, dtype=np.float32)
+        arch = DentalArch(
+            control_points=np.array([[5.0, 20.0, 20.0], [15.0, 20.0, 20.0], [25.0, 20.0, 20.0], [35.0, 20.0, 20.0]], dtype=np.float64),
+            jaw_type="lower",
+            ras_convention=True,
+        )
+
+        class _StubEngine:
+            volume = SimpleNamespace(image=img_arr, spacing=(1.0, 1.0, 1.0))
+            mask = mask_arr
+            arch_mand = arch
+            arch_max = None
+            last_withheld_reason = None
+
+            def get_site_center_ras(self, _fdi):
+                return np.array([20.0, 20.0, 20.0], dtype=np.float64)
+
+            def _arch_for_fdi(self, _fdi):
+                return self.arch_mand
+
+            def measure_at_arc_mm(self, jaw_key, arc_mm, fdi_hint=None):
+                u = np.linspace(-10.0, 10.0, 41)
+                v = np.linspace(-15.0, 15.0, 61)
+                cs = CrossSectionData(
+                    u_coords=u,
+                    v_coords=v,
+                    img_cs=np.zeros((len(v), len(u)), dtype=np.float32),
+                    mask_cs=np.zeros((len(v), len(u)), dtype=np.int16),
+                    frame=None,
+                    crest_v=5.0,
+                    width_segments={},
+                    canal_centroid_uv=None,
+                    crest_uv=(0.0, 5.0),
+                    basal_uv=(0.0, -5.0),
+                    width_endpoints_uv={0.0: ((-3.0, 5.0), (3.0, 5.0))},
+                )
+                meas = SimpleNamespace(
+                    tooth_fdi=str(fdi_hint or "46"),
+                    bone_height_mm=10.0,
+                    crest_width_mm=6.0,
+                    bone_width_at_depths_mm={0.0: 6.0, 3.0: 7.0, 5.0: 7.5},
+                    distance_to_vital_structure_mm=None,
+                    misch_density_class="D2",
+                    mean_density_hu=700.0,
+                    provenance="label_derived",
+                    withheld_reason=None,
+                )
+                return meas, cs
+
+        logic = SimpleNamespace(_get_or_build_measurement_engine=lambda _v, _s: _StubEngine())
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _html, _pdf, specs = PrintLayoutEngine(logic=logic).generate_8x10_layout(
+                volumeNode=object(),
+                segmentationNode=None,
+                selected_fdis=[46],
+                out_dir=Path(tmp),
+                grayscale=True,
+                measurement_overrides={46: {"h_mm": 13.5, "w0_mm": 7.8}},
+            )
+            center_specs = [s for s in specs if abs(float(s.offset_mm)) < 0.05]
+            self.assertTrue(center_specs)
+            self.assertAlmostEqual(center_specs[0].height_mm, 13.5)
+            self.assertAlmostEqual(center_specs[0].crest_width_mm, 7.8)
+
+
 if __name__ == "__main__":
     unittest.main()

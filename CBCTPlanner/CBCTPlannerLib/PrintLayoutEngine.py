@@ -185,6 +185,7 @@ class PrintLayoutEngine:
         pano_b64: Optional[str] = None,
         vr_b64: Optional[str] = None,
         grayscale: bool = True,
+        measurement_overrides: Optional[Dict[int, Dict[str, Any]]] = None,
     ) -> Tuple[Path, Path, List[CrossSectionSliceSpec]]:
         """Generate genuine 8x10 inch film pages (HTML view + 300 DPI PDF + 300 DPI PNG).
 
@@ -290,7 +291,27 @@ class PrintLayoutEngine:
                     logger.debug("Entry-point stabilization skipped", exc_info=True)
 
             specs: List[CrossSectionSliceSpec] = []
+            overrides = measurement_overrides or {}
             for s_idx, (meas, cs, target_fdi, arc_mm) in enumerate(measured):
+                ov = overrides.get(int(target_fdi))
+                if ov and abs(float(arc_mm) - float(arcs.get(target_fdi, arc_mm))) <= max(0.75, step_mm * 0.55):
+                    if cs is not None:
+                        if "w0_start_uv" in ov and "w0_end_uv" in ov:
+                            w0_l, w0_r = ov["w0_start_uv"], ov["w0_end_uv"]
+                            if getattr(cs, "width_endpoints_uv", None) is None:
+                                cs.width_endpoints_uv = {}
+                            cs.width_endpoints_uv[0.0] = (w0_l, w0_r)
+                            if "h_start_uv" not in ov and getattr(cs, "crest_uv", None) is not None:
+                                cs.crest_uv = (0.5 * (w0_l[0] + w0_r[0]), float(cs.crest_uv[1]))
+                        if "h_start_uv" in ov:
+                            cs.crest_uv = ov["h_start_uv"]
+                        if "h_end_uv" in ov:
+                            cs.basal_uv = ov["h_end_uv"]
+                    if meas is not None:
+                        if "h_mm" in ov:
+                            meas.bone_height_mm = float(ov["h_mm"])
+                        if "w0_mm" in ov:
+                            meas.crest_width_mm = float(ov["w0_mm"])
                 pil_tile = None
                 if cs is not None:
                     render = render_cross_section(
@@ -300,6 +321,7 @@ class PrintLayoutEngine:
                         show_masks=False,
                         show_implant_guides=not grayscale,
                         monochrome=grayscale,
+                        show_footer=False,
                     )
                     if render.available and render.image is not None:
                         pil_tile = render.image
@@ -368,16 +390,9 @@ class PrintLayoutEngine:
             if not pano_uri:
                 pano_uri = _unavailable_data_uri("Panoramic")
 
-            vr_uri = ""
-            if not grayscale:
-                vr_uri = vr_b64 or self._vr_capture(engine=engine, quadrant=q)
-                if not vr_uri:
-                    vr_uri = _unavailable_data_uri("VR")
-            elif vr_b64:
-                # Never drop a caller-supplied panel silently: say how to get it back.
-                logger.info(
-                    "Grayscale film omits the supplied 3D VR panel; pass grayscale=False to include it"
-                )
+            vr_uri = vr_b64 or self._vr_capture(engine=engine, quadrant=q)
+            if not vr_uri:
+                vr_uri = _unavailable_data_uri("VR")
 
             page_records.append(
                 {
@@ -717,8 +732,6 @@ class PrintLayoutEngine:
         cell_h = (grid_bottom - grid_top - (rows - 1) * gap) // max(1, rows)
 
         hdr_h = 30
-        ftr_h = 46
-        img_box_h = max(60, cell_h - hdr_h - ftr_h - 6)
 
         for idx, spec in enumerate(specs):
             row, col = divmod(idx, cols)
@@ -739,6 +752,11 @@ class PrintLayoutEngine:
             hdr_txt = f"#{spec.fdi} S{spec.slice_index} ({spec.offset_mm:+.1f}mm)"
             draw.text((x + 6, y + 5), hdr_txt, fill=text, font=font_card_hdr)
 
+            # Values are already rendered once on the cross-section tile; reserve footer only for a withheld badge.
+            badge = withheld_badge(spec.withheld_reason)
+            ftr_h = 22 if badge else 0
+            img_box_h = max(60, cell_h - hdr_h - ftr_h - 4)
+
             # Aspect-ratio-preserving cross-section image
             image = (
                 spec._pil_image
@@ -748,22 +766,9 @@ class PrintLayoutEngine:
             if image is not None:
                 _paste_contain(page, image, (x + 2, y + hdr_h + 2, cell_w - 4, img_box_h), bg=panel)
 
-            # Card footer (2 compact lines: H/W0 + W3/W5 or withheld badge)
-            fy = y + hdr_h + img_box_h + 4
-            h_txt = f"{spec.height_mm:.1f}" if spec.height_mm is not None else "--"
-            w0_txt = f"{spec.crest_width_mm:.1f}" if spec.crest_width_mm is not None else "--"
-            w3_txt = f"{spec.width_3mm:.1f}" if spec.width_3mm is not None else "--"
-            w5_txt = f"{spec.width_5mm:.1f}" if spec.width_5mm is not None else "--"
-            h_lbl = "H~" if spec.height_estimated else "H"
-            draw.text((x + 6, fy), f"{h_lbl}:{h_txt}  W0:{w0_txt}", fill=text, font=font_card_ftr)
-            badge = withheld_badge(spec.withheld_reason)
             if badge:
-                draw.text((x + 6, fy + 20), f"W3:{w3_txt} [{badge}]", fill=muted, font=font_card_ftr)
-            else:
-                ian_part = (
-                    f" IAN:{spec.nerve_dist_mm:.1f}" if spec.nerve_dist_mm is not None else f" W5:{w5_txt}"
-                )
-                draw.text((x + 6, fy + 20), f"W3:{w3_txt}{ian_part}", fill=muted, font=font_card_ftr)
+                fy = y + hdr_h + img_box_h + 2
+                draw.text((x + 6, fy), f"[{badge}]", fill=muted, font=font_card_ftr)
 
         if not grayscale:
             # Optional colour review page: compact key (the 3D VR lives in the reference band).
@@ -849,15 +854,6 @@ class PrintLayoutEngine:
 
         cards_html: List[str] = []
         for s in slices:
-            h_txt = f"{s.height_mm:.1f}" if s.height_mm is not None else "--"
-            w0_txt = f"{s.crest_width_mm:.1f}" if s.crest_width_mm is not None else "--"
-            w3_txt = f"{s.width_3mm:.1f}" if s.width_3mm is not None else "--"
-            w5_txt = f"{s.width_5mm:.1f}" if s.width_5mm is not None else "--"
-            ian_html = (
-                f" <span class='m-ian'>IAN:{s.nerve_dist_mm:.1f}</span>"
-                if s.nerve_dist_mm is not None
-                else ""
-            )
             misch_badge = f" | {s.misch_class}" if s.misch_class else ""
             badge = withheld_badge(s.withheld_reason)
             badge_html = (
@@ -871,12 +867,6 @@ class PrintLayoutEngine:
                 f"<div class='cs-card{center_cls}'>"
                 f"<div class='cs-hdr'>#{s.fdi} S{s.slice_index} ({s.offset_mm:+.1f}mm){html.escape(misch_badge)}</div>"
                 f"<img src='{s.image_data_uri}' alt='Slice {s.slice_index}'/>"
-                f"<div class='cs-ftr'>"
-                f"<span class='m-h'>{'H~' if s.height_estimated else 'H'}:{h_txt}</span> "
-                f"<span class='m-w0'>W0:{w0_txt}</span> "
-                f"<span class='m-w3'>W3:{w3_txt}</span> "
-                f"<span class='m-w5'>W5:{w5_txt}</span>{ian_html}"
-                f"</div>"
                 f"{badge_html}"
                 f"</div>"
             )

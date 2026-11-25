@@ -2,7 +2,7 @@
 
 ## 1. Executive Assessment (`/modernize-assess`)
 - **System**: `SlicerCBCTPlanner_1` (3D Slicer Scripted Loadable Extension in Python 3.9+ / VTK / Qt / CTK / NumPy / SciPy / PyTorch).
-- **Codebase Inventory**: 51 Python modules (28 in `CBCTPlannerLib/`, 13 in `CBCTPlannerLib/core/`) + 16 test modules (**219 unit tests** as of 2026-11-25).
+- **Codebase Inventory**: 51 Python modules (28 in `CBCTPlannerLib/`: 15 top-level + 13 in `CBCTPlannerLib/core/`) + 16 test modules (**219 unit tests**, 8 wizard steps / 8 step chips, 22 active `CBCTPlanner/*` QSettings keys as of 2026-11-25).
 - **Modernization Method**: **Uplift + Feature Expansion** — preserve all behavioral guarantees (B1–B22, O1–O9, F1–F20) while fixing critical Slicer runtime/rendering defects and adding clinical subsystems (`RiseMarEngine`, `AutomatedDentalToolsEngine`, `SlicerDentalSegmentator` Vivid 3D/VR, `RaySum` panoramic, transparent RGBA exports).
 
 ---
@@ -14,9 +14,9 @@
 - **When**: Computing alveolar bone height `H`, crestal width `W0`, depth widths `W3`, `W5`, `W6`, `W9`, and vital nerve/sinus clearance.
 - **Then**:
   1. **Socket-bridging `W0` on dentate ridges**: on a dentate site the outer-buccal and outer-lingual bone walls may be separated by an in-socket tooth root (or PDL gap ≤ 1.5 mm). The crest width `W0` **must bridge** from outer-lingual cortex to outer-buccal cortex across the socket — not stop at the mesial or distal surface of the tooth. Helpers `_same_jaw_tooth_mask`, `_find_socket_crest_rims`, `_select_ridge_run_indices`, and `_sample_band_profile` implement this bridge. Expected `W0` on a bridged molar: **6.0 – 9.5 mm** (regression test: `test_crest_and_w0_come_from_bone_not_the_tooth_crown` asserts `crest_width_mm ∈ [6.0, 9.5]`).
-  2. **Large-angle axis stability**: `_detect_alveolar_crest_and_axis` uses PCA on bone voxels; at angles > 45° the minor eigenvector was selected instead of the major axis. The fix constrains `crest_axis_uv` to point generally buccolingually (small |u| component) even after PCA rotation flip, stabilized via `_stabilize_pca_axis`.
+  2. **Large-angle axis stability**: `_detect_alveolar_crest_and_axis` uses PCA on bone voxels clipped to `ridge_mask` (≤ 16 mm apical) with an elongated-axis guard; at angles > 45° this prevents selecting the minor eigenvector and keeps the ridge axis aligned with the alveolar wall.
   3. **Height line endpoint guards**: `_compute_bone_height_in_cs` uses 3D spherical EDT only when a confirmed IAN canal is present in the ROI; on non-canal anterior slices the ray is extended to the inferior jaw boundary rather than stopping at a spurious EDT minimum. The H line always reaches the inferior jaw boundary unless the IAN canal is encountered first.
-  4. **IAN canal clearance search radius**: `_select_local_vital_structure` now uses `u_ok = ±12.0 mm` (was ±8.5 mm) and 3D ROI = 20 mm (was 15 mm) so posterior canals > 15 mm from the crest are detected.
+  4. **IAN canal clearance search radius**: `_select_local_vital_structure` uses `u_ok = (|u| <= 11.0 mm) | (|u - u_ref| <= 8.5 mm)` and `local_radius_mm = 28.0 mm` (was 15 mm) so posterior canals > 15 mm from the crest are detected.
   5. **Width–crest synchronization**: after `_move_crest`, `width_endpoints_uv` is resynchronized at the new crest position, eliminating the slice-to-slice 2 mm single-plate spuriousness when the socket geometry shifts between adjacent slices.
   6. Cross-section rendering: grayscale X-ray film background, `H~` dashed caliper annotation for interpolated (non-IAN) heights, standard `H` solid caliper for IAN-limited heights. Root/implant/safety overlays removed. Remaining overlays: jaw contour (subtle gold), bone height (green), `W0` (yellow), `W3` (cyan), `W5` (orange), nerve clearance vector (red dashed).
 
@@ -35,9 +35,9 @@
 - **Given**: A 5-class (`DentalSegmentator`) or 77-class (`ToothFairy3`) segmentation node and/or CBCT volume node.
 - **When**: Applying 3D styling or Volume Rendering presets.
 - **Then**:
-  1. Teeth (crowns & roots) receive vivid anatomical colors (`1.0` 3D opacity) with Phong specular surface properties (`Ambient=0.22`, `Diffuse=0.82`, `Specular=0.48`, `SpecularPower=28`) so roots and crowns are crisp and vivid.
-  2. Maxilla and Mandible jawbones default to translucent 3D opacity (`0.25`) so **tooth roots and the mandibular canal are clearly visible through the bone**, controllable via a live **Bone Opacity Slider (`0.0 – 1.0`)** and **Vivid Presets** (`Vivid Teeth & Roots (Translucent Bone)`, `Roots & Nerve X-Ray Only`, `Endo Pulp & Canals`, `Opaque Bone & Teeth`).
-  3. VR preset `"DentalSegmentator Vivid Teeth & Roots"` suppresses soft tissue and makes trabecular bone a subtle veil (`alpha <= 0.10`) while ramping root dentin (`950–1450 HU`) and crown enamel (`1500–2800 HU`) to high opacity (`0.75–1.0`).
+  1. Teeth (crowns & roots) receive vivid anatomical colors (`1.0` 3D opacity), and the VR volume property applies Phong shading (`Ambient=0.25`, `Diffuse=0.88`, `Specular=0.45`, `SpecularPower=26.0` for Vivid Roots VR; `Specular=0.35`, `SpecularPower=18.0` for Teeth & Bone).
+  2. Maxilla and Mandible jawbones default to translucent 3D opacity (`0.25`) so **tooth roots and the mandibular canal are clearly visible through the bone**, controllable via a live **Bone Opacity Slider (`0.0 – 1.0`)** and **Vivid Presets** (`DentalSegmentator Vivid (Teeth & Roots)`, `Roots & Nerve X-Ray (Hide Bone)`, `Endodontic Root-Canal View (Translucent Teeth)`, `Surgical Bone & Teeth (Opaque Bone)`).
+  3. VR preset `"DentalSegmentator Vivid Roots (VR)"` suppresses soft tissue and makes trabecular bone a subtle veil while ramping root dentin and crown enamel to high opacity.
 
 ### Rule Card RC-04: RISE-MAR Metal Artifact Reduction (`Masaaki-75/rise-mar`)
 - **Given**: A CBCT volume affected by metallic dental restorations, implants, or brackets, and weights at a user-configured `.pkl` / `.pth` checkpoint (stored in Slicer settings).
@@ -127,6 +127,8 @@
 | BL-14 | Print annotations and agent comments into the 8×10 film and the HTML report | Medium |
 | BL-15 | Retry/backoff on agent rate limits (429/5xx; `AgentError.is_retryable` already exposed) | Low |
 | BL-16 | Vendored `mcp-slicer` copy with `SLICER_WEB_SERVER_URL` so Slicer's port is configurable | Low |
+| BL-17 | Fix `AgentEndpointConfig.resolved_url()` for query-string URLs (Azure `?api-version=...`), align `is_configured()` with `resolved_url()`, allow keyless localhost shims, redact URL credentials/query keys, and send an explicit `User-Agent` | Medium |
+| BL-18 | Anchor bone-height `H` line start at the `W0` midline midpoint `(pt_l + pt_r) / 2` instead of `crest_uv` | Medium |
 
 ---
 
@@ -150,11 +152,11 @@
 | `tests/test_slicer_glue.py` | 5 | Widget / parameter-node glue |
 | `tests/test_static_attrs.py` | 4 | Static attribute audit (no dangling `self.*`, no silent `except: pass`) |
 | `tests/test_orientation_and_cross_sections.py` | 4 | Orientation + section geometry |
-| **Total** | **219** | as of 2026-11-25 |
+| **Total** | **219** | as of 2026-11-25 (1 skipped if external ToothFairy3 NIfTI is absent) |
 
 Run: `python -m unittest discover -s tests`
 
-Headless Slicer harnesses (need VTK/Qt):
+Headless Slicer harnesses (need VTK/Qt — last run 2026-11-25 on Windows Slicer 5.12.3; not re-run in headless Linux audit):
 `PythonSlicer.exe analysis/slicercbctplanner_1/verify_real_ct.py` (23/23) and
 `python analysis/mcp_slicer_check/verify_mcp_slicer.py` (11/11).
 

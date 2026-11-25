@@ -377,5 +377,115 @@ class TestContextWarnings(unittest.TestCase):
         self.assertEqual(context_warnings({"sites": [{"fdi": 46, "w0_mm": 9.0, "h_mm": 14.0, "ian_mm": 5.0}]}), [])
 
 
+
+class TestAgentUrlFixesAndMeasurementEdit(unittest.TestCase):
+    def test_resolved_url_preserves_azure_query_string_and_strips_fragment(self) -> None:
+        cfg = AgentEndpointConfig(
+            url="https://myres.openai.azure.com/openai/deployments/gpt4o?api-version=2024-06-01#frag",
+            api_key="sk-azure",
+        )
+        self.assertEqual(
+            cfg.resolved_url(),
+            "https://myres.openai.azure.com/openai/deployments/gpt4o/chat/completions?api-version=2024-06-01",
+        )
+        full_cfg = AgentEndpointConfig(
+            url="https://myres.openai.azure.com/openai/deployments/gpt4o/chat/completions?api-version=2024-06-01",
+            api_key="sk-azure",
+        )
+        self.assertEqual(
+            full_cfg.resolved_url(),
+            "https://myres.openai.azure.com/openai/deployments/gpt4o/chat/completions?api-version=2024-06-01",
+        )
+
+    def test_is_configured_allows_keyless_loopback_and_rejects_empty_host(self) -> None:
+        local = AgentEndpointConfig(url="http://localhost:11434/v1", api_key="")
+        self.assertTrue(local.is_configured())
+        self.assertNotIn("Authorization", local.headers())
+        self.assertEqual(local.headers().get("User-Agent"), "SlicerCBCTPlanner/3.1")
+        self.assertFalse(AgentEndpointConfig(url="http://", api_key="sk-123456").is_configured())
+        self.assertTrue(AgentEndpointConfig(url="HTTPS://api.openai.com/v1", api_key="sk-123456").is_configured())
+
+    def test_redacted_masks_url_userinfo_and_query_key(self) -> None:
+        cfg = AgentEndpointConfig(
+            url="https://user:supersecret@proxy.local/v1?api_key=secret12345&model=ok",
+            api_key="sk-secret999",
+        )
+        red = cfg.redacted()["url"]
+        self.assertNotIn("supersecret", red)
+        self.assertNotIn("secret12345", red)
+        self.assertIn("model=ok", red)
+
+    def test_retryable_errors_retry_with_backoff(self) -> None:
+        transport = MockTransport(
+            [
+                AgentError("HTTP 429: slow down", kind="rate_limit", status=429, retry_after_s=0.0),
+                {"choices": [{"message": {"content": '{"summary": "recovered", "comments": []}'}}]},
+            ]
+        )
+        cfg = AgentEndpointConfig(url="https://api.openai.com/v1", api_key="sk-test1234")
+        client = AgentClient(cfg, transport=transport, max_retries=2, retry_delay_s=0.0)
+        res = client.review({"sites": []})
+        self.assertEqual(res.summary, "recovered")
+        self.assertEqual(len(transport.calls), 2)
+
+    def test_edit_measurement_action_validation_and_apply(self) -> None:
+        action, err = AgentAction.from_dict(
+            {
+                "op": "edit_measurement",
+                "fdi": 46,
+                "h_mm": 12.4,
+                "w0_mm": 7.2,
+                "w0_start_uv": [-3.6, 5.0],
+                "w0_end_uv": [3.6, 5.0],
+            }
+        )
+        self.assertEqual(err, "")
+        self.assertIsNotNone(action)
+        bad, bad_err = AgentAction.from_dict({"op": "edit_measurement", "fdi": 46})
+        self.assertIsNone(bad)
+        self.assertTrue(bad_err)
+
+        recorded = []
+
+        class _Plan:
+            def edit_measurement(self, fdi: int, edits: dict) -> bool:
+                recorded.append((fdi, edits))
+                return True
+
+        store = AnnotationStore()
+        out = apply_agent_actions(AgentReviewResult(actions=[action]), store, plan=_Plan(), add_comments=False)
+        self.assertEqual(len(out.applied), 1)
+        self.assertEqual(recorded[0][0], 46)
+        self.assertAlmostEqual(recorded[0][1]["h_mm"], 12.4)
+        self.assertEqual(recorded[0][1]["w0_start_uv"], (-3.6, 5.0))
+
+
+    def test_system_prompt_has_role_tools_and_pathology_flag_rule(self) -> None:
+        from CBCTPlannerLib.core.agent_review import DEFAULT_REVIEW_QUESTION, SYSTEM_PROMPT
+
+        self.assertIn("edit_measurement", SYSTEM_PROMPT)
+        self.assertIn("flag_site", SYSTEM_PROMPT)
+        self.assertIn("do NOT diagnose", SYSTEM_PROMPT)
+        self.assertIn("manual clinician review", SYSTEM_PROMPT.lower())
+        self.assertTrue(len(DEFAULT_REVIEW_QUESTION) > 20)
+
+    def test_detect_slice_discrepancies_flags_jumps_except_maxillary_sinus_height(self) -> None:
+        from CBCTPlannerLib.core.agent_review import context_warnings, detect_slice_discrepancies
+
+        sites = [
+            {"fdi": 45, "h_mm": 15.0, "w0_mm": 7.5},
+            {"fdi": 46, "h_mm": 10.5, "w0_mm": 4.0},
+            {"fdi": 15, "h_mm": 14.0, "w0_mm": 7.0},
+            {"fdi": 16, "h_mm": 6.5, "w0_mm": 7.2, "sinus_mm": 1.2},
+        ]
+        flags = detect_slice_discrepancies(sites)
+        metrics = [(f["fdi"], f["metric"]) for f in flags]
+        self.assertIn((46, "H"), metrics)
+        self.assertIn((46, "W0"), metrics)
+        self.assertNotIn((16, "H"), metrics)
+        warnings = context_warnings({"sites": sites})
+        self.assertTrue(any("SLICE DISCREPANCY" in w and "46" in w for w in warnings))
+
+
 if __name__ == "__main__":
     unittest.main()

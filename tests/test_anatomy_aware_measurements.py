@@ -786,6 +786,19 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
         _verify_rendered_measurement_sync(self, mid_cs, mid_meas)
 
 
+    def test_23_height_origin_centered_on_w0_midline(self) -> None:
+        mask, img, arch = _make_mandible_ring_phantom()
+        eng = self._build_engine(mask, img, affine=np.diag([0.5, 0.5, 0.5, 1.0]), arch=arch)
+        meas, cs = eng.measure_at_arc_mm("lower", 15.0, fdi_hint="46")
+        self.assertIsNotNone(meas)
+        assert cs is not None
+        self.assertIn(0.0, cs.width_endpoints_uv)
+        w0_l, w0_r = cs.width_endpoints_uv[0.0]
+        expected_u = 0.5 * (float(w0_l[0]) + float(w0_r[0]))
+        self.assertIsNotNone(cs.crest_uv)
+        self.assertAlmostEqual(float(cs.crest_uv[0]), expected_u, places=4)
+
+
 class TestCrossSectionEntryPoints(unittest.TestCase):
     """Regression tests for the jaw-name bug that blanked the gallery, print and film overlays."""
 
@@ -1026,6 +1039,8 @@ class TestWorkflowUIHelpers(unittest.TestCase):
             tf.flush()
             ok2, msg2 = validate_risemar_weights_path(tf.name)
             self.assertTrue(ok2, msg2)
+
+
 
 
 if __name__ == "__main__":

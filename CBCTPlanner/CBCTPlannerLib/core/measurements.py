@@ -1866,107 +1866,10 @@ class MeasurementEngine:
         cs.crest_profile_uv = crest_profile_uv if len(crest_profile_uv) >= 2 else None
         cs.ridge_axis_angle_deg = ridge_angle_deg
 
-        # 4. Local ipsilateral vital-structure selection (Part 2.2)
-        vital_name = "Inferior Alveolar Canal" if is_mandible else "Maxillary Sinus Floor"
-        vital_id, local_vital_2d, vital_centroid_uv, vital_contour_uv, vital_unavail = (
-            self._select_local_vital_structure(
-                mask_cs, u_coords, v_coords, P, N, B, info.quadrant, is_mandible, crest_uv
-            )
-        )
-        cs.vital_structure_name = vital_name
-        cs.vital_withheld_reason = vital_unavail
-        cs.vital_contour_uv = vital_contour_uv
-        if is_mandible:
-            cs.canal_centroid_uv = vital_centroid_uv
-        else:
-            cs.sinus_floor_uv = vital_contour_uv
-
-        # 5. Available bone height (crest -> ipsilateral vital boundary or basal cortex; NEVER root apex!)
-        bone_height_mm, vital_dist_mm, basal_uv, vital_boundary_uv, height_prov = (
-            self._compute_bone_height_in_cs(
-                u_coords,
-                v_coords,
-                mask_cs,
-                P,
-                N,
-                B,
-                is_mandible,
-                jaw_id,
-                vital_id,
-                ridge_mask=ridge_mask,
-                crest_uv=crest_uv,
-                d_apical=d_apical,
-                local_vital_mask_2d=local_vital_2d,
-            )
-        )
-        cs.vital_boundary_uv = vital_boundary_uv
-
-        withheld_reason: Optional[str] = None
-        if not height_ok:
-            bone_height_mm = None
-            basal_uv = None
-            withheld_reason = height_reason
-
-        cs.basal_uv = basal_uv
-        cs.basal_v = basal_uv[1] if basal_uv is not None else None
-
         records: Dict[str, MeasurementRecord] = {}
-        if crest_uv is not None and basal_uv is not None and bone_height_mm is not None:
-            h_start_w = _uv_to_world(P, N, B, crest_uv[0], crest_uv[1])
-            h_end_w = _uv_to_world(P, N, B, basal_uv[0], basal_uv[1])
-            exact_h = round(float(np.linalg.norm(np.asarray(h_end_w) - np.asarray(h_start_w))), 2)
-            bone_height_mm = exact_h
-            src_labels = (
-                (jaw_id, vital_id) if (vital_id is not None and vital_boundary_uv is not None) else (jaw_id,)
-            )
-            records["available_bone_height"] = MeasurementRecord(
-                measurement_type="available_bone_height",
-                value_mm=exact_h,
-                start_world_mm=h_start_w,
-                end_world_mm=h_end_w,
-                start_uv_mm=crest_uv,
-                end_uv_mm=basal_uv,
-                source_labels=tuple(int(x) for x in src_labels if x is not None),
-                provenance=height_prov,
-                quality=QUALITY_VALID if height_prov == PROVENANCE_LABEL_DERIVED else QUALITY_ESTIMATED,
-            )
-        else:
-            records["available_bone_height"] = MeasurementRecord(
-                measurement_type="available_bone_height",
-                value_mm=None,
-                provenance=PROVENANCE_UNAVAILABLE,
-                quality=QUALITY_UNAVAILABLE,
-                withheld_reason=height_reason or WITHHELD_NO_CREST,
-            )
+        withheld_reason: Optional[str] = None
 
-        # 6. Separate root extent measurement (tooth reference -> actual root apex)
-        root_start_uv, root_apex_uv = self._detect_root_extent_in_cs(
-            mask_cs, u_coords, v_coords, tooth_id, is_mandible, crest_uv
-        )
-        cs.root_start_uv = root_start_uv
-        cs.root_apex_uv = root_apex_uv
-        cs.root_apex_v = root_apex_uv[1] if root_apex_uv is not None else None
-        root_extent_mm: Optional[float] = None
-        if root_start_uv is not None and root_apex_uv is not None:
-            r_sw = _uv_to_world(P, N, B, root_start_uv[0], root_start_uv[1])
-            r_ew = _uv_to_world(P, N, B, root_apex_uv[0], root_apex_uv[1])
-            root_extent_mm = round(float(np.linalg.norm(np.asarray(r_ew) - np.asarray(r_sw))), 2)
-            if root_extent_mm > 0.0:
-                records["root_extent"] = MeasurementRecord(
-                    measurement_type="root_extent",
-                    value_mm=root_extent_mm,
-                    start_world_mm=r_sw,
-                    end_world_mm=r_ew,
-                    start_uv_mm=root_start_uv,
-                    end_uv_mm=root_apex_uv,
-                    source_labels=(int(tooth_id),) if tooth_id is not None else (),
-                    provenance=PROVENANCE_LABEL_DERIVED,
-                    quality=QUALITY_VALID,
-                )
-            else:
-                root_extent_mm = None
-
-        # 7. Anatomy-aware buccal & lingual widths (Part 3.4)
+        # 4. Anatomy-aware buccal & lingual widths (Part 3.4) — computed before height so H starts at the W0 midline
         depths = [0.0, 3.0, 5.0, 6.0, 9.0]
         if width_ok:
             segs_u, segs_uv = self._compute_bone_widths_with_endpoints_in_cs(
@@ -2006,11 +1909,115 @@ class MeasurementEngine:
                     )
                 else:
                     widths[depth] = None
+            if 0.0 in segs_uv and crest_uv is not None:
+                w0_l, w0_r = segs_uv[0.0]
+                crest_uv = (0.5 * (float(w0_l[0]) + float(w0_r[0])), float(crest_uv[1]))
+                cs.crest_uv = crest_uv
+                cs.crest_v = crest_uv[1]
+                cs.height_u = crest_uv[0]
         else:
             cs.width_segments = {}
             cs.width_endpoints_uv = {}
             widths = {depth: None for depth in depths}
             withheld_reason = _join_reasons(withheld_reason, width_reason)
+
+        # 5. Local ipsilateral vital-structure selection (Part 2.2)
+        vital_name = "Inferior Alveolar Canal" if is_mandible else "Maxillary Sinus Floor"
+        vital_id, local_vital_2d, vital_centroid_uv, vital_contour_uv, vital_unavail = (
+            self._select_local_vital_structure(
+                mask_cs, u_coords, v_coords, P, N, B, info.quadrant, is_mandible, crest_uv
+            )
+        )
+        cs.vital_structure_name = vital_name
+        cs.vital_withheld_reason = vital_unavail
+        cs.vital_contour_uv = vital_contour_uv
+        if is_mandible:
+            cs.canal_centroid_uv = vital_centroid_uv
+        else:
+            cs.sinus_floor_uv = vital_contour_uv
+
+        # 6. Available bone height (W0 midline -> ipsilateral vital boundary or basal cortex; NEVER root apex!)
+        bone_height_mm, vital_dist_mm, basal_uv, vital_boundary_uv, height_prov = (
+            self._compute_bone_height_in_cs(
+                u_coords,
+                v_coords,
+                mask_cs,
+                P,
+                N,
+                B,
+                is_mandible,
+                jaw_id,
+                vital_id,
+                ridge_mask=ridge_mask,
+                crest_uv=crest_uv,
+                d_apical=d_apical,
+                local_vital_mask_2d=local_vital_2d,
+            )
+        )
+        cs.vital_boundary_uv = vital_boundary_uv
+
+        if not height_ok:
+            bone_height_mm = None
+            basal_uv = None
+            withheld_reason = _join_reasons(height_reason, withheld_reason)
+
+        cs.basal_uv = basal_uv
+        cs.basal_v = basal_uv[1] if basal_uv is not None else None
+
+        if crest_uv is not None and basal_uv is not None and bone_height_mm is not None:
+            h_start_w = _uv_to_world(P, N, B, crest_uv[0], crest_uv[1])
+            h_end_w = _uv_to_world(P, N, B, basal_uv[0], basal_uv[1])
+            exact_h = round(float(np.linalg.norm(np.asarray(h_end_w) - np.asarray(h_start_w))), 2)
+            bone_height_mm = exact_h
+            src_labels = (
+                (jaw_id, vital_id) if (vital_id is not None and vital_boundary_uv is not None) else (jaw_id,)
+            )
+            records["available_bone_height"] = MeasurementRecord(
+                measurement_type="available_bone_height",
+                value_mm=exact_h,
+                start_world_mm=h_start_w,
+                end_world_mm=h_end_w,
+                start_uv_mm=crest_uv,
+                end_uv_mm=basal_uv,
+                source_labels=tuple(int(x) for x in src_labels if x is not None),
+                provenance=height_prov,
+                quality=QUALITY_VALID if height_prov == PROVENANCE_LABEL_DERIVED else QUALITY_ESTIMATED,
+            )
+        else:
+            records["available_bone_height"] = MeasurementRecord(
+                measurement_type="available_bone_height",
+                value_mm=None,
+                provenance=PROVENANCE_UNAVAILABLE,
+                quality=QUALITY_UNAVAILABLE,
+                withheld_reason=height_reason or WITHHELD_NO_CREST,
+            )
+
+        # 7. Separate root extent measurement (tooth reference -> actual root apex)
+        root_start_uv, root_apex_uv = self._detect_root_extent_in_cs(
+            mask_cs, u_coords, v_coords, tooth_id, is_mandible, crest_uv
+        )
+        cs.root_start_uv = root_start_uv
+        cs.root_apex_uv = root_apex_uv
+        cs.root_apex_v = root_apex_uv[1] if root_apex_uv is not None else None
+        root_extent_mm: Optional[float] = None
+        if root_start_uv is not None and root_apex_uv is not None:
+            r_sw = _uv_to_world(P, N, B, root_start_uv[0], root_start_uv[1])
+            r_ew = _uv_to_world(P, N, B, root_apex_uv[0], root_apex_uv[1])
+            root_extent_mm = round(float(np.linalg.norm(np.asarray(r_ew) - np.asarray(r_sw))), 2)
+            if root_extent_mm > 0.0:
+                records["root_extent"] = MeasurementRecord(
+                    measurement_type="root_extent",
+                    value_mm=root_extent_mm,
+                    start_world_mm=r_sw,
+                    end_world_mm=r_ew,
+                    start_uv_mm=root_start_uv,
+                    end_uv_mm=root_apex_uv,
+                    source_labels=(int(tooth_id),) if tooth_id is not None else (),
+                    provenance=PROVENANCE_LABEL_DERIVED,
+                    quality=QUALITY_VALID,
+                )
+            else:
+                root_extent_mm = None
 
         if cs.crest_v is None:
             withheld_reason = _join_reasons(withheld_reason, WITHHELD_NO_CREST)

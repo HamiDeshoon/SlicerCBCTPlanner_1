@@ -64,3 +64,7 @@
   stopped in `cleanup()`. Do not introduce `QThread`/`Signal` patterns into this codebase — none of the existing modules use
   them and headless tests cannot construct them.
 - **Rationale**: Keeps 3D Slicer responsive without a second threading idiom, and keeps the handlers testable without Qt.
+## 10. Parse Agent Endpoint URLs with `urlsplit` — Never Suffix Raw Strings
+- **Trigger**: Normalizing, validating, or redacting user-configured OpenAI-compatible URLs (`AgentEndpointConfig.resolved_url`, `is_configured`, `redacted` in `core/agent_review.py`).
+- **Observed Pattern**: Split the URL with `urllib.parse.urlsplit` before normalizing the path so query parameters (such as Azure `?api-version=...`) stay intact after `/chat/completions` is appended, strip fragments, validate a non-empty hostname (`netloc`), keep `is_configured()` aligned with `resolved_url()` (case-insensitive scheme), and strip/redact userinfo and query-string credentials (`?key=`, `?api_key=`) before logging or returning `redacted()`.
+- **Rationale**: Appending `/chat/completions` to a raw string corrupts query-string gateways (`...?api-version=2024-06-01/chat/completions`), and unredacted URL query parameters can leak API keys into UI status labels or error logs.

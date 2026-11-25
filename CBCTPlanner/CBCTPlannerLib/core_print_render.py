@@ -421,6 +421,7 @@ def render_cross_section(
     show_implant_guides: bool = True,
     enhance_bone_edges: bool = True,
     monochrome: bool = False,
+    show_footer: bool = True,
 ) -> CrossSectionRender:
     """Render one arch cross-section strictly from engine-supplied measurement endpoints.
 
@@ -468,7 +469,7 @@ def render_cross_section(
     font_sm = _load_font(max(11, int(round(4.6 * scale))), bold=True)
     font_md = _load_font(max(13, int(round(5.4 * scale))), bold=True)
     font_lg = _load_font(max(14, int(round(6.2 * scale))), bold=True)
-    footer_h = max(24, int(round(9.5 * scale)))
+    footer_h = max(24, int(round(9.5 * scale))) if show_footer else 0
     # The footer gets its OWN band below the anatomy: the tile is taller than the image, so a
     # caption or a deep basal end-cap can never be hidden behind the footer text.
     width = img_w
@@ -580,8 +581,9 @@ def render_cross_section(
         return rect
 
     # Draw the bottom footer bar BEFORE calipers so a deep basal height end-cap is never occluded.
-    draw.rectangle([(0, img_h), (width, height)], fill=(2, 4, 9, 220))
-    draw.line([(0, img_h), (width, img_h)], fill=(30, 41, 59, 255), width=1)
+    if show_footer:
+        draw.rectangle([(0, img_h), (width, height)], fill=(2, 4, 9, 220))
+        draw.line([(0, img_h), (width, img_h)], fill=(30, 41, 59, 255), width=1)
 
     # Orientation badges: Lingual (L) left, Buccal (B) right, Superior (S) top-center.
     l_rect = _draw_pill_label(
@@ -653,7 +655,7 @@ def render_cross_section(
             width=max(2, scale - 1),
         )
 
-    # 2. Available Bone Height line: crest_uv -> basal_uv (NEVER replaced by root apex)
+    # 2. Available Bone Height line: crest_uv (centered on W0 midline) -> basal_uv (NEVER replaced by root apex)
     if crest_uv is not None and basal_uv is not None and height_mm_val is not None and height_mm_val > 0.0:
         p0 = _px(crest_uv[0], crest_uv[1], u_coords, v_coords, scale)
         p1 = _px(basal_uv[0], basal_uv[1], u_coords, v_coords, scale)
@@ -818,33 +820,34 @@ def render_cross_section(
     bone_density = geom["misch_code"] if show_implant_guides else None
 
     # Draw footer text without re-filling over any basal end-cap that reached the bottom band.
-    if meas is None and (height_mm_val is None or height_mm_val <= 0.0) and not width_endpoints:
-        f_text = "not measurable"
-        f_fill = COLOR_UNAVAILABLE
-    else:
-        if meas is not None:
-            f_text = measurement_footer_text(meas, bone_density=bone_density)
+    if show_footer:
+        if meas is None and (height_mm_val is None or height_mm_val <= 0.0) and not width_endpoints:
+            f_text = "not measurable"
+            f_fill = COLOR_UNAVAILABLE
         else:
-            h_txt = f"{height_mm_val:.1f} mm" if height_mm_val is not None else "--"
-            w0_val = width_endpoints[0.0][2] if 0.0 in width_endpoints else None
-            w_txt = f"{w0_val:.1f} mm" if w0_val is not None else "--"
-            f_text = f"H {h_txt}  W0 {w_txt}" + (f"  {bone_density}" if bone_density else "")
-        f_fill = (248, 250, 252)
+            if meas is not None:
+                f_text = measurement_footer_text(meas, bone_density=bone_density)
+            else:
+                h_txt = f"{height_mm_val:.1f} mm" if height_mm_val is not None else "--"
+                w0_val = width_endpoints[0.0][2] if 0.0 in width_endpoints else None
+                w_txt = f"{w0_val:.1f} mm" if w0_val is not None else "--"
+                f_text = f"H {h_txt}  W0 {w_txt}" + (f"  {bone_density}" if bone_density else "")
+            f_fill = (248, 250, 252)
 
-    f_tw, _ = _text_size(draw, f_text, font_md)
-    f_x = 6.0
-    if overlay:
-        # Check whether the height line's endpoints sit inside the bottom-left footer text area.
-        h_p0, h_p1 = overlay[0]
-        for end_pt in (h_p0, h_p1):
-            if end_pt[1] >= height - footer_h - 6 and end_pt[0] <= f_x + f_tw + 10:
-                alt_x = max(6.0, float(width - f_tw - 6))
-                if abs(end_pt[0] - alt_x) > abs(end_pt[0] - f_x):
-                    f_x = alt_x
-                break
-    f_y = float(img_h + 4)
-    draw.text((f_x, f_y), f_text, fill=f_fill, font=font_md)
-    labels.append((f_x, f_y, f_text))
+        f_tw, _ = _text_size(draw, f_text, font_md)
+        f_x = 6.0
+        if overlay:
+            # Check whether the height line's endpoints sit inside the bottom-left footer text area.
+            h_p0, h_p1 = overlay[0]
+            for end_pt in (h_p0, h_p1):
+                if end_pt[1] >= height - footer_h - 6 and end_pt[0] <= f_x + f_tw + 10:
+                    alt_x = max(6.0, float(width - f_tw - 6))
+                    if abs(end_pt[0] - alt_x) > abs(end_pt[0] - f_x):
+                        f_x = alt_x
+                    break
+        f_y = float(img_h + 4)
+        draw.text((f_x, f_y), f_text, fill=f_fill, font=font_md)
+        labels.append((f_x, f_y, f_text))
 
     image = Image.alpha_composite(base_image, layer).convert("RGB")
     if monochrome:

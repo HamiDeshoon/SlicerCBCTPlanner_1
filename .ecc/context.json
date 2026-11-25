@@ -1,7 +1,7 @@
 {
   "session_id": "slicer-cbct-planner-v3.1-fixes",
-  "updated_at": "2026-11-25T12:00:00+03:30",
-  "active_milestone": "Phase 4: Step 8 (review agent + annotations + tangential sections) and the MCP server integration verified and merged (9411c7b); documentation re-synced to 219 tests",
+  "updated_at": "2026-11-25T10:55:00+04:00",
+  "active_milestone": "Phase 4: Documentation audited against 552d2a89 (219 unit tests verified; 7 doc-vs-code contradictions fixed; BL-17/BL-18 logged)",
   "decisions": [
     {
       "topic": "Print File & Measured Image Bug Fixes",
@@ -10,12 +10,12 @@
     },
     {
       "topic": "Vivid Teeth & Roots Visualization (SlicerDentalSegmentator)",
-      "chosen": "Vivid anatomical color palette with translucent alveolar bone (0.22-0.30 opacity), 1.0 opacity vivid teeth/roots with Phong specular shading (Specular=0.45, Power=25), glowing red/orange IAN canal, and root-dentin-enhancing 3D VR preset",
+      "chosen": "Vivid anatomical color palette with translucent alveolar bone (0.25 default opacity), 1.0 opacity vivid teeth/roots, VR Phong shading (Ambient=0.25, Diffuse=0.88, Specular=0.45, SpecularPower=26.0 for Vivid Roots VR), glowing red/orange IAN canal, and 4 surface presets in VIVID_3D_STYLE_PRESETS",
       "reason": "Opaque jawbone previously occluded tooth roots in 3D surface and VR views; translucent bone + specular teeth makes crowns, roots, furcations, and canals vivid."
     },
     {
       "topic": "RISE-MAR Metal Artifact Reduction Integration",
-      "chosen": "New RiseMarEngine module supporting C:\\Users\\hamid\\Downloads\\risemar_dental_preview.pkl (CBAM Attention U-Net + sinogram/streak suppression hybrid + CQA 1-10 quality scoring)",
+      "chosen": "New RiseMarEngine module with user-configured checkpoint path persisted via QSettings key CBCTPlanner/RiseMarWeightsPath (CBAM Attention U-Net + sinogram/streak suppression hybrid + CQA 1-10 quality scoring)",
       "reason": "Provides on-demand Metal Artifact Reduction in Step 1 and batch CLI for scans with titanium implants, amalgam fillings, or orthodontic brackets."
     },
     {
@@ -30,12 +30,12 @@
     },
     {
       "topic": "Large-angle crest axis stability",
-      "chosen": "PCA axis constrained via _stabilize_pca_axis to point buccolingually (small |u| component); prevents minor eigenvector flip at arch angles > 45 degrees",
+      "chosen": "PCA inside _detect_alveolar_crest_and_axis clipped on ridge_mask (<=16 mm apical) with an elongated-axis guard; prevents minor eigenvector flip at arch angles > 45 degrees",
       "reason": "Previous flip caused wrong bone segment to be identified as W0 at posterior molar sites where arch curvature is high."
     },
     {
       "topic": "Height line endpoint guards",
-      "chosen": "Height ray extends to inferior jaw boundary on non-canal slices; stops at IAN only when a confirmed canal is present in ROI. IAN search radius expanded to u_ok=±12 mm, 3D ROI=20 mm",
+      "chosen": "Height ray extends to inferior jaw boundary on non-canal slices; stops at IAN only when a confirmed canal is present in ROI. IAN search uses u_ok=(|u|<=11.0 mm)|(|u-u_ref|<=8.5 mm) and local_radius_mm=28.0 mm",
       "reason": "Height line was stopping short on anterior mandible (no canal) and missing posterior canals > 15 mm from crest."
     },
     {
@@ -60,7 +60,7 @@
     },
     {
       "topic": "Remote review agent wire format",
-      "chosen": "OpenAI-compatible POST <base>/chat/completions with Authorization: Bearer; URL resolver accepts bare host, /v1, /openai and full /chat/completions; tolerant JSON parse; fixed action whitelist; nothing applied until 'Apply agent changes'",
+      "chosen": "OpenAI-compatible POST <base>/chat/completions with Authorization: Bearer; tolerant JSON parse; fixed action whitelist; nothing applied until 'Apply agent changes' (query-string gateway fix tracked as BL-17)",
       "reason": "Any gateway (OpenAI, Azure, vLLM, Ollama shim, internal proxy) works with one implementation, and untrusted model output can never silently edit a clinical plan."
     },
     {
@@ -150,9 +150,12 @@
     "core/tangential.py ridge-parallel sampler, crest drop and RGBA renderer",
     "Real-CT verification extended to 23/23: tangential section (101x141 @ 0.30 mm/px, crest drop 11.1 mm, 0.03 s) and agent mock round trip (49 KB payload, 3 applied, 1 rejected)",
     "Install and verify zhaoyouj/mcp-slicer 0.3.1 against Slicer 5.12.3 (11/11), add .mcp.json + launcher + harness",
-    "Commit the whole Step 8 + MCP batch (9411c7b) and re-sync README / BUSINESS_RULES / instincts / session notes / this context file"
+    "Commit the whole Step 8 + MCP batch (9411c7b) and re-sync README / BUSINESS_RULES / instincts / session notes / this context file",
+    "Doc-vs-code audit pass on 552d2a89: verified 219 unit tests (1 skipped), 51 .py modules (28 CBCTPlannerLib / 13 core), 8 step chips, 22 active QSettings keys; fixed 7 doc contradictions and logged BL-17 (API URL bugs) and BL-18 (H from W0 midline)"
   ],
   "next_tasks": [
+    "BL-18: anchor bone-height H line start at W0 midline midpoint (pt_l + pt_r) / 2",
+    "BL-17: fix AgentEndpointConfig.resolved_url() query-string handling (Azure ?api-version=), align is_configured(), allow keyless localhost, redact URL credentials, and send explicit User-Agent",
     "BL-14: print annotations and agent comments into the 8x10 film and HTML report",
     "BL-13: apply agent implant diameter/length edits via a plan override column",
     "BL-15: retry/backoff on agent rate limits (422/429/5xx), using AgentError.is_retryable",

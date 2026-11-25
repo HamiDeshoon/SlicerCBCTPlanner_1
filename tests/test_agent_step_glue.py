@@ -391,5 +391,35 @@ class TestAgentContextCollection(unittest.TestCase):
         self.assertEqual(context["selected_teeth"], [46])
 
 
+    def test_apply_agent_measurement_edit_updates_plan_and_overrides(self) -> None:
+        w = _widget()
+        w._measurementOverridesByFDI = {}
+        w.treatmentPlanByFDI = {46: {"fdi": 46, "bone_height_mm": "10.0", "w_crest_mm": "6.0"}}
+        adapter = _AgentPlanAdapter(w)
+        changed = adapter.edit_measurement(
+            46, {"h_mm": 12.5, "w0_mm": 7.4, "w0_start_uv": (-3.7, 4.0), "w0_end_uv": (3.7, 4.0)}
+        )
+        self.assertTrue(changed)
+        self.assertEqual(w.treatmentPlanByFDI[46]["bone_height_mm"], "12.5")
+        self.assertEqual(w.treatmentPlanByFDI[46]["w_crest_mm"], "7.4")
+        self.assertAlmostEqual(w._measurementOverridesByFDI[46]["h_mm"], 12.5)
+
+
+    def test_build_pre_print_review_rows_collects_discrepancies_and_flags(self) -> None:
+        w = _widget()
+        w._measurementOverridesByFDI = {}
+        w.annotationStore = AnnotationStore()
+        w.annotationStore.add("Abnormal finding - manual clinician review required", fdi=46, kind="flag", severity="warning")
+        w.treatmentPlanByFDI = {
+            45: {"bone_height_mm": "15.0", "w_crest_mm": "7.5"},
+            46: {"bone_height_mm": "10.0", "w_crest_mm": "4.0"},
+        }
+        rows, disc = w._buildPrePrintReviewRows([45, 46])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(disc), 2)
+        self.assertTrue(any("Abnormal finding" in n for n in rows[1]["notes"]))
+        self.assertTrue(any("SLICE DISCREPANCY" in n for n in rows[1]["notes"]))
+
+
 if __name__ == "__main__":
     unittest.main()

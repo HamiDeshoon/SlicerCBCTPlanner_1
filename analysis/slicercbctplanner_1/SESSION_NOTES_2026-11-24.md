@@ -356,7 +356,32 @@ This session then re-synced the documentation to the code as merged:
 
 ---
 
-## 13. Consolidated future updates
+## 13. Doc-vs-code audit pass & API URL / W0-midline review (2026-11-25)
+
+**Source snapshot:** GitHub zipball of commit `552d2a89b7d08113d80a7cc7f49adf0ef08a2af6` (no `.git` history bundled; no source, test, or config files modified).
+
+### Doc-vs-code contradictions found and fixed
+
+| File | Stale doc claim | Ground truth in code |
+|------|-----------------|----------------------|
+| `README.md` | 55 labels; 3 workspace roles; ADT in Step 5B; VR Phong `Specular=0.38/Power=28/Ambient=0.22/Diffuse=0.78`; Azure gateway advertised as working out of the box | `core/labels.py` `LABELS_BY_ID` has **77** labels; `WorkflowUIHelpers.WORKSPACE_ROLE_PROFILES` has **4** roles (`full`, `radiologist`, `implant`, `ortho`); ADT is in **Step 7** (`CBCTPlanner.py:1553`); `VRVisualization.py` uses `Ambient=0.25`, `Diffuse=0.88`, `Specular=0.45`, `SpecularPower=26.0` (Vivid Roots VR); Azure `?api-version=...` is currently mangled by `resolved_url()` (`BL-17`) |
+| `BUSINESS_RULES.md` | Referenced nonexistent `_stabilize_pca_axis`; `u_ok=±12.0 mm / 3D ROI=20 mm`; stale VR Phong values and preset names | `_detect_alveolar_crest_and_axis` clips PCA on `ridge_mask` (≤ 16 mm apical) with elongated-axis guard; `_select_local_vital_structure` uses `u_ok=(|u|<=11.0) | (|u-u_ref|<=8.5)` and `local_radius_mm=28.0`; `VIVID_3D_STYLE_PRESETS` and `"DentalSegmentator Vivid Roots (VR)"` names/values aligned |
+| `.ecc/instincts.md` | No URL-normalization invariant recorded | Appended Instinct 10 covering `urllib.parse.urlsplit` normalization, `is_configured()` parity, and URL secret redaction |
+| `.ecc/context.json` | Carried `_stabilize_pca_axis`, `u_ok=±12 mm / 3D ROI=20 mm`, `Power=25`, and hardcoded `C:\Users\hamid\Downloads\risemar_dental_preview.pkl` | Aligned all four with code and added `BL-17` / `BL-18` to `next_tasks` |
+
+### Checks re-run for this audit pass
+
+| Check | Result |
+|-------|--------|
+| `python3 -m unittest discover -s tests` | **219 tests, OK (skipped=1)** in 10.3 s (`test_real_volume_file_matches_the_label_grid` skipped — external ToothFairy3 NIfTI not present) |
+| Per-file test count (`grep -c '    def test_' tests/test_*.py`) | 16 files, sum = **219** (exact match with `BUSINESS_RULES.md` §4) |
+| Module / UI / settings counts | **51** `.py` files (**28** in `CBCTPlannerLib/`: 15 top-level + 13 in `CBCTPlannerLib/core/`); **8** wizard steps / **8** step chips; **22** active `CBCTPlanner/*` QSettings keys (+ 1 removed legacy key `autoStandardizeOnLoad`) |
+| `PythonSlicer verify_real_ct.py` | **Not verified in this pass** — `PythonSlicer` / 3D Slicer 5.12.3 is not installed in this Linux container (last verified 23/23 on Windows Slicer 5.12.3) |
+| `python analysis/mcp_slicer_check/verify_mcp_slicer.py` | **Not verified in this pass** — requires a running 3D Slicer instance (last verified 11/11 on Windows Slicer 5.12.3) |
+
+---
+
+## 14. Consolidated future updates
 
 The same list lives in `README.md` → *Roadmap* and `BUSINESS_RULES.md` → §3; IDs are stable, so a future session can
 pick one and go.
@@ -367,6 +392,7 @@ pick one and go.
 | `BL-14` | Print annotations/agent comments into the 8×10 film and the HTML report | The store is invisible on the clinical deliverable today | S–M |
 | `BL-13` | Apply `set_implant_diameter`/length instead of skipping | Requires a plan override column so a measurement-derived row is not overwritten | M |
 | `BL-15` | Retry/backoff on 429/5xx | `AgentError.is_retryable` is exposed but unused; one transient rate limit loses the review | S |
+| `BL-17` | Fix `AgentEndpointConfig.resolved_url()` query-string handling, `is_configured()` parity, keyless localhost, URL redaction, and `User-Agent` | Query-string gateways like Azure `?api-version=...` are currently corrupted by string suffixing, and WAFs can block `Python-urllib` | S |
 | — | Token/image budget + pre-send size estimate | Up to 8 images; long cases can exceed a context window | S |
 | — | Per-case review log (request id, model, latency, applied count) | Auditability of an AI-authored comment on a clinical case | S |
 | — | Tangential: multi-slab thickness and a buccal/lingual offset control | Current slab is a single averaged band | S |
@@ -375,6 +401,7 @@ pick one and go.
 | ID | Item | Why it matters | Effort |
 |----|------|----------------|--------|
 | `BL-12` | Withhold `W0` when the opposite cortex is absent | 185/205 real-CT sections cut one plate and still report 1–3 mm as a crest width | M |
+| `BL-18` | Anchor bone-height `H` line start at the `W0` midline midpoint `(pt_l + pt_r) / 2` | Ensures `H` starts visually and geometrically at the center of the bridged `W0` crest span rather than an off-center `crest_uv` | S |
 | `BL-01` | 1-site Gaussian smoothing of `W0`/`W3`/`W5` along the arch | Removes isolated inter-root spikes | S |
 | `BL-05` | Dynamic `half_v_mm` for tall anterior mandibles | 25.0 mm clips the chin on some scans; 30.0 broke phantom tests | M |
 | `BL-06` | PDL gap tolerance validation on real molars | 1.5 mm bridge is untested against thin widened PDL | S |

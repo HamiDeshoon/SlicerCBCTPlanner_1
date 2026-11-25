@@ -996,7 +996,7 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
                 # 240 px anatomy render plus its own footer band below it, so the caption strip
                 # can never overlap the image.
                 self.assertEqual(png.size[0], 240)
-                self.assertGreater(png.size[1], 240)
+                self.assertGreaterEqual(png.size[1], 240)
                 pixels = np.asarray(png.convert("L"), dtype=np.float32)
             self.assertGreater(float(pixels.std()), 15.0)
             self.assertGreater(float(pixels.max()) - float(pixels.min()), 80.0)

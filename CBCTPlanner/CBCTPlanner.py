@@ -250,6 +250,9 @@ class _AgentPlanAdapter:
     def remove_tooth(self, fdi: int) -> bool:
         return bool(self._widget._set_tooth_in_plan(int(fdi), False))
 
+    def edit_measurement(self, fdi: int, edits: Dict[str, Any]) -> bool:
+        return bool(self._widget._apply_agent_measurement_edit(int(fdi), edits))
+
 
 class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     """Progressive Workflow UI for CBCT Dental Planner with VTKObservationMixin and full ParameterNode state."""
@@ -266,6 +269,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.selectedTeeth: Set[int] = set()
         self.activeToothFDI: Optional[int] = None
         self.treatmentPlanByFDI: Dict[int, Dict[str, Any]] = {}
+        self._measurementOverridesByFDI: Dict[int, Dict[str, Any]] = {}
         self._vrDebounceTimer: Any = None
         self._panoPreviewTimer: Any = None
         self._shortcuts: List[Any] = []
@@ -1011,7 +1015,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         # ==================== STEP 4: CROSS-SECTIONS, LIGHTBOX & TILT ====================
         self.step4Box = ctk.ctkCollapsibleButton()
-        self.step4Box.text = "Step 4: Multi-Slice Cross-Sectional Lightbox & +-30° Tilt"
+        self.step4Box.text = "Step 4: Multi-Slice Cross-Sectional Lightbox, +-30° Tilt & Tangential View"
         self.step4Box.collapsed = True
         self.layout.addWidget(self.step4Box)
         step4Outer = qt.QVBoxLayout(self.step4Box)
@@ -1159,6 +1163,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.csStatusLabel = qt.QLabel("Cursor: 0.0 mm | Tilt: 0° | Lightbox: -2.0 / 0.0 / +2.0 mm")
         step4Layout.addRow(self.csStatusLabel)
+        self._buildTangentialSectionBox(step4Layout)
 
         # ==================== STEP 5: ODONTOGRAM, IMPLANTS & REPORT ====================
         self.step5Box = ctk.ctkCollapsibleButton()
@@ -3680,8 +3685,16 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             progress.show()
             qt.QApplication.processEvents()
 
-        # The clinical film is grayscale: no 3D VR panel is captured, so the quadrant VR
-        # isolation pass (which only hides segments for that capture) is not needed.
+        if qt is not None and self.parent is not None and not getattr(self, "_skipPrePrintReview", False):
+            decision = self._showPrePrintReviewDialog(selected_fdis)
+            if decision == "cancel":
+                return
+            if decision == "agent":
+                if getattr(self, "agentStepBox", None) is not None:
+                    self.agentStepBox.collapsed = False
+                self.onAgentReviewClicked()
+                return
+
         try:
             html_file, pdf_file, slices_data = engine.generate_8x10_layout(
                 volumeNode=volNode,
@@ -3693,6 +3706,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 patient_id=p_id or "Anonymous",
                 include_metadata=include_meta,
                 grayscale=True,
+                measurement_overrides=getattr(self, "_measurementOverridesByFDI", None),
             )
         except Exception:
             logger.exception("8x10 print layout generation failed")
@@ -3713,6 +3727,130 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         if slicer:
             slicer.util.showStatusMessage(f"Generated 8×10″ Print Layout: {pdf_file}", 5000)
+
+    def _buildPrePrintReviewRows(self, selected_fdis: Sequence[int]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Build Qt-free pre-print review rows and cross-slice discrepancy flags for `selected_fdis`."""
+        from CBCTPlannerLib.core.agent_review import detect_slice_discrepancies
+
+        overrides = getattr(self, "_measurementOverridesByFDI", {}) or {}
+        plan_map = getattr(self, "treatmentPlanByFDI", {}) or {}
+        store = getattr(self, "annotationStore", None)
+
+        def _num(val: Any) -> Optional[float]:
+            try:
+                return float(str(val).replace("mm", "").strip())
+            except (TypeError, ValueError):
+                return None
+
+        rows: List[Dict[str, Any]] = []
+        for fdi in selected_fdis:
+            fdi_i = int(fdi)
+            row = plan_map.get(fdi_i) or {}
+            ov = overrides.get(fdi_i) or {}
+            h_val = ov.get("h_mm") if "h_mm" in ov else _num(row.get("bone_height_mm"))
+            w0_val = ov.get("w0_mm") if "w0_mm" in ov else _num(row.get("w_crest_mm"))
+            sinus_val = _num(row.get("sinus_clearance_mm"))
+            notes: List[str] = []
+            if store is not None:
+                for ann in store.list(fdi=fdi_i):
+                    if ann.kind in ("flag", "ai_comment"):
+                        notes.append(f"[{ann.severity}] {ann.text}")
+            rows.append(
+                {
+                    "fdi": fdi_i,
+                    "h_mm": h_val,
+                    "w0_mm": w0_val,
+                    "sinus_mm": sinus_val,
+                    "notes": notes,
+                }
+            )
+
+        discrepancies = detect_slice_discrepancies(rows)
+        by_fdi: Dict[int, List[str]] = {}
+        for d in discrepancies:
+            by_fdi.setdefault(int(d["fdi"]), []).append(d["message"])
+        for r in rows:
+            r["notes"].extend(by_fdi.get(int(r["fdi"]), []))
+        return rows, discrepancies
+
+    def _showPrePrintReviewDialog(self, selected_fdis: Sequence[int]) -> str:
+        """Show a manual review & edit window before final 8x10 print.
+
+        Returns ``'print'``, ``'agent'``, or ``'cancel'``.
+        """
+        if qt is None:
+            return "print"
+        rows, discrepancies = self._buildPrePrintReviewRows(selected_fdis)
+        dlg = qt.QDialog(self.parent)
+        dlg.setWindowTitle("Pre-Print Measurement Review & Manual Edit")
+        dlg.resize(680, 400)
+        lay = qt.QVBoxLayout(dlg)
+
+        if discrepancies:
+            banner = qt.QLabel(
+                f"{len(discrepancies)} significant cross-slice difference(s) detected "
+                "(excluding maxillary sinus heights). Review with Agent or edit H / W0 below before printing."
+            )
+            banner.setWordWrap(True)
+            banner.setStyleSheet("color: #f59e0b; font-weight: bold; padding: 4px;")
+            lay.addWidget(banner)
+        else:
+            lay.addWidget(qt.QLabel("Verify or manually edit H and W0 values before final 8x10 print:"))
+
+        tbl = qt.QTableWidget(len(rows), 4)
+        tbl.setHorizontalHeaderLabels(["FDI", "H (mm)", "W0 (mm)", "Flags / Review Notes"])
+        tbl.horizontalHeader().setStretchLastSection(True)
+        for idx, r in enumerate(rows):
+            fdi_item = qt.QTableWidgetItem(f"#{r['fdi']}")
+            fdi_item.setFlags(fdi_item.flags() & ~qt.Qt.ItemIsEditable)
+            h_item = qt.QTableWidgetItem("" if r["h_mm"] is None else f"{r['h_mm']:.1f}")
+            w0_item = qt.QTableWidgetItem("" if r["w0_mm"] is None else f"{r['w0_mm']:.1f}")
+            notes_item = qt.QTableWidgetItem("; ".join(r["notes"]))
+            notes_item.setFlags(notes_item.flags() & ~qt.Qt.ItemIsEditable)
+            tbl.setItem(idx, 0, fdi_item)
+            tbl.setItem(idx, 1, h_item)
+            tbl.setItem(idx, 2, w0_item)
+            tbl.setItem(idx, 3, notes_item)
+        lay.addWidget(tbl)
+
+        choice = {"action": "cancel"}
+        btn_row = qt.QHBoxLayout()
+        btn_agent = qt.QPushButton("Review with Agent")
+        btn_print = qt.QPushButton("Apply Edits & Print")
+        btn_cancel = qt.QPushButton("Cancel")
+
+        def _commit_and_print() -> None:
+            for idx, r in enumerate(rows):
+                edits: Dict[str, Any] = {}
+                for col, key in ((1, "h_mm"), (2, "w0_mm")):
+                    txt = str(tbl.item(idx, col).text() or "").strip()
+                    if txt:
+                        try:
+                            val = float(txt)
+                            if val > 0.0 and (r[key] is None or abs(val - float(r[key])) > 1e-3):
+                                edits[key] = val
+                        except ValueError:
+                            pass
+                if edits:
+                    self._apply_agent_measurement_edit(r["fdi"], edits)
+            choice["action"] = "print"
+            dlg.accept()
+
+        def _send_agent() -> None:
+            choice["action"] = "agent"
+            dlg.accept()
+
+        btn_agent.clicked.connect(_send_agent)
+        btn_print.clicked.connect(_commit_and_print)
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_row.addWidget(btn_agent)
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_print)
+        lay.addLayout(btn_row)
+
+        dlg.exec_()
+        return choice["action"]
 
     def _showPrintPreviewDialog(
         self, html_path: Path, pdf_path: Path, slices_data: List[Any], quadrant: int, fdis: List[int]
@@ -4365,7 +4503,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
 
         self.agentStepBox = ctk.ctkCollapsibleButton()
-        self.agentStepBox.text = "Step 8: AI Agent Review, Annotations & Tangential Sections"
+        self.agentStepBox.text = "Step 8: AI Agent Review & Clinical Annotations"
         self.agentStepBox.collapsed = True
         self.layout.addWidget(self.agentStepBox)
         outer = qt.QVBoxLayout(self.agentStepBox)
@@ -4454,9 +4592,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         reviewLayout = qt.QVBoxLayout(reviewBox)
 
         self.agentQuestionEdit = qt.QLineEdit()
-        self.agentQuestionEdit.setPlaceholderText(
-            "Optional question for the agent (e.g. \"Is #46 wide enough for a 4.1 mm implant?\")"
-        )
+        from CBCTPlannerLib.core.agent_review import DEFAULT_REVIEW_QUESTION
+
+        self.agentQuestionEdit.setPlaceholderText(DEFAULT_REVIEW_QUESTION)
         reviewLayout.addWidget(self.agentQuestionEdit)
 
         reviewButtons = qt.QHBoxLayout()
@@ -4528,11 +4666,23 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         noteButtons.addStretch(1)
         notesLayout.addLayout(noteButtons)
 
-        # ---------------- tangential ----------------
+        # ---------------- connections ----------------
+        self.btnAgentTest.clicked.connect(self.onAgentTestConnectionClicked)
+        self.btnAgentSave.clicked.connect(self.onSaveAgentCredentials)
+        self.btnAgentReview.clicked.connect(self.onAgentReviewClicked)
+        self.btnAgentApplyActions.clicked.connect(self.onAgentApplyActionsClicked)
+        self.btnAgentClearAi.clicked.connect(self.onAgentClearAiClicked)
+        self.btnAnnotationAdd.clicked.connect(self.onAddAnnotationClicked)
+        self.btnAnnotationRemove.clicked.connect(self.onRemoveAnnotationClicked)
+        self.btnAnnotationExport.clicked.connect(self.onExportAnnotationsClicked)
+        self.annotationTextEdit.returnPressed.connect(self.onAddAnnotationClicked)
+
+    def _buildTangentialSectionBox(self, parentLayout: Any) -> None:
+        """Build the ridge-parallel tangential viewer inside Step 4 alongside the cross-section lightbox."""
         self.tangentialBox = ctk.ctkCollapsibleButton()
         self.tangentialBox.text = "Tangential (ridge-parallel) section"
-        self.tangentialBox.collapsed = False
-        content.addWidget(self.tangentialBox)
+        self.tangentialBox.collapsed = True
+        parentLayout.addRow(self.tangentialBox)
         tangOuter = qt.QVBoxLayout(self.tangentialBox)
         tangForm = qt.QFormLayout()
 
@@ -4604,16 +4754,6 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.tangentialStatusLabel.setWordWrap(True)
         tangOuter.addWidget(self.tangentialStatusLabel)
 
-        # ---------------- connections ----------------
-        self.btnAgentTest.clicked.connect(self.onAgentTestConnectionClicked)
-        self.btnAgentSave.clicked.connect(self.onSaveAgentCredentials)
-        self.btnAgentReview.clicked.connect(self.onAgentReviewClicked)
-        self.btnAgentApplyActions.clicked.connect(self.onAgentApplyActionsClicked)
-        self.btnAgentClearAi.clicked.connect(self.onAgentClearAiClicked)
-        self.btnAnnotationAdd.clicked.connect(self.onAddAnnotationClicked)
-        self.btnAnnotationRemove.clicked.connect(self.onRemoveAnnotationClicked)
-        self.btnAnnotationExport.clicked.connect(self.onExportAnnotationsClicked)
-        self.annotationTextEdit.returnPressed.connect(self.onAddAnnotationClicked)
         self.tangentialFollowCheck.toggled.connect(self.onTangentialFollowChanged)
         self.tangentialArcSpin.valueChanged.connect(self.onTangentialSettingsChanged)
         self.tangentialWidthSpin.valueChanged.connect(self.onTangentialSettingsChanged)
@@ -4851,6 +4991,48 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.toggleToothPlanMembership(fdi)
         return True
 
+    def _apply_agent_measurement_edit(self, fdi: int, edits: Dict[str, Any]) -> bool:
+        """Apply a validated agent edit to W0/H values or UV caliper endpoints for `fdi`."""
+        if not edits:
+            return False
+        fdi = int(fdi)
+        stored = dict(self._measurementOverridesByFDI.get(fdi, {}))
+        stored.update(edits)
+        self._measurementOverridesByFDI[fdi] = stored
+
+        row = self.treatmentPlanByFDI.get(fdi)
+        if isinstance(row, dict):
+            if "h_mm" in edits:
+                row["bone_height_mm"] = f"{float(edits['h_mm']):.1f}"
+            if "w0_mm" in edits:
+                row["w_crest_mm"] = f"{float(edits['w0_mm']):.1f}"
+
+        # Also patch any cached cross-section/measurement in logic so redraws reflect the new lines.
+        logic = getattr(self, "logic", None)
+        cache = getattr(logic, "_lastMeasuredByFDI", None) if logic is not None else None
+        if isinstance(cache, dict) and fdi in cache:
+            entry = cache[fdi]
+            cs = entry.get("cs") if isinstance(entry, dict) else getattr(entry, "cs", None)
+            meas = entry.get("meas") if isinstance(entry, dict) else getattr(entry, "meas", None)
+            if cs is not None:
+                if "w0_start_uv" in edits and "w0_end_uv" in edits:
+                    w0_l, w0_r = edits["w0_start_uv"], edits["w0_end_uv"]
+                    if getattr(cs, "width_endpoints_uv", None) is None:
+                        cs.width_endpoints_uv = {}
+                    cs.width_endpoints_uv[0.0] = (w0_l, w0_r)
+                    if "h_start_uv" not in edits:
+                        cs.crest_uv = (0.5 * (w0_l[0] + w0_r[0]), 0.5 * (w0_l[1] + w0_r[1]))
+                if "h_start_uv" in edits:
+                    cs.crest_uv = edits["h_start_uv"]
+                if "h_end_uv" in edits:
+                    cs.basal_uv = edits["h_end_uv"]
+            if meas is not None:
+                if "h_mm" in edits:
+                    meas.bone_height_mm = float(edits["h_mm"])
+                if "w0_mm" in edits:
+                    meas.crest_width_mm = float(edits["w0_mm"])
+        return True
+
     # ------------------------------------------------------------------
     # Annotations
     # ------------------------------------------------------------------
@@ -5017,7 +5199,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "sites": sites,
             "annotations": [] if store is None else store.to_dicts(),
             "warnings": agent_review.context_warnings({"sites": sites}),
-            "question": self.agentQuestionEdit.text.strip() if self.agentQuestionEdit is not None else "",
+            "question": (self.agentQuestionEdit.text.strip() if self.agentQuestionEdit is not None else "") or getattr(agent_review, "DEFAULT_REVIEW_QUESTION", ""),
         }
 
     def _render_site_tile_png(self, engine: Any, fdi: int) -> Optional[bytes]:
