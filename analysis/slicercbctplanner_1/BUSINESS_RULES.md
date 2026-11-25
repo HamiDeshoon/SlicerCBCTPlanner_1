@@ -1,9 +1,9 @@
-# Code Modernization Assessment & Business Rules: `SlicerCBCTPlanner_1` → v3.1
+# Code Modernization Assessment & Business Rules: `SlicerCBCTPlanner_1` → v3.2+
 
 ## 1. Executive Assessment (`/modernize-assess`)
 - **System**: `SlicerCBCTPlanner_1` (3D Slicer Scripted Loadable Extension in Python 3.9+ / VTK / Qt / CTK / NumPy / SciPy / PyTorch).
-- **Codebase Inventory**: 51 Python modules (28 in `CBCTPlannerLib/`: 15 top-level + 13 in `CBCTPlannerLib/core/`) + 16 test modules (**219 unit tests**, 8 wizard steps / 8 step chips, 22 active `CBCTPlanner/*` QSettings keys as of 2026-11-25).
-- **Modernization Method**: **Uplift + Feature Expansion** — preserve all behavioral guarantees (B1–B22, O1–O9, F1–F20) while fixing critical Slicer runtime/rendering defects and adding clinical subsystems (`RiseMarEngine`, `AutomatedDentalToolsEngine`, `SlicerDentalSegmentator` Vivid 3D/VR, `RaySum` panoramic, transparent RGBA exports).
+- **Codebase Inventory**: **52 Python modules** (28 in `CBCTPlannerLib/`: 15 top-level + 13 in `CBCTPlannerLib/core/`) + **17 test modules** (**242 unit tests**, 8 wizard steps / 8 step chips, 22 active `CBCTPlanner/*` QSettings keys as of 2026-11-25).
+- **Modernization Method**: **Uplift + Feature Expansion** — preserve all behavioral guarantees (B1–B22, O1–O9, F1–F20) while fixing critical Slicer runtime/rendering defects and adding clinical subsystems (`RiseMarEngine`, `AutomatedDentalToolsEngine`, `SlicerDentalSegmentator` Vivid 3D/VR, `RaySum` panoramic, transparent RGBA exports, Interactive Pre-Print Editor, edentulous `jawbone_crest` arch fitting).
 
 ---
 
@@ -91,44 +91,39 @@
 - **Rationale**: A remote model is an advisory reviewer, not an authority. The whitelist + explicit Apply step keep a bad
   or hallucinated answer from silently editing a clinical plan or losing the clinician's notes.
 
-### Rule Card RC-08: Tangential (Ridge-Parallel) Sections
-- **Given**: The arch frame (tangent, buccal normal, occlusal axis) and an arc position in mm.
-- **When**: `core/tangential.py` samples the tangential view in Step 8.
+### Rule Card RC-08: Tangential (Ridge-Parallel) Sections & Interactive Pre-Print Editor
+- **Given**: The arch frame (tangent, buccal normal, occlusal axis) and an arc position in mm, plus selected FDI sites for 8×10″ printing.
+- **When**: `core/tangential.py` samples the tangential view (embedded in **Step 4** alongside arch/cross-sections and connected to Step 8) or `_showPrePrintReviewDialog` launches prior to 8×10″ export.
 - **Then**:
-  1. The image plane is spanned by the **arch tangent** (columns) and the **occlusal axis** (rows, **row 0 = superior**),
-     with the slab averaged along the buccal normal (`mean`/`max`/`min`, 0.3 mm pixels) — it looks **along** the ridge
-     rather than across it, so crest continuity between adjacent teeth is visible.
-  2. The cortical crest line (bone → air transition per column) and `crest_drop_mm` are reported with the section; the
-     renderer emits RGBA with transparent air, a crest line, HUD and scale bar.
-  3. It follows the cross-section cursor by default through a debounced refresh, and can be stepped manually or saved
-     as PNG.
-- **Rationale**: Cross-sections answer "how much bone here"; tangential sections answer "is the crest continuous along
-  the ridge", which a buccolingual slice cannot show.
+  1. The tangential plane is spanned by the **arch tangent** (columns) and the **occlusal axis** (rows, **row 0 = superior**), with the slab averaged along the buccal normal (`mean`/`max`/`min`, 0.3 mm pixels); cortical crest line and `crest_drop_mm` are reported with RGBA transparent air output.
+  2. In `fit_arch_from_label_mask` (`core/arch_detector.py`), **edentulous scans** (< 30 tooth voxels) fall back to `method="jawbone_crest"`, fitting the mandibular/maxillary crest arch directly from bone voxels.
+  3. **Interactive Pre-Print Editor** (`CBCTPlanner.py` + `core/measurements.py`): `_buildPrePrintReviewRows` auto-populates `H`/`W0` and cross-section images via `MeasurementEngine` (cached in `last_cross_sections`) even if Step 5 has not run; dragging `W0` re-anchors `H` through `W0`'s midpoint via `reanchor_h_start_to_w0` while preserving its coronal crest offset; `_measurementOverridesByFDI` (and `custom_overlays` lines/circles) persist to ParameterNode `"MeasurementOverrides"` JSON and export via **Export corrected keypoints (.jsonl)**.
+  4. **Corner Legend & Notes Strip (`core_print_render.py` / `PrintLayoutEngine.py`)**: the `W3/W5` legend moves off any occupied bottom-right cortex/overlay to bottom-left above the `10 mm` scale bar or top corners; key center slices draw inline labels (`H`, `W0`, `IAN`) without duplicate card footers; `AnnotationStore` `flag` and `ai_comment` entries render in the BL-14 **Clinical Notes & Review Flags** strip in both PNG/PDF and HTML (visible in grayscale and color).
 
 ---
 
 ## 3. Known Limitations & Backlog
 
-| ID | Item | Priority |
-|----|------|----------|
-| BL-01 | Smooth `W0`/`W3`/`W5` along arch (1-site Gaussian, suppress single-slice outliers between roots) | Medium |
-| BL-02 | Tune `compute_panoramic_display_window_threshold` on more scans; expose percentile UI slider | Medium |
-| BL-03 | RaySum quality: test `1.0×` vs `1.25×` scale; consider gamma/CLAHE post-processing | Low |
-| BL-04 | Make `Zoom(1.40)` user-adjustable in VR tight-frame | Low |
-| BL-05 | Dynamic `half_v_mm` for tall anterior mandibles (current 25.0 mm clips chin in some scans) | Medium |
-| BL-06 | PDL gap tolerance validation on real molar CT (current tolerance: ≤ 1.5 mm) | Medium |
-| BL-07 | Move `test_clinical_delivery.py` NIfTI parser to `tests/helpers/nifti_reader.py` | Low |
-| BL-08 | Phase 7 batch report: consume RaySum pano array in HTML report (currently stores only `.npy`) | Low |
-| BL-09 | Trim unused `core/diagnostics.py` code (~180 lines of `provenance_hash` + report writer) | Low |
-| BL-10 | Real-CT smoke test with `ToothFairy3S_0021_0000.nii.gz` — **done 2026-11-24**: `verify_real_ct.py` headless in Slicer's Python, 23/23 checks after the 2026-11-25 extension, 205 sections (see §6) | Closed |
-| BL-12 | Withhold `W0` when the opposite cortex is not in the section (185/205 real-CT sections cut interproximally) instead of reporting a 1–3 mm plate as a crest width | Medium |
-| BL-11 | Decide grayscale default in `generate_8x10_layout(grayscale=...)` for CLI/batch callers | Medium |
-| BL-13 | Agent actions: apply `set_implant_diameter` / implant length instead of reporting them as skipped (needs a plan override column) | Medium |
-| BL-14 | Print annotations and agent comments into the 8×10 film and the HTML report | Medium |
-| BL-15 | Retry/backoff on agent rate limits (429/5xx; `AgentError.is_retryable` already exposed) | Low |
-| BL-16 | Vendored `mcp-slicer` copy with `SLICER_WEB_SERVER_URL` so Slicer's port is configurable | Low |
-| BL-17 | Fix `AgentEndpointConfig.resolved_url()` for query-string URLs (Azure `?api-version=...`), align `is_configured()` with `resolved_url()`, allow keyless localhost shims, redact URL credentials/query keys, and send an explicit `User-Agent` | Medium |
-| BL-18 | Anchor bone-height `H` line start at the `W0` midline midpoint `(pt_l + pt_r) / 2` instead of `crest_uv` | Medium |
+| ID | Item | Priority | Status |
+|----|------|----------|--------|
+| BL-01 | Smooth `W0`/`W3`/`W5` along arch (1-site Gaussian, suppress single-slice outliers between roots) | Medium | Open |
+| BL-02 | Tune `compute_panoramic_display_window_threshold` on more scans; expose percentile UI slider | Medium | Open |
+| BL-03 | RaySum quality: test `1.0×` vs `1.25×` scale; consider gamma/CLAHE post-processing | Low | Open |
+| BL-04 | Make `Zoom(1.40)` user-adjustable in VR tight-frame | Low | Open |
+| BL-05 | Dynamic `half_v_mm` for tall anterior mandibles (current 25.0 mm clips chin in some scans) | Medium | Open |
+| BL-06 | PDL gap tolerance validation on real molar CT (current tolerance: ≤ 1.5 mm) | Medium | Open |
+| BL-07 | Move `test_clinical_delivery.py` NIfTI parser to `tests/helpers/nifti_reader.py` | Low | Open |
+| BL-08 | Phase 7 batch report: consume RaySum pano array in HTML report (currently stores only `.npy`) | Low | Open |
+| BL-09 | Trim unused `core/diagnostics.py` code (~180 lines of `provenance_hash` + report writer) | Low | Open |
+| BL-10 | Real-CT smoke test with `ToothFairy3S_0021_0000.nii.gz` (`verify_real_ct.py`, 25/25 checks, 205 sections + edentulous `jawbone_crest`) | High | **Closed (2026-11-24 / extended 2026-11-25)** |
+| BL-11 | Decide grayscale default in `generate_8x10_layout(grayscale=...)` for CLI/batch callers | Medium | Open |
+| BL-12 | Withhold `W0` (`WITHHELD_W0_SINGLE_CORTEX`) after deeper-caliper rescue when cross-section cuts only a single cortical plate (< 3 mm, `runs <= 1`); `TestBL12SingleCortexWithhold`, `test_core_math.py`, and `verify_real_ct.py` (0 sub-3 mm reported; 5 single-plate arcs withheld while keeping `H`) | Medium | **Closed (2026-11-25)** |
+| BL-13 | Agent actions: apply `set_implant_diameter` / implant length instead of reporting them as skipped (needs a plan override column) | Medium | Open |
+| BL-14 | Render `AnnotationStore` (`flag` & `ai_comment`) into the compact **Clinical Notes & Review Flags** strip on 8×10 PNG/PDF and HTML (`test_bl14_clinical_notes_strip_renders_when_flagged_and_omits_when_empty`, `verify_real_ct.py`) | Medium | **Closed (2026-11-25)** |
+| BL-15 | Retry/backoff on retryable agent HTTP errors (429/5xx, `Retry-After`) in `AgentClient._post` (`test_retryable_errors_retry_with_backoff`) | Low | **Closed (2026-11-25)** |
+| BL-16 | Vendored `mcp-slicer` copy with `SLICER_WEB_SERVER_URL` so Slicer's port is configurable | Low | Open |
+| BL-17 | Fix `AgentEndpointConfig.resolved_url()` via `urlsplit` (`?api-version=` preserved), align `is_configured()` (including bare hosts & keyless loopback), redact URL credentials/query keys, and send explicit `User-Agent` (`test_agent_review.py`) | Medium | **Closed (2026-11-25)** |
+| BL-18 | Anchor bone-height `H` at the `W0` midline midpoint (keeping fallback to `crest_uv` when `W0` is withheld) and preserve signed coronal crest offset via `coronal_offset_along_axis` / `reanchor_h_start_to_w0` during `W0` drag/overrides (`test_v32_preprint_and_arch.py`) | Medium | **Closed (2026-11-25)** |
 
 ---
 
@@ -136,29 +131,30 @@
 
 | File | Tests | Coverage Area |
 |------|-------|---------------|
-| `tests/test_agent_review.py` | 27 | URL normalisation, payload/context, tolerant JSON, whitelist, redaction, mock transport |
-| `tests/test_agent_step_glue.py` | 14 | Step 8 handlers headless (send/apply/remove/export, row→id map) |
-| `tests/test_tangential_view.py` | 11 | ridge-parallel sampling, crest drop, RGBA render |
-| `tests/test_anatomy_aware_measurements.py` | 29 | W0 socket-bridging, crest axis, height guards, IAN clearance |
-| `tests/test_print_layout.py` | 10 | Pano/VR RGBA, transparent panels, pill placement |
+| `tests/test_agent_review.py` | 34 | URL normalisation (`urlsplit`), bare-host parity, retries, payload/context, tolerant JSON, whitelist, redaction |
+| `tests/test_anatomy_aware_measurements.py` | 32 | W0 socket-bridging, BL-12 single-cortex withhold & rescue, crest axis, height guards, IAN clearance |
+| `tests/test_core_math.py` | 30 | EDT, axis math, plausibility bounds, BL-12 partially dentate behavior |
 | `tests/test_clinical_delivery.py` | 25 | End-to-end print file generation (PDF/PNG/HTML) |
-| `tests/test_core_math.py` | 30 | EDT, axis math, plausibility bounds |
 | `tests/test_slicer_integration.py` | 17 | RaySum default, pano display, VR background |
+| `tests/test_agent_step_glue.py` | 16 | Step 8 handlers headless (send/apply/remove/export, edit_measurement, row→id map) |
+| `tests/test_print_layout.py` | 14 | Pano/VR RGBA, legend corner relocation, BL-14 notes strip, measurement overrides |
 | `tests/test_orientation.py` | 12 | RAS standardisation, anatomical auto-fix |
-| `tests/test_arch_fit.py` | 10 | Arch detection and curve fitting |
+| `tests/test_arch_fit.py` | 13 | Arch detection, dentate/edentulous/jawbone-extended curve fitting, shared Z-smoothness |
+| `tests/test_tangential_view.py` | 11 | Ridge-parallel sampling, crest drop, RGBA render |
 | `tests/test_autofit_widget.py` | 8 | Workspace role profiles, 8 step chips |
 | `tests/test_cbct_planner_v4_fixes.py` | 8 | v4 regression fixes |
-| `tests/test_v3_upgrades.py` | 5 | v3 upgrade paths |
 | `tests/test_slicer_glue.py` | 5 | Widget / parameter-node glue |
-| `tests/test_static_attrs.py` | 4 | Static attribute audit (no dangling `self.*`, no silent `except: pass`) |
+| `tests/test_v3_upgrades.py` | 5 | v3 upgrade paths |
 | `tests/test_orientation_and_cross_sections.py` | 4 | Orientation + section geometry |
-| **Total** | **219** | as of 2026-11-25 (1 skipped if external ToothFairy3 NIfTI is absent) |
+| `tests/test_static_attrs.py` | 4 | Static attribute audit (no dangling `self.*`, no silent `except: pass`) |
+| `tests/test_v32_preprint_and_arch.py` | 4 | Inline labels, custom overlays, coronal-offset re-anchoring, Pre-Print JSONL, jaw-wise odontogram + 5/6/7 expansion |
+| **Total** | **242** | Verified on 2026-11-25 (`0` failures, `0` skipped; `ruff check CBCTPlanner tests` clean) |
 
 Run: `python -m unittest discover -s tests`
 
-Headless Slicer harnesses (need VTK/Qt — last run 2026-11-25 on Windows Slicer 5.12.3; not re-run in headless Linux audit):
-`PythonSlicer.exe analysis/slicercbctplanner_1/verify_real_ct.py` (23/23) and
-`python analysis/mcp_slicer_check/verify_mcp_slicer.py` (11/11).
+Headless Slicer harnesses verified on Windows **3D Slicer 5.12.3** (2026-11-25):
+`"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" analysis/slicercbctplanner_1/verify_real_ct.py` (**27/27 PASS**) and
+`python analysis/mcp_slicer_check/verify_mcp_slicer.py` (**11/11 PASS**).
 
 ---
 
@@ -188,28 +184,28 @@ DICOM / NIfTI Volume
 
 ---
 
-## 6. Real-CT Verification Record (2026-11-24)
+## 6. Real-CT Verification Record (2026-11-25)
 
 Harness: `analysis/slicercbctplanner_1/verify_real_ct.py`, run with
 `"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe"` (Python 3.12.10, VTK 9.6.2, NumPy 2.4.6, SciPy 1.17.1).
-Data: `ToothFairy3S_0021_0000.nii.gz` + `ToothFairy3S_0021.nii.gz`, 370×370×169 @ 0.30 mm.
-**23/23 checks pass over 205 cross-sections** (1 mm arc sweep, mandible + maxilla), plus the tangential-section and
-agent round-trip checks added on 2026-11-25.
+Data: `ToothFairy3S_0021_0000.nii.gz` + `ToothFairy3S_0021_seg.nii.gz`, 370×370×169 @ 0.30 mm.
+**27/27 checks pass over 205 cross-sections** (0.5 mm arc sweep, mandible + maxilla), including edentulous `jawbone_crest`,
+shared Z-smoothness, missing posterior molar jawbone coverage + 5/6/7 span expansion, BL-12 single-cortex honesty,
+BL-14 notes strip + center inline labels, tangential section, and agent round-trip checks.
 
 | Rule Card | What was verified | Result |
 |---|---|---|
 | RC-05 | Anatomical inversion auto-correction (`canonicalize_to_ras` → `auto_fix_anatomical_orientation`) | This scan is S-I **and** L-R inverted in voxel space; both axes corrected, post-fix report clean |
-| RC-01.1 | Dentate `W0` bridges across the socket | 20/20 two-wall sections bridged, W0 5.1–10.2 mm (median 9.0), **12/12 molars ≥ 6 mm**, no sub-3 mm plate |
-| RC-01.2 | Tilted ridges keep `W0` on bone | 79/79 sites (|axis| ≥ 15°, max 31.8°), both rims on cortex |
-| RC-01.3/4 | `H` reaches the basal jaw end; stops before the IAN | 61/68 non-canal slices within 1.5 mm of the jaw border (median H 24.4 mm); 137/137 canal slices keep the caliper out of the canal (min lateral clearance 0.09 mm) |
-| RC-06 | `RaySum` pano + RGBA transparent isotropic pano/VR | 240×206 RaySum in 0.16–0.27 s; strip 814×560 RGBA `alpha_min=0`, tight-filled; 3D MIP 613×280 RGBA in 0.64–0.95 s |
-| RC-02 | 8×10 film export | PNG 2400×3000 @ 300 DPI, PDF `/MediaBox` 8.0×10.0 in, HTML `background: transparent` on pano/VR panels |
-| RC-08 | Tangential section + crest drop | `(101, 141)` at 0.30 mm/px, arc 20.0 mm, 57 % bone pixels, 125 crest samples, drop 11.1 mm, 0.03 s; RGBA render with transparent air |
-| RC-07 | Agent round trip with `MockTransport` | 49 KB payload from the real case, key only in `Authorization`, 1 comment parsed, 3 changes applied, 1 invalid op rejected, plan adapter called |
+| Edentulous Arch | Tooth labels zeroed on `ToothFairy3S_0021` (jaw labels only) | `fit_arch_from_label_mask(..., jaw="lower")` → `method="jawbone_crest"`, `accepted=True`, 11 pts, 153.4 mm, 4/5 valid cross-sections |
+| RC-01.1 | Dentate `W0` bridges across the socket + `BL-12` honesty | 18/18 two-wall sections bridged, W0 5.1–11.0 mm (median 9.0), **11/11 molars ≥ 6 mm**, 0 sub-3 mm W0 reported; 5 single-plate cuts `[34.0, 39.0, 39.5, 57.5, 58.0]` withheld with `H` kept |
+| RC-01.2 | Tilted ridges keep `W0` on bone | 79/79 sites (\|axis\| ≥ 15°, max 31.8°), both rims on cortex |
+| RC-01.3/4 | `H` reaches the basal jaw end; stops strictly before the IAN | 68/68 non-canal slices end inside the jaw (median H 22.9 mm, median gap 2.31 mm); 137/137 canal slices keep `H` clear of IAN (min lateral clearance 0.07 mm) |
+| RC-06 | `RaySum` pano + RGBA transparent isotropic pano/VR | 240×206 RaySum in 0.25 s; strip 814×560 RGBA `alpha_min=0`, tight-filled (`0.04 s`); 3D MIP 613×280 RGBA in `1.58 s` |
+| RC-02 / BL-14 | 8×10 film export + corner legend + BL-14 strip | PNG 2400×3000 @ 300 DPI (`742 KiB`), PDF `/MediaBox` 8.0×10.0 in (`382 KiB`), HTML with `background: transparent`, `W3/W5` legend moved off bone, center inline labels `['L', 'B', 'H:13.4 mm', 'W0 10.5 mm', 'W3/W5 key', 'IAN']`, and BL-14 `Clinical Notes & Review Flags:` strip |
+| RC-08 | Tangential section + crest drop | `(101, 141)` at 0.30 mm/px, arc 20.0 mm, 57 % bone pixels, 125 crest samples, drop 11.1 mm, `0.08 s`; RGBA render with transparent air; Step 4 widget capture verified live in Slicer 5.12.3 |
+| RC-07 | Agent round trip with `MockTransport` | 50,345-char payload from real case, key only in `Authorization`, 1 comment parsed, 3 changes applied, 1 invalid op rejected, plan adapter called |
 
-**Caveat:** the harness is headless — Slicer's Green view, 3D viewport and print-preview dialog were not rendered; only
-the functions they call were exercised. See `SESSION_NOTES_2026-11-24.md` §8 for the full table and caveats
-(incl. BL-12: 185/205 sections clip a single cortex, where `W0` is a plate rather than a bridge).
+**Caveat:** Pre-Print Editor mouse drag handlers (`canvasMouseMove`) and live remote LLM HTTP calls over the network are verified via headless unit tests and mock transports rather than live pointer synthesis in Qt; GUI screenshots of the live Slicer 5.12.3 Step 4 Tangential panel and Pre-Print Editor dialog were captured and inspected directly. See `SESSION_NOTES_2026-11-24.md` §15 for the full record.
 
 ---
 

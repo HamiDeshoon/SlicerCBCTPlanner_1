@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 import html
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -178,6 +179,8 @@ from CBCTPlannerLib.core.measurements import (
     MISCH_APPROXIMATE_DISCLAIMER,
     WITHHELD_NO_SEGMENTATION,
     MeasurementEngine,
+    coronal_offset_along_axis,
+    reanchor_h_start_to_w0,
     withheld_badge,
 )
 from CBCTPlannerLib.core.volume_loader import CBCTVolume
@@ -266,6 +269,10 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._parameterNode: Any = None
         self._updatingGUIFromParameterNode: bool = False
         self.toothButtons: Dict[int, Any] = {}
+        self._odontogramUpperWidgets: List[Any] = []
+        self._odontogramLowerWidgets: List[Any] = []
+        self._presentFdisInScan: Optional[Set[int]] = None
+        self.btnFullScreenGallery: Any = None
         self.selectedTeeth: Set[int] = set()
         self.activeToothFDI: Optional[int] = None
         self.treatmentPlanByFDI: Dict[int, Dict[str, Any]] = {}
@@ -1233,6 +1240,22 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         q3Label.setAlignment(qt.Qt.AlignRight)
         odontogramGrid.addWidget(q4Label, 3, 0, 1, 8)
         odontogramGrid.addWidget(q3Label, 3, 9, 1, 8)
+        self._odontogramUpperWidgets = [
+            self.btnSelectQ1,
+            self.btnSelectQ2,
+            q1Label,
+            q2Label,
+            sepTop,
+            *[self.toothButtons[f] for f in Q1_TEETH + Q2_TEETH],
+        ]
+        self._odontogramLowerWidgets = [
+            self.btnSelectQ3,
+            self.btnSelectQ4,
+            q3Label,
+            q4Label,
+            sepBot,
+            *[self.toothButtons[f] for f in Q3_TEETH + Q4_TEETH],
+        ]
         step5Layout.addWidget(odontogramWidget)
 
         # Status Label showing current selection
@@ -1316,14 +1339,22 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnGenerateFullGallery.setToolTip(
             "Generate the complete multi-slice cross-section gallery (15-27 slices) on demand."
         )
+        self.btnFullScreenGallery = qt.QPushButton("Full Screen")
+        self.btnFullScreenGallery.setToolTip(
+            "Open the active cross-section image full-screen with keyboard slice navigation."
+        )
         galleryTopRow.addWidget(self.inlineGalleryStatusLabel, 1)
         galleryTopRow.addWidget(self.btnRefreshInlineGallery)
         galleryTopRow.addWidget(self.btnGenerateFullGallery)
+        galleryTopRow.addWidget(self.btnFullScreenGallery)
         galleryOuter.addLayout(galleryTopRow)
 
         self.inlineGalleryActiveImageLabel = qt.QLabel("No active cross-section rendered yet.")
         self.inlineGalleryActiveImageLabel.setAlignment(qt.Qt.AlignCenter)
-        self.inlineGalleryActiveImageLabel.setMinimumHeight(280)
+        self.inlineGalleryActiveImageLabel.setMinimumHeight(240)
+        self.inlineGalleryActiveImageLabel.setCursor(qt.Qt.PointingHandCursor)
+        self.inlineGalleryActiveImageLabel.setToolTip("Click to open the active cross-section in Full Screen.")
+        self.inlineGalleryActiveImageLabel.mouseReleaseEvent = lambda _ev: self.onFullScreenGalleryClicked()
         self.inlineGalleryActiveImageLabel.setStyleSheet(
             "background-color: #020617; color: #94a3b8; border: 1px solid #1e293b; border-radius: 6px; padding: 6px;"
         )
@@ -1354,8 +1385,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.inlineGalleryScroll = qt.QScrollArea()
         self.inlineGalleryScroll.setWidgetResizable(True)
-        self.inlineGalleryScroll.setMinimumHeight(180)
-        self.inlineGalleryScroll.setMaximumHeight(225)
+        self.inlineGalleryScroll.setMinimumHeight(135)
+        self.inlineGalleryScroll.setMaximumHeight(175)
         self.inlineGalleryContainer = qt.QWidget()
         self.inlineGalleryGrid = qt.QGridLayout(self.inlineGalleryContainer)
         self.inlineGalleryGrid.setSpacing(6)
@@ -1757,6 +1788,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnOpenPrintDir.clicked.connect(self.onOpenPrintDirClicked)
         self.btnRefreshInlineGallery.clicked.connect(self.onRefreshInlineGalleryClicked)
         self.btnGenerateFullGallery.clicked.connect(self.onGenerateFullGalleryClicked)
+        self.btnFullScreenGallery.clicked.connect(self.onFullScreenGalleryClicked)
         self.btnGalleryPrev.clicked.connect(self.onGalleryPrevClicked)
         self.btnGalleryNext.clicked.connect(self.onGalleryNextClicked)
         self.btnRunNativeALI.clicked.connect(self.onRunNativeALIClicked)
@@ -1859,7 +1891,11 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onSceneStartClose(self, _caller: Any, _event: Any) -> None:
         self.selectedTeeth.clear()
         self.treatmentPlanByFDI.clear()
+        if hasattr(self, "_measurementOverridesByFDI") and isinstance(self._measurementOverridesByFDI, dict):
+            self._measurementOverridesByFDI.clear()
+        self._presentFdisInScan = None
         self._observedCurveNodeIDs.clear()
+        self._refreshOdontogramAvailability()
         self.setParameterNode(None)
 
     def onSceneEndClose(self, _caller: Any, _event: Any) -> None:
@@ -1963,6 +1999,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     btn.blockSignals(True)
                     btn.setChecked(fdi_num in self.selectedTeeth)
                     btn.blockSignals(False)
+
+            self._loadOverridesFromParameterNode()
+            self._refreshOdontogramAvailability()
 
             effective_jaw = "Shared" if arch_mode.startswith("Shared") else jaw
             curveNode = (
@@ -2137,6 +2176,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.updateGUIFromParameterNode()
             if self.selectedTeeth:
                 self.onRefreshAllSelectedTeeth()
+        self._refreshOdontogramAvailability()
 
     def _formatOrientationReport(self, report: Any) -> str:
         def state(value: Any) -> str:
@@ -2435,6 +2475,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.onExtractCanalsClicked()
         if hasattr(self, "onRefreshAllSelectedTeeth"):
             self.onRefreshAllSelectedTeeth()
+        self._refreshOdontogramAvailability()
         if hasattr(self, "globalStatusLabel"):
             self.globalStatusLabel.setText("Automated dental planning pipeline complete.")
 
@@ -2817,6 +2858,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             )
             self.step3Box.collapsed = False
             self.updateGUIFromParameterNode()
+            self._refreshOdontogramAvailability()
             self._syncCursorToViews()
             self.onGeneratePanoramicClicked()
             return
@@ -3145,34 +3187,179 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # ------------------------------------------------------------------
     def _syncSelectedTeethToParameterNode(self) -> None:
         if self._parameterNode is not None:
-            ordered = sort_teeth_anatomically(list(self.selectedTeeth))
+            ordered = _sort_teeth_anatomically(list(self.selectedTeeth))
             self._parameterNode.SetParameter("SelectedTeethFDI", ",".join(str(t) for t in ordered))
 
+    def _detectJawAndTeethAvailability(self) -> Tuple[bool, bool, Optional[Set[int]]]:
+        """Detect which jaws (`lower`/`upper`) and individual FDI teeth exist in the active scan."""
+        volNode = self.volumeSelector.currentNode() if getattr(self, "volumeSelector", None) else None
+        segNode = (
+            self.segmentationSelector.currentNode() if getattr(self, "segmentationSelector", None) else None
+        )
+        logic = getattr(self, "logic", None)
+        if segNode is not None and volNode is not None and logic is not None and hasattr(logic, "_extract_combined_label_mask"):
+            try:
+                mask, is_5class = logic._extract_combined_label_mask(volNode, segNode)
+            except Exception:
+                logger.debug("Mask availability probe skipped", exc_info=True)
+                mask, is_5class = None, False
+            if mask is not None and getattr(mask, "size", 0) > 0:
+                uniq_vals, uniq_cnts = np.unique(mask, return_counts=True)
+                counts = {int(v): int(c) for v, c in zip(uniq_vals, uniq_cnts) if int(v) != 0}
+                if is_5class:
+                    has_lower = counts.get(LOWER_JAW_ID, 0) >= 50 or counts.get(4, 0) >= 25
+                    has_upper = counts.get(UPPER_JAW_ID, 0) >= 50 or counts.get(3, 0) >= 25
+                    if has_lower or has_upper:
+                        return has_lower, has_upper, None
+                else:
+                    mand_present = {
+                        int(fdi)
+                        for fdi in (Q3_TEETH + Q4_TEETH)
+                        if counts.get(FDI_TO_TOOTH_ID.get(str(fdi), fdi), 0) >= 25
+                    }
+                    max_present = {
+                        int(fdi)
+                        for fdi in (Q1_TEETH + Q2_TEETH)
+                        if counts.get(FDI_TO_TOOTH_ID.get(str(fdi), fdi), 0) >= 25
+                    }
+                    has_lower = counts.get(LOWER_JAW_ID, 0) >= 50 or bool(mand_present)
+                    has_upper = counts.get(UPPER_JAW_ID, 0) >= 50 or bool(max_present)
+                    if has_lower or has_upper:
+                        return has_lower, has_upper, (mand_present | max_present)
+
+        if volNode is not None and logic is not None and hasattr(logic, "get_curve_node_for_jaw"):
+            pNode = getattr(self, "_parameterNode", None)
+            try:
+                low_c = logic.get_curve_node_for_jaw(volNode, "Lower", parameterNode=pNode)
+                up_c = logic.get_curve_node_for_jaw(volNode, "Upper", parameterNode=pNode)
+            except Exception:
+                logger.debug("Curve availability probe skipped", exc_info=True)
+                low_c, up_c = None, None
+            has_low_c = low_c is not None and low_c.GetNumberOfControlPoints() >= 4
+            has_up_c = up_c is not None and up_c.GetNumberOfControlPoints() >= 4
+            if has_low_c != has_up_c:
+                return has_low_c, has_up_c, None
+        return True, True, None
+
+    def _applyToothButtonStyle(self, btn: Any, fdi: int, checked: bool) -> None:
+        if btn is None:
+            return
+        present = getattr(self, "_presentFdisInScan", None)
+        is_missing = present is not None and int(fdi) not in present
+        if checked:
+            if is_missing:
+                btn.setStyleSheet(
+                    "font-weight: bold; background-color: #0284c7; color: white; border: 1.5px dashed #f59e0b;"
+                )
+            else:
+                btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white;")
+        else:
+            if is_missing:
+                btn.setStyleSheet(
+                    "border: 1px dashed #64748b; color: #94a3b8; background-color: #0f172a;"
+                )
+            else:
+                btn.setStyleSheet("")
+        if hasattr(btn, "setToolTip"):
+            if is_missing:
+                btn.setToolTip(
+                    f"Tooth #{fdi} (MISSING in scan): Click to measure #{fdi} and all contiguous missing sites."
+                )
+            else:
+                btn.setToolTip(
+                    f"Tooth #{fdi}: Plain Click = Jump & measure #{fdi}; Ctrl+Click = Toggle in Treatment Plan."
+                )
+
+    def _refreshOdontogramAvailability(self) -> None:
+        """Show only jaws present in the scan and mark missing vs present FDI buttons cleanly."""
+        has_lower, has_upper, present_fdis = self._detectJawAndTeethAvailability()
+        if not has_lower and not has_upper:
+            has_lower, has_upper = True, True
+        self._presentFdisInScan = present_fdis
+
+        for w in getattr(self, "_odontogramUpperWidgets", []) or ():
+            if w is not None and hasattr(w, "setVisible"):
+                w.setVisible(bool(has_upper))
+        for w in getattr(self, "_odontogramLowerWidgets", []) or ():
+            if w is not None and hasattr(w, "setVisible"):
+                w.setVisible(bool(has_lower))
+
+        stale = [
+            fdi
+            for fdi in list(getattr(self, "selectedTeeth", set()))
+            if (is_mandibular_fdi(fdi) and not has_lower) or (not is_mandibular_fdi(fdi) and not has_upper)
+        ]
+        if stale:
+            for fdi in stale:
+                self.selectedTeeth.discard(fdi)
+                if isinstance(getattr(self, "treatmentPlanByFDI", None), dict):
+                    self.treatmentPlanByFDI.pop(fdi, None)
+            if getattr(self, "activeToothFDI", None) in stale:
+                self.activeToothFDI = next(iter(self.selectedTeeth), None)
+            self._syncSelectedTeethToParameterNode()
+            self._updateSelectionStatusLabel()
+            if hasattr(self, "_refreshPlanTableFromCache"):
+                self._refreshPlanTableFromCache()
+
+        arch_mode = getattr(self, "archModeCombo", None)
+        jaw_combo = getattr(self, "activeJawCombo", None)
+        if jaw_combo is not None and (arch_mode is None or not str(arch_mode.currentText).startswith("Shared")):
+            target = "Lower" if (has_lower and not has_upper) else ("Upper" if (has_upper and not has_lower) else None)
+            if target and hasattr(jaw_combo, "currentText") and jaw_combo.currentText != target:
+                jaw_combo.setCurrentText(target)
+
+        for fdi_num, btn in (getattr(self, "toothButtons", {}) or {}).items():
+            self._applyToothButtonStyle(btn, int(fdi_num), int(fdi_num) in self.selectedTeeth)
+
+    def _expandContiguousMissingFdis(self, fdis: Sequence[int]) -> List[int]:
+        """Expand any missing tooth request to include all contiguous missing sites on the same quadrant."""
+        cleaned = _sort_teeth_anatomically([int(f) for f in fdis])
+        if not cleaned:
+            return []
+        engine = self._resolveMeasurementEngine()
+        if engine is not None and hasattr(engine, "expand_missing_edentulous_span"):
+            try:
+                expanded, _missing = engine.expand_missing_edentulous_span(cleaned)
+                if expanded:
+                    return _sort_teeth_anatomically(expanded)
+            except Exception:
+                logger.debug("Missing span expansion failed cleanly", exc_info=True)
+        return cleaned
+
     def toggleToothPlanMembership(self, fdi: int) -> None:
-        """B17: Explicitly toggle a tooth's membership in `selectedTeeth` and update button & table."""
+        """B17: Explicitly toggle a tooth's membership (expanding contiguous missing sites when added)."""
         volNode = self.volumeSelector.currentNode()
         segNode = self.segmentationSelector.currentNode()
         fdi = int(fdi)
         if fdi in self.selectedTeeth:
             self.selectedTeeth.discard(fdi)
             self.treatmentPlanByFDI.pop(fdi, None)
+            changed_fdis = [fdi]
         else:
-            self.selectedTeeth.add(fdi)
+            changed_fdis = self._expandContiguousMissingFdis([fdi])
+            for target_fdi in changed_fdis:
+                self.selectedTeeth.add(target_fdi)
             if self.logic is not None:
-                self.treatmentPlanByFDI[fdi] = self.logic.analyze_single_tooth(
-                    fdi, volNode, segmentationNode=segNode
-                )
-        btn = self.toothButtons.get(fdi)
-        if btn is not None:
-            btn.blockSignals(True)
-            btn.setChecked(fdi in self.selectedTeeth)
-            btn.blockSignals(False)
+                if len(changed_fdis) > 1 and hasattr(self.logic, "analyze_selected_teeth"):
+                    for r in self.logic.analyze_selected_teeth(changed_fdis, volNode, segmentationNode=segNode):
+                        self.treatmentPlanByFDI[int(r["fdi"])] = r
+                else:
+                    self.treatmentPlanByFDI[fdi] = self.logic.analyze_single_tooth(
+                        fdi, volNode, segmentationNode=segNode
+                    )
+        for target_fdi in changed_fdis:
+            btn = self.toothButtons.get(target_fdi)
+            if btn is not None:
+                btn.blockSignals(True)
+                btn.setChecked(target_fdi in self.selectedTeeth)
+                self._applyToothButtonStyle(btn, target_fdi, target_fdi in self.selectedTeeth)
+                btn.blockSignals(False)
         self._syncSelectedTeethToParameterNode()
         self._updateSelectionStatusLabel()
         self._refreshPlanTableFromCache()
 
     def onOdontogramToothClicked(self, fdi: int, _is_checked: bool) -> None:
-        """B17: Plain click = jump cursor ONLY (never alters plan membership); Ctrl+click toggles plan membership."""
+        """B17: Jump to `fdi` and measure it (auto-expanding contiguous missing sites like 5/6/7); Ctrl+Click toggles."""
         volNode = self.volumeSelector.currentNode()
         if not volNode or not self.logic:
             return
@@ -3196,21 +3383,33 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if ctrl_held:
             self.toggleToothPlanMembership(fdi)
         else:
-            self.selectedTeeth.add(int(fdi))
+            segNode = self.segmentationSelector.currentNode()
+            target_fdis = self._expandContiguousMissingFdis([int(fdi)])
+            for target_fdi in target_fdis:
+                self.selectedTeeth.add(int(target_fdi))
             if self.logic is not None:
-                self.treatmentPlanByFDI[int(fdi)] = self.logic.analyze_single_tooth(
-                    int(fdi), volNode, segmentationNode=self.segmentationSelector.currentNode()
-                )
-            btn = self.toothButtons.get(int(fdi))
-            if btn is not None:
-                btn.blockSignals(True)
-                btn.setChecked(True)
-                btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white;")
-                btn.blockSignals(False)
+                if len(target_fdis) > 1 and hasattr(self.logic, "analyze_selected_teeth"):
+                    for r in self.logic.analyze_selected_teeth(target_fdis, volNode, segmentationNode=segNode):
+                        self.treatmentPlanByFDI[int(r["fdi"])] = r
+                else:
+                    self.treatmentPlanByFDI[int(fdi)] = self.logic.analyze_single_tooth(
+                        int(fdi), volNode, segmentationNode=segNode
+                    )
+            for target_fdi in target_fdis:
+                btn = self.toothButtons.get(int(target_fdi))
+                if btn is not None:
+                    btn.blockSignals(True)
+                    btn.setChecked(True)
+                    self._applyToothButtonStyle(btn, int(target_fdi), True)
+                    btn.blockSignals(False)
+            self._syncSelectedTeethToParameterNode()
             self._updateSelectionStatusLabel()
             self._refreshPlanTableFromCache()
             self._updateActiveSiteClinicalCallout(int(fdi))
-            self.onRefreshInlineGalleryClicked()
+            if len(target_fdis) > 1:
+                self._renderGalleryItems(full_gallery=True, fdis_override=target_fdis)
+            else:
+                self.onRefreshInlineGalleryClicked()
 
     def onToggleActiveToothInPlanClicked(self) -> None:
         fdi = self.activeToothFDI or 46
@@ -3248,9 +3447,10 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onClearPlanClicked(self) -> None:
         self.selectedTeeth.clear()
         self.treatmentPlanByFDI.clear()
-        for btn in self.toothButtons.values():
+        for fdi_num, btn in self.toothButtons.items():
             btn.blockSignals(True)
             btn.setChecked(False)
+            self._applyToothButtonStyle(btn, int(fdi_num), False)
             btn.blockSignals(False)
         self._syncSelectedTeethToParameterNode()
         self._updateSelectionStatusLabel()
@@ -3460,13 +3660,13 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if btn:
                 btn.blockSignals(True)
                 btn.setChecked(True)
-                btn.setStyleSheet("font-weight: bold; background-color: #0284c7; color: white;")
+                self._applyToothButtonStyle(btn, int(fdi), True)
                 btn.blockSignals(False)
         for fdi, btn in self.toothButtons.items():
             if fdi not in quad_teeth:
                 btn.blockSignals(True)
                 btn.setChecked(False)
-                btn.setStyleSheet("")
+                self._applyToothButtonStyle(btn, int(fdi), False)
                 btn.blockSignals(False)
         self.activeToothFDI = quad_teeth[len(quad_teeth) // 2]
         self._updateSelectionStatusLabel()
@@ -3478,10 +3678,10 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Clear all active tooth selections."""
         self.selectedTeeth.clear()
         self.activeToothFDI = None
-        for btn in self.toothButtons.values():
+        for fdi, btn in self.toothButtons.items():
             btn.blockSignals(True)
             btn.setChecked(False)
-            btn.setStyleSheet("")
+            self._applyToothButtonStyle(btn, int(fdi), False)
             btn.blockSignals(False)
         self._updateSelectionStatusLabel()
         self._refreshPlanTableFromCache()
@@ -3707,6 +3907,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 include_metadata=include_meta,
                 grayscale=True,
                 measurement_overrides=getattr(self, "_measurementOverridesByFDI", None),
+                annotation_store=getattr(self, "annotationStore", None),
             )
         except Exception:
             logger.exception("8x10 print layout generation failed")
@@ -3728,6 +3929,51 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if slicer:
             slicer.util.showStatusMessage(f"Generated 8×10″ Print Layout: {pdf_file}", 5000)
 
+    def _resolveMeasurementEngine(self) -> Optional[Any]:
+        """Return active MeasurementEngine (cached or built from current selectors), or None."""
+        logic = getattr(self, "logic", None)
+        if logic is None:
+            return None
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if volNode is not None and hasattr(logic, "_get_or_build_measurement_engine"):
+            try:
+                eng = logic._get_or_build_measurement_engine(volNode, segNode)
+                if eng is not None:
+                    return eng
+            except Exception:
+                logger.debug("Could not build MeasurementEngine for pre-print dialog", exc_info=True)
+        return getattr(logic, "_cached_engine", None)
+
+    @staticmethod
+    def _fetchSiteMeasAndCs(meas_engine: Any, fdi: int) -> Tuple[Optional[Any], Optional[Any]]:
+        """Retrieve `(ImplantSiteMeasurement, CrossSectionData)` for `fdi`, with arc-sweep fallback."""
+        if meas_engine is None:
+            return None, None
+        fdi_str = str(int(fdi))
+        meas_obj: Optional[Any] = None
+        cs_obj: Optional[Any] = None
+        try:
+            meas_obj = meas_engine.measure_implant_site(fdi_str)
+            cs_obj = (getattr(meas_engine, "last_cross_sections", None) or {}).get(fdi_str)
+        except Exception:
+            logger.debug("Pre-print editor measure_implant_site failed for FDI %s", fdi_str, exc_info=True)
+        if cs_obj is None and hasattr(meas_engine, "get_site_center_ras") and hasattr(meas_engine, "measure_at_arc_mm"):
+            try:
+                center = meas_engine.get_site_center_ras(fdi_str)
+                arch = meas_engine._arch_for_fdi(fdi_str) if hasattr(meas_engine, "_arch_for_fdi") else None
+                if center is not None and arch is not None:
+                    t_param, _ = arch.find_closest_parameter(center)
+                    jaw_key = "lower" if is_mandibular_fdi(int(fdi)) else "upper"
+                    m2, cs_obj = meas_engine.measure_at_arc_mm(
+                        jaw_key, float(t_param) * float(arch.total_arc_length), fdi_hint=fdi_str
+                    )
+                    if meas_obj is None:
+                        meas_obj = m2
+            except Exception:
+                logger.debug("Pre-print fallback arc measurement failed for FDI %s", fdi_str, exc_info=True)
+        return meas_obj, cs_obj
+
     def _buildPrePrintReviewRows(self, selected_fdis: Sequence[int]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Build Qt-free pre-print review rows and cross-slice discrepancy flags for `selected_fdis`."""
         from CBCTPlannerLib.core.agent_review import detect_slice_discrepancies
@@ -3735,6 +3981,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         overrides = getattr(self, "_measurementOverridesByFDI", {}) or {}
         plan_map = getattr(self, "treatmentPlanByFDI", {}) or {}
         store = getattr(self, "annotationStore", None)
+        meas_engine = self._resolveMeasurementEngine()
 
         def _num(val: Any) -> Optional[float]:
             try:
@@ -3751,6 +3998,24 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             w0_val = ov.get("w0_mm") if "w0_mm" in ov else _num(row.get("w_crest_mm"))
             sinus_val = _num(row.get("sinus_clearance_mm"))
             notes: List[str] = []
+
+            # Auto-populate from MeasurementEngine when Step 5 plan rows weren't generated yet.
+            if (not row or h_val is None or w0_val is None) and meas_engine is not None:
+                try:
+                    site = meas_engine.measure_implant_site(str(fdi_i))
+                except Exception:
+                    site = None
+                if site is not None:
+                    if h_val is None and "h_mm" not in ov:
+                        h_val = getattr(site, "bone_height_mm", None)
+                    if w0_val is None and "w0_mm" not in ov:
+                        w0_val = getattr(site, "crest_width_mm", None)
+                    if sinus_val is None and not is_mandibular_fdi(fdi_i):
+                        sinus_val = getattr(site, "distance_to_vital_structure_mm", None)
+                    w_reason = getattr(site, "withheld_reason", None)
+                    if w_reason:
+                        notes.append(f"[withheld] {w_reason}")
+
             if store is not None:
                 for ann in store.list(fdi=fdi_i):
                     if ann.kind in ("flag", "ai_comment"):
@@ -3796,43 +4061,39 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             root.addWidget(banner)
 
         # Prepare per-site editable state (cached cross-section + overrides + custom_overlays)
-        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
-        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
-        meas_engine = None
-        if self.logic is not None and volNode is not None:
-            try:
-                meas_engine = self.logic._get_or_build_measurement_engine(volNode, segNode)
-            except Exception:
-                meas_engine = None
+        meas_engine = self._resolveMeasurementEngine()
 
         overrides_init = getattr(self, "_measurementOverridesByFDI", {}) or {}
         site_state: Dict[int, Dict[str, Any]] = {}
         for r in rows:
             fdi = int(r["fdi"])
             ov = dict(overrides_init.get(fdi, {}))
-            cs_obj, meas_obj = None, None
-            if meas_engine is not None:
-                try:
-                    meas_obj = meas_engine.measure_implant_site(str(fdi))
-                    cs_obj = getattr(meas_engine, "last_cross_sections", {}).get(str(fdi))
-                except Exception:
-                    logger.debug("Pre-print editor could not pre-measure FDI %s", fdi, exc_info=True)
-            h_start = ov.get("h_start_uv") or (getattr(cs_obj, "crest_uv", None) if cs_obj is not None else (0.0, 5.0))
-            h_end = ov.get("h_end_uv") or (getattr(cs_obj, "basal_uv", None) if cs_obj is not None else (0.0, -5.0))
+            meas_obj, cs_obj = self._fetchSiteMeasAndCs(meas_engine, fdi)
+            if r["h_mm"] is None and meas_obj is not None and "h_mm" not in ov:
+                r["h_mm"] = getattr(meas_obj, "bone_height_mm", None)
+            if r["w0_mm"] is None and meas_obj is not None and "w0_mm" not in ov:
+                r["w0_mm"] = getattr(meas_obj, "crest_width_mm", None)
+            h_start = ov.get("h_start_uv") or (getattr(cs_obj, "crest_uv", None) if cs_obj is not None else None) or (0.0, 5.0)
+            h_end = ov.get("h_end_uv") or (getattr(cs_obj, "basal_uv", None) if cs_obj is not None else None) or (0.0, -5.0)
             w_eps = getattr(cs_obj, "width_endpoints_uv", {}) if cs_obj is not None else {}
             w0_pair = w_eps.get(0.0) if isinstance(w_eps, dict) else None
             w0_l = ov.get("w0_start_uv") or (w0_pair[0] if w0_pair else (-3.5, 4.0))
             w0_r = ov.get("w0_end_uv") or (w0_pair[1] if w0_pair else (3.5, 4.0))
+            h_start_t = tuple(float(v) for v in h_start)
+            h_end_t = tuple(float(v) for v in h_end)
+            w0_l_t = tuple(float(v) for v in w0_l)
+            w0_r_t = tuple(float(v) for v in w0_r)
             site_state[fdi] = {
                 "fdi": fdi,
                 "cs": cs_obj,
                 "meas": meas_obj,
                 "h_mm": r["h_mm"],
                 "w0_mm": r["w0_mm"],
-                "h_start_uv": tuple(float(v) for v in h_start) if h_start else (0.0, 5.0),
-                "h_end_uv": tuple(float(v) for v in h_end) if h_end else (0.0, -5.0),
-                "w0_start_uv": tuple(float(v) for v in w0_l) if w0_l else (-3.5, 4.0),
-                "w0_end_uv": tuple(float(v) for v in w0_r) if w0_r else (3.5, 4.0),
+                "h_start_uv": h_start_t,
+                "h_end_uv": h_end_t,
+                "w0_start_uv": w0_l_t,
+                "w0_end_uv": w0_r_t,
+                "_h_coronal_offset_mm": coronal_offset_along_axis(h_start_t, h_end_t, w0_l_t, w0_r_t),
                 "custom_overlays": [dict(x) for x in (ov.get("custom_overlays") or [])],
                 "notes": list(r["notes"]),
             }
@@ -3997,12 +4258,22 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             fdi = int(rows[r_idx]["fdi"])
             st = site_state[fdi]
             st[key] = _px_to_uv(float(pos_scene.x()), float(pos_scene.y()))
-            # Recompute H / W0 mm live and keep H start aligned when W0 moves
+            # Recompute H / W0 mm live and keep H passing through W0's midpoint preserving coronal offset.
             if key in ("w0_start_uv", "w0_end_uv"):
                 w0_l, w0_r = st["w0_start_uv"], st["w0_end_uv"]
                 st["w0_mm"] = round(math.hypot(w0_r[0] - w0_l[0], w0_r[1] - w0_l[1]), 2)
-                st["h_start_uv"] = (0.5 * (w0_l[0] + w0_r[0]), 0.5 * (w0_l[1] + w0_r[1]))
+                st["h_start_uv"] = reanchor_h_start_to_w0(
+                    st["h_start_uv"],
+                    st["h_end_uv"],
+                    w0_l,
+                    w0_r,
+                    coronal_offset_mm=st.get("_h_coronal_offset_mm"),
+                )
                 tbl.item(r_idx, 2).setText(f"{st['w0_mm']:.1f}")
+            elif key in ("h_start_uv", "h_end_uv"):
+                st["_h_coronal_offset_mm"] = coronal_offset_along_axis(
+                    st["h_start_uv"], st["h_end_uv"], st["w0_start_uv"], st["w0_end_uv"]
+                )
             h0, h1 = st["h_start_uv"], st["h_end_uv"]
             st["h_mm"] = round(math.hypot(h1[0] - h0[0], h1[1] - h0[1]), 2)
             tbl.item(r_idx, 1).setText(f"{st['h_mm']:.1f}")
@@ -4062,10 +4333,13 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         choice = {"action": "cancel"}
         btn_row = qt.QHBoxLayout()
         btn_agent = qt.QPushButton("Review with Agent")
-        btn_print = qt.QPushButton("Apply Edits & Print")
+        btn_export_kp = qt.QPushButton("Export corrected keypoints (.jsonl)")
+        btn_export_kp.setToolTip("Export corrected H/W0 keypoints and overlays as JSONL for ML training.")
+        btn_print = qt.QPushButton("Apply Edits && Print")
         btn_cancel = qt.QPushButton("Cancel")
 
-        def _commit_and_print() -> None:
+        def _collect_state_edits() -> Dict[int, Dict[str, Any]]:
+            out_edits: Dict[int, Dict[str, Any]] = {}
             for idx, r in enumerate(rows):
                 fdi = int(r["fdi"])
                 st = site_state[fdi]
@@ -4074,7 +4348,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     "h_end_uv": st["h_end_uv"],
                     "w0_start_uv": st["w0_start_uv"],
                     "w0_end_uv": st["w0_end_uv"],
-                    "custom_overlays": st["custom_overlays"],
+                    "custom_overlays": [dict(x) for x in st["custom_overlays"]],
                 }
                 for col, key in ((1, "h_mm"), (2, "w0_mm")):
                     txt = str(tbl.item(idx, col).text() or "").strip()
@@ -4085,18 +4359,49 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                                 edits[key] = val
                         except ValueError:
                             pass
+                out_edits[fdi] = edits
+            return out_edits
+
+        def _export_keypoints() -> None:
+            start_dir = ""
+            if hasattr(self, "printOutputDirEdit") and self.printOutputDirEdit is not None:
+                start_dir = str(self.printOutputDirEdit.text or "").strip()
+            default_name = (
+                str(Path(start_dir) / "cbct_corrected_keypoints.jsonl")
+                if start_dir
+                else "cbct_corrected_keypoints.jsonl"
+            )
+            chosen = qt.QFileDialog.getSaveFileName(
+                dlg, "Export corrected keypoints (.jsonl)", default_name, "JSONL (*.jsonl)"
+            )
+            if isinstance(chosen, (tuple, list)):
+                chosen = chosen[0] if chosen else ""
+            if not chosen:
+                return
+            edits_map = _collect_state_edits()
+            jsonl_text = self._serialize_corrected_keypoints_jsonl(edits_map)
+            Path(chosen).parent.mkdir(parents=True, exist_ok=True)
+            Path(chosen).write_text(jsonl_text, encoding="utf-8")
+            canvas_hint.setText(f"Exported {len(edits_map)} corrected keypoint record(s) to {chosen}")
+
+        def _commit_and_print() -> None:
+            for fdi, edits in _collect_state_edits().items():
                 self._apply_agent_measurement_edit(fdi, edits)
             choice["action"] = "print"
             dlg.accept()
 
         def _send_agent() -> None:
+            for fdi, edits in _collect_state_edits().items():
+                self._apply_agent_measurement_edit(fdi, edits)
             choice["action"] = "agent"
             dlg.accept()
 
         btn_agent.clicked.connect(_send_agent)
+        btn_export_kp.clicked.connect(_export_keypoints)
         btn_print.clicked.connect(_commit_and_print)
         btn_cancel.clicked.connect(dlg.reject)
         btn_row.addWidget(btn_agent)
+        btn_row.addWidget(btn_export_kp)
         btn_row.addStretch(1)
         btn_row.addWidget(btn_cancel)
         btn_row.addWidget(btn_print)
@@ -4374,12 +4679,14 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.inlineGalleryStaleLabel.setText(f"Gallery may be stale ({reason}). Click Refresh to update.")
             self.inlineGalleryStaleLabel.setVisible(True)
 
-    def _renderGalleryItems(self, *, full_gallery: bool) -> None:
+    def _renderGalleryItems(
+        self, *, full_gallery: bool, fdis_override: Optional[Sequence[int]] = None
+    ) -> None:
         volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
         segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
         if not volNode or not self.logic:
             return
-        selected = _sort_teeth_anatomically(list(self.selectedTeeth))
+        selected = _sort_teeth_anatomically(list(fdis_override if fdis_override is not None else self.selectedTeeth))
         fdi = self.activeToothFDI or (selected[0] if selected else 46)
         jaw_key = "Lower" if is_mandibular_fdi(fdi) else "Upper"
         curve = self.logic.get_curve_node_for_jaw(volNode, jaw_key, parameterNode=self._parameterNode)
@@ -4410,6 +4717,111 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         )
         self._populateInlineMeasuredGallery(series, full_gallery=full_gallery)
         self._updateActiveSiteClinicalCallout(fdi)
+
+    def onFullScreenGalleryClicked(self) -> None:
+        """Open a crisp full-screen viewer for the measured cross-section slices with Prev/Next keys."""
+        if qt is None:
+            return
+        items = list(self._galleryState.items or [])
+        if not items:
+            self.onRefreshInlineGalleryClicked()
+            items = list(self._galleryState.items or [])
+        if not items:
+            return
+
+        import base64
+
+        dlg = qt.QDialog(self.parent)
+        dlg.setWindowTitle("CBCT Cross-Section Full Screen Viewer")
+        dlg.setStyleSheet("background-color: #020409; color: #f8fafc;")
+        lay = qt.QVBoxLayout(dlg)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(8)
+
+        img_lbl = qt.QLabel()
+        img_lbl.setAlignment(qt.Qt.AlignCenter)
+        img_lbl.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Expanding)
+        lay.addWidget(img_lbl, 1)
+
+        cap_lbl = qt.QLabel("")
+        cap_lbl.setAlignment(qt.Qt.AlignCenter)
+        cap_lbl.setStyleSheet("font-size: 13px; color: #e2e8f0; padding: 4px;")
+        lay.addWidget(cap_lbl)
+
+        btn_row = qt.QHBoxLayout()
+        btn_prev = qt.QPushButton("Previous")
+        idx_lbl = qt.QLabel("")
+        idx_lbl.setAlignment(qt.Qt.AlignCenter)
+        btn_next = qt.QPushButton("Next")
+        btn_close = qt.QPushButton("Exit Full Screen (Esc)")
+        btn_row.addWidget(btn_prev)
+        btn_row.addWidget(idx_lbl, 1)
+        btn_row.addWidget(btn_next)
+        btn_row.addWidget(btn_close)
+        lay.addLayout(btn_row)
+
+        def _update_fs() -> None:
+            cur = self._galleryState.active_item
+            if cur is None:
+                return
+            if isinstance(cur, dict):
+                uri = cur.get("image_data_uri", "")
+                off = float(cur.get("offset_mm", 0.0))
+                fdi_val = cur.get("fdi")
+                h_txt = str(cur.get("height_mm", "--")).replace("N/A", "--")
+                w0_txt = str(cur.get("w_crest_mm", "--")).replace("N/A", "--")
+                w3_txt = str(cur.get("w_3mm", "--")).replace("N/A", "--")
+                w5_txt = str(cur.get("w_5mm", "--")).replace("N/A", "--")
+                ian_v = cur.get("nerve_dist_mm")
+                ian_txt = f"{float(ian_v):.1f}" if ian_v is not None else "--"
+                reason = cur.get("withheld_reason")
+            else:
+                uri = getattr(cur, "image_data_uri", "")
+                off = float(getattr(cur, "offset_mm", 0.0))
+                fdi_val = getattr(cur, "fdi", None)
+                h_v = getattr(cur, "height_mm", None)
+                w0_v = getattr(cur, "crest_width_mm", None)
+                w3_v = getattr(cur, "width_3mm", None)
+                w5_v = getattr(cur, "width_5mm", None)
+                ian_v = getattr(cur, "nerve_dist_mm", None)
+                h_txt = f"{h_v:.1f}" if h_v is not None else "--"
+                w0_txt = f"{w0_v:.1f}" if w0_v is not None else "--"
+                w3_txt = f"{w3_v:.1f}" if w3_v is not None else "--"
+                w5_txt = f"{w5_v:.1f}" if w5_v is not None else "--"
+                ian_txt = f"{ian_v:.1f}" if ian_v is not None else "--"
+                reason = getattr(cur, "withheld_reason", None)
+            screen_geo = qt.QApplication.desktop().screenGeometry(dlg) if hasattr(qt.QApplication, "desktop") else None
+            max_w = int(screen_geo.width() * 0.94) if screen_geo else 1600
+            max_h = int(screen_geo.height() * 0.84) if screen_geo else 920
+            if uri and "," in uri:
+                pm = qt.QPixmap()
+                if pm.loadFromData(base64.b64decode(uri.split(",", 1)[1])):
+                    img_lbl.setPixmap(pm.scaled(max_w, max_h, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation))
+            fdi_tag = f"FDI #{fdi_val} | " if fdi_val is not None else ""
+            note_part = f" | Note: {reason}" if reason else ""
+            cap_lbl.setText(
+                f"<b>{fdi_tag}Slice {self._galleryState.active_index + 1} ({off:+.1f} mm)</b> — "
+                f"H: {h_txt} mm | W0: {w0_txt} mm | W3: {w3_txt} mm | W5: {w5_txt} mm | Vital: {ian_txt} mm{note_part}"
+            )
+            idx_lbl.setText(f"Slice {self._galleryState.active_index + 1} / {len(self._galleryState.items)}")
+            btn_prev.setEnabled(self._galleryState.can_prev)
+            btn_next.setEnabled(self._galleryState.can_next)
+            self._renderActiveGallerySlice()
+
+        def _step_fs(delta: int) -> None:
+            self._galleryState.step(delta)
+            _update_fs()
+
+        btn_prev.clicked.connect(lambda: _step_fs(-1))
+        btn_next.clicked.connect(lambda: _step_fs(1))
+        btn_close.clicked.connect(dlg.accept)
+        qt.QShortcut(qt.QKeySequence(qt.Qt.Key_Left), dlg).activated.connect(lambda: _step_fs(-1))
+        qt.QShortcut(qt.QKeySequence(qt.Qt.Key_Right), dlg).activated.connect(lambda: _step_fs(1))
+        qt.QShortcut(qt.QKeySequence(qt.Qt.Key_Escape), dlg).activated.connect(dlg.accept)
+
+        _update_fs()
+        dlg.showFullScreen()
+        dlg.exec_()
 
     def onRefreshInlineGalleryClicked(self) -> None:
         """Render the single active measured cross-section by default (or refresh full gallery if already loaded)."""
@@ -4529,7 +4941,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         import base64
 
         shown = list(slices_items)
-        thumb_w, thumb_h = (120, 155)
+        thumb_w, thumb_h = (84, 108)
         for idx, item in enumerate(shown):
             r, c = 0, idx
             if isinstance(item, dict):
@@ -4565,8 +4977,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             card = qt.QFrame()
             card.setFrameShape(qt.QFrame.StyledPanel)
             border_css = "2px solid #38bdf8" if is_center else "1px solid #1e293b"
-            card.setStyleSheet(f"background-color: #020617; border: {border_css}; border-radius: 5px;")
-            tip_parts = [f"Slice {idx + 1} ({off:+.1f} mm)"]
+            card.setStyleSheet(f"background-color: #020617; border: {border_css}; border-radius: 4px;")
+            tip_parts = [f"Slice {idx + 1} ({off:+.1f} mm) — Click to select, Double-Click for Full Screen"]
             if fdi_val is not None:
                 tip_parts[0] = f"FDI #{fdi_val} - " + tip_parts[0]
             tip_parts.append(f"H: {h_txt} mm | W0: {w0_txt} mm | W3: {w3_txt} mm | W5: {w5_txt} mm")
@@ -4577,18 +4989,24 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if reason:
                 tip_parts.append(f"Note: {reason}")
             card.setToolTip("\n".join(tip_parts))
+            card.setCursor(qt.Qt.PointingHandCursor)
+            card.mouseReleaseEvent = lambda _ev, s_i=idx: self._selectGallerySlice(s_i)
+            card.mouseDoubleClickEvent = lambda _ev, s_i=idx: (
+                self._selectGallerySlice(s_i),
+                self.onFullScreenGalleryClicked(),
+            )
 
             c_lay = qt.QVBoxLayout(card)
-            c_lay.setContentsMargins(4, 4, 4, 4)
-            c_lay.setSpacing(2)
+            c_lay.setContentsMargins(2, 2, 2, 2)
+            c_lay.setSpacing(1)
 
             fdi_prefix = f"#{fdi_val} " if fdi_val is not None else ""
-            hdr = qt.QLabel(f"<b>{fdi_prefix}S{idx + 1}</b> ({off:+.1f} mm)")
+            hdr = qt.QLabel(f"<b>{fdi_prefix}S{idx + 1}</b> ({off:+.1f})")
             hdr.setAlignment(qt.Qt.AlignCenter)
             hdr.setStyleSheet(
-                "color: #ffffff; background-color: #0c4a6e; border-radius: 3px; padding: 1px 3px; font-size: 10px;"
+                "color: #ffffff; background-color: #0c4a6e; border-radius: 2px; padding: 1px 2px; font-size: 9px;"
                 if is_center
-                else "color: #38bdf8; font-size: 10px;"
+                else "color: #38bdf8; font-size: 9px;"
             )
             c_lay.addWidget(hdr)
 
@@ -4604,15 +5022,12 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             img_lbl.setAlignment(qt.Qt.AlignCenter)
             c_lay.addWidget(img_lbl)
 
-            ian_part = f" | <span style='color:#f87171'>IAN:{ian_txt}</span>" if ian_txt is not None else ""
             ftr = qt.QLabel(
                 f"<span style='color:#4ade80'><b>H:{h_txt}</b></span> | "
-                f"<span style='color:#22d3ee'><b>W0:{w0_txt}</b></span><br/>"
-                f"<span style='color:#fbbf24'>W3:{w3_txt}</span> | "
-                f"<span style='color:#fb923c'>W5:{w5_txt}</span>{ian_part}"
+                f"<span style='color:#22d3ee'><b>W0:{w0_txt}</b></span>"
             )
             ftr.setAlignment(qt.Qt.AlignCenter)
-            ftr.setStyleSheet("color: #e2e8f0; font-size: 9.5px;")
+            ftr.setStyleSheet("color: #e2e8f0; font-size: 8.5px;")
             c_lay.addWidget(ftr)
 
             badge = withheld_badge(reason)
@@ -5244,16 +5659,111 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.toggleToothPlanMembership(fdi)
         return True
 
+    @staticmethod
+    def _serialize_corrected_keypoints_jsonl(overrides_by_fdi: Dict[int, Dict[str, Any]]) -> str:
+        """Serialise corrected H/W0 keypoints and custom overlays as newline-delimited JSON."""
+        ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        lines: List[str] = []
+        for fdi in sorted(overrides_by_fdi):
+            ov = overrides_by_fdi[fdi] or {}
+            record: Dict[str, Any] = {"fdi": int(fdi), "timestamp": ts}
+            for key in ("h_mm", "w0_mm"):
+                if ov.get(key) is not None:
+                    record[key] = round(float(ov[key]), 3)
+            for key in ("h_start_uv", "h_end_uv", "w0_start_uv", "w0_end_uv"):
+                pt = ov.get(key)
+                if isinstance(pt, (list, tuple)) and len(pt) == 2:
+                    record[key] = [round(float(pt[0]), 3), round(float(pt[1]), 3)]
+            if ov.get("custom_overlays"):
+                record["custom_overlays"] = [dict(x) for x in ov["custom_overlays"]]
+            lines.append(json.dumps(record, ensure_ascii=False))
+        return ("\n".join(lines) + "\n") if lines else ""
+
+    def _saveOverridesToParameterNode(self) -> None:
+        """Persist `_measurementOverridesByFDI` (including custom_overlays) as JSON on ParameterNode."""
+        pn = getattr(self, "_parameterNode", None)
+        if pn is None or not hasattr(pn, "SetParameter"):
+            return
+        try:
+            payload: Dict[str, Any] = {}
+            for fdi, ov in (getattr(self, "_measurementOverridesByFDI", {}) or {}).items():
+                if not isinstance(ov, dict):
+                    continue
+                entry: Dict[str, Any] = {}
+                for k in ("h_mm", "w0_mm"):
+                    if ov.get(k) is not None:
+                        entry[k] = float(ov[k])
+                for k in ("h_start_uv", "h_end_uv", "w0_start_uv", "w0_end_uv"):
+                    pt = ov.get(k)
+                    if isinstance(pt, (list, tuple)) and len(pt) == 2:
+                        entry[k] = [float(pt[0]), float(pt[1])]
+                if ov.get("custom_overlays"):
+                    entry["custom_overlays"] = [dict(x) for x in ov["custom_overlays"]]
+                if entry:
+                    payload[str(int(fdi))] = entry
+            pn.SetParameter("MeasurementOverrides", json.dumps(payload, ensure_ascii=False))
+        except Exception:
+            logger.debug("Could not persist measurement overrides to ParameterNode", exc_info=True)
+
+    def _loadOverridesFromParameterNode(self) -> None:
+        """Restore `_measurementOverridesByFDI` from ParameterNode JSON when present."""
+        pn = getattr(self, "_parameterNode", None)
+        if pn is None or not hasattr(pn, "GetParameter"):
+            return
+        raw = str(pn.GetParameter("MeasurementOverrides") or "").strip()
+        if not raw or raw == "{}":
+            return
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(parsed, dict):
+            return
+        restored: Dict[int, Dict[str, Any]] = {}
+        for fdi_str, ov in parsed.items():
+            try:
+                fdi_i = int(fdi_str)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(ov, dict):
+                continue
+            entry: Dict[str, Any] = {}
+            for k in ("h_mm", "w0_mm"):
+                if ov.get(k) is not None:
+                    try:
+                        entry[k] = float(ov[k])
+                    except (TypeError, ValueError):
+                        pass
+            for k in ("h_start_uv", "h_end_uv", "w0_start_uv", "w0_end_uv"):
+                pt = ov.get(k)
+                if isinstance(pt, (list, tuple)) and len(pt) == 2:
+                    try:
+                        entry[k] = (float(pt[0]), float(pt[1]))
+                    except (TypeError, ValueError):
+                        pass
+            if isinstance(ov.get("custom_overlays"), list):
+                entry["custom_overlays"] = [dict(x) for x in ov["custom_overlays"] if isinstance(x, dict)]
+            if entry:
+                restored[fdi_i] = entry
+        if restored:
+            if not hasattr(self, "_measurementOverridesByFDI") or not isinstance(self._measurementOverridesByFDI, dict):
+                self._measurementOverridesByFDI = {}
+            self._measurementOverridesByFDI.update(restored)
+
     def _apply_agent_measurement_edit(self, fdi: int, edits: Dict[str, Any]) -> bool:
         """Apply a validated agent edit to W0/H values or UV caliper endpoints for `fdi`."""
         if not edits:
             return False
         fdi = int(fdi)
+        if not hasattr(self, "_measurementOverridesByFDI") or not isinstance(self._measurementOverridesByFDI, dict):
+            self._measurementOverridesByFDI = {}
         stored = dict(self._measurementOverridesByFDI.get(fdi, {}))
         stored.update(edits)
         self._measurementOverridesByFDI[fdi] = stored
+        self._saveOverridesToParameterNode()
 
-        row = self.treatmentPlanByFDI.get(fdi)
+        plan_map = getattr(self, "treatmentPlanByFDI", None)
+        row = plan_map.get(fdi) if isinstance(plan_map, dict) else None
         if isinstance(row, dict):
             if "h_mm" in edits:
                 row["bone_height_mm"] = f"{float(edits['h_mm']):.1f}"
@@ -5274,7 +5784,11 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                         cs.width_endpoints_uv = {}
                     cs.width_endpoints_uv[0.0] = (w0_l, w0_r)
                     if "h_start_uv" not in edits:
-                        cs.crest_uv = (0.5 * (w0_l[0] + w0_r[0]), 0.5 * (w0_l[1] + w0_r[1]))
+                        basal_pt = edits.get("h_end_uv") or getattr(cs, "basal_uv", None)
+                        if getattr(cs, "crest_uv", None) is not None and basal_pt is not None:
+                            cs.crest_uv = reanchor_h_start_to_w0(cs.crest_uv, basal_pt, w0_l, w0_r)
+                        else:
+                            cs.crest_uv = (0.5 * (w0_l[0] + w0_r[0]), 0.5 * (w0_l[1] + w0_r[1]))
                 if "h_start_uv" in edits:
                     cs.crest_uv = edits["h_start_uv"]
                 if "h_end_uv" in edits:
@@ -5813,6 +6327,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "VRShiftHu": "0.0",
             "VRVisible": "false",
             "VRCropEnabled": "false",
+            "MeasurementOverrides": "{}",
         }
         was_mod = parameterNode.StartModify() if hasattr(parameterNode, "StartModify") else None
         try:
@@ -5874,6 +6389,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "VRShiftHu",
             "VRVisible",
             "VRCropEnabled",
+            "MeasurementOverrides",
         )
         return {k: (parameterNode.GetParameter(k) or "") for k in keys}
 
@@ -6753,6 +7269,12 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                         step = max(1, len(jx) // 4000)
                         jaw_vox = np.column_stack([jx[::step], jy[::step], jz[::step]])
                         jaw_world = vol.voxel_to_world(jaw_vox)
+                        # Keep strictly the alveolar crest band so ascending ramus/inferior border
+                        # never pulls occlusal fitting or arch curves into vertical zigzags.
+                        if not jaw_low.startswith("up"):
+                            jaw_world = jaw_world[jaw_world[:, 2] >= float(np.percentile(jaw_world[:, 2], 70))]
+                        else:
+                            jaw_world = jaw_world[jaw_world[:, 2] <= float(np.percentile(jaw_world[:, 2], 30))]
                         if len(centroids) > 0:
                             min_tooth_a = float(np.min(np.asarray(centroids, dtype=np.float64)[:, 1]))
                             post_jaw = jaw_world[jaw_world[:, 1] < min_tooth_a]

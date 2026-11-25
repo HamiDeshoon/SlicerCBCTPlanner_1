@@ -28,7 +28,7 @@ import logging
 import math
 from pathlib import Path
 import textwrap
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -49,7 +49,7 @@ except ImportError:
     ImageFont = None
 
 from .core.diagnostics import calibration_stamp, summarize_span_worst_case
-from .core.measurements import withheld_badge
+from .core.measurements import reanchor_h_start_to_w0, withheld_badge
 from .core_print_render import (
     _load_font,
     _resize_rgba_clean,
@@ -186,6 +186,7 @@ class PrintLayoutEngine:
         vr_b64: Optional[str] = None,
         grayscale: bool = True,
         measurement_overrides: Optional[Dict[int, Dict[str, Any]]] = None,
+        annotation_store: Optional[Any] = None,
     ) -> Tuple[Path, Path, List[CrossSectionSliceSpec]]:
         """Generate genuine 8x10 inch film pages (HTML view + 300 DPI PDF + 300 DPI PNG).
 
@@ -302,7 +303,11 @@ class PrintLayoutEngine:
                                 cs.width_endpoints_uv = {}
                             cs.width_endpoints_uv[0.0] = (w0_l, w0_r)
                             if "h_start_uv" not in ov and getattr(cs, "crest_uv", None) is not None:
-                                cs.crest_uv = (0.5 * (w0_l[0] + w0_r[0]), float(cs.crest_uv[1]))
+                                basal_pt = ov.get("h_end_uv") or getattr(cs, "basal_uv", None)
+                                if basal_pt is not None:
+                                    cs.crest_uv = reanchor_h_start_to_w0(cs.crest_uv, basal_pt, w0_l, w0_r)
+                                else:
+                                    cs.crest_uv = (0.5 * (w0_l[0] + w0_r[0]), float(cs.crest_uv[1]))
                         if "h_start_uv" in ov:
                             cs.crest_uv = ov["h_start_uv"]
                         if "h_end_uv" in ov:
@@ -314,7 +319,12 @@ class PrintLayoutEngine:
                             meas.crest_width_mm = float(ov["w0_mm"])
                 pil_tile = None
                 if cs is not None:
-                    is_key_slice = (s_idx == 0) or (abs(float(arc_mm) - float(arcs.get(target_fdi, arc_mm))) < 0.05)
+                    is_key_slice = (
+                        (s_idx == 0)
+                        or (s_idx == n_slices // 2)
+                        or (abs(float(arc_mm) - center_arc) < 0.05)
+                        or (abs(float(arc_mm) - float(arcs.get(target_fdi, arc_mm))) < 0.05)
+                    )
                     render = render_cross_section(
                         cs,
                         meas,
@@ -409,6 +419,7 @@ class PrintLayoutEngine:
                         [m for m, _cs, _f, _a in measured if m is not None]
                     ),
                     "calibration": calibration_stamp(getattr(engine, "volume", None)),
+                    "clinical_notes": self._collect_clinical_notes(q_fdis, annotation_store),
                 }
             )
 
@@ -427,6 +438,7 @@ class PrintLayoutEngine:
                 page_number=index + 1,
                 total_pages=total_pages,
                 grayscale=grayscale,
+                clinical_notes=rec.get("clinical_notes"),
             )
             for index, rec in enumerate(page_records)
         ]
@@ -465,6 +477,34 @@ class PrintLayoutEngine:
         self.last_pdf_file = pdf_file
         self.last_png_file = png_file
         return html_file, pdf_file, all_specs
+
+    @staticmethod
+    def _collect_clinical_notes(fdis: Sequence[int], annotation_store: Optional[Any]) -> List[str]:
+        """Collect printable flag/ai_comment entries matching `fdis` (or general) from `AnnotationStore`."""
+        if annotation_store is None:
+            return []
+        fdi_set = {int(f) for f in fdis}
+        try:
+            items = list(annotation_store)
+        except TypeError:
+            items = []
+        notes: List[str] = []
+        for ann in items:
+            kind = str(getattr(ann, "kind", "") or (ann.get("kind") if isinstance(ann, dict) else ""))
+            if kind not in ("flag", "ai_comment"):
+                continue
+            ann_fdi = getattr(ann, "fdi", None) if not isinstance(ann, dict) else ann.get("fdi")
+            if ann_fdi is not None and int(ann_fdi) not in fdi_set:
+                continue
+            text = str(getattr(ann, "text", "") if not isinstance(ann, dict) else ann.get("text", "")).strip()
+            if not text:
+                continue
+            sev = str(
+                getattr(ann, "severity", "info") if not isinstance(ann, dict) else ann.get("severity", "info")
+            ).upper()
+            tag = f"#{int(ann_fdi)}" if ann_fdi is not None else "General"
+            notes.append(f"{tag} [{sev}] {text}")
+        return notes
 
     @staticmethod
     def _tooth_arcs(engine: Any, fdis: Sequence[int]) -> dict:
@@ -729,12 +769,21 @@ class PrintLayoutEngine:
         rows = int(math.ceil(len(specs) / cols))
         grid_top = 730
         footer_top = 2855
-        grid_bottom = footer_top - 20
+        clinical_notes = [str(n) for n in (record.get("clinical_notes") or []) if str(n).strip()]
+        wrapped_notes: List[str] = []
+        if clinical_notes:
+            wrapped_notes = textwrap.wrap("  |  ".join(clinical_notes), width=128)[:4]
+        notes_h = (34 + len(wrapped_notes) * 22) if wrapped_notes else 0
+        notes_top = footer_top - notes_h - 10 if notes_h else footer_top
+        key_h = 280 if not grayscale else 0
+        key_top = notes_top - key_h - 14 if key_h else notes_top
+        grid_bottom = (key_top if key_h else notes_top) - 16
         gap = 12
         cell_w = (page_w - 2 * margin - (cols - 1) * gap) // cols
-        cell_h = (grid_bottom - grid_top - (rows - 1) * gap) // max(1, rows)
-
+        raw_cell_h = (grid_bottom - grid_top - (rows - 1) * gap) // max(1, rows)
         hdr_h = 30
+        max_card_h = int(cell_w * 1.68) + hdr_h + 28
+        cell_h = min(raw_cell_h, max_card_h) if rows <= 2 else raw_cell_h
 
         for idx, spec in enumerate(specs):
             row, col = divmod(idx, cols)
@@ -775,8 +824,6 @@ class PrintLayoutEngine:
 
         if not grayscale:
             # Optional colour review page: compact key (the 3D VR lives in the reference band).
-            key_h = 280
-            key_top = footer_top - key_h - 18
             key_w = page_w - 2 * margin
             draw.rectangle(
                 [(margin, key_top), (margin + key_w, key_top + key_h)],
@@ -801,6 +848,24 @@ class PrintLayoutEngine:
                 draw.rectangle([(margin + 18, ly + 4), (margin + 36, ly + 22)], fill=rgb_col)
                 draw.text((margin + 48, ly), desc, fill=text, font=font_key)
                 ly += 40
+
+        if wrapped_notes:
+            notes_bg = (242, 242, 242) if grayscale else (15, 23, 42)
+            notes_hdr_col = line_col if grayscale else (245, 158, 11)
+            draw.rectangle(
+                [(margin, notes_top), (page_w - margin, notes_top + notes_h)],
+                fill=notes_bg,
+                outline=line_col,
+                width=1,
+            )
+            draw.text(
+                (margin + 12, notes_top + 6),
+                "Clinical Notes & Review Flags:",
+                fill=notes_hdr_col,
+                font=font_card_hdr,
+            )
+            for n_idx, n_line in enumerate(wrapped_notes):
+                draw.text((margin + 12, notes_top + 28 + n_idx * 22), n_line, fill=text, font=font_card_ftr)
 
         # Footer disclaimer & page number
         draw.line([(margin, footer_top), (page_w - margin, footer_top)], fill=line_col, width=1)
@@ -841,6 +906,7 @@ class PrintLayoutEngine:
         page_number: int = 1,
         total_pages: int = 1,
         grayscale: bool = True,
+        clinical_notes: Optional[Sequence[str]] = None,
     ) -> str:
         """Construct exact 8x10-inch standard print HTML/CSS page."""
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -876,6 +942,14 @@ class PrintLayoutEngine:
 
         fdi_list_str = ", ".join(f"#{t}" for t in fdis)
         q_label = f"Quadrant {quadrant} ({jaw_label})"
+        notes_list = [str(n).strip() for n in (clinical_notes or []) if str(n).strip()]
+        notes_strip_html = (
+            "<div class='notes-strip'><strong>&#9873; Clinical Notes &amp; Review Flags:</strong> "
+            + " &nbsp;|&nbsp; ".join(html.escape(n) for n in notes_list)
+            + "</div>"
+            if notes_list
+            else ""
+        )
 
         html_doc = f"""<!DOCTYPE html>
 <html lang="en">
@@ -955,9 +1029,9 @@ body {{
 .grid-section {{
     display: grid;
     grid-template-columns: repeat({cols}, 1fr);
-    gap: 5px;
+    gap: 4px;
     background: #020617;
-    padding: 5px;
+    padding: 4px;
     border: 1px solid #334155;
     border-radius: 4px;
 }}
@@ -986,7 +1060,7 @@ body {{
 .m-w5 {{ color: #fb923c; }}
 .m-ian {{ color: #f87171; font-weight: 600; }}
 .cs-badge {{ font-size: 7.5px; color: #f59e0b; background: #451a03; padding: 1px 2px; font-weight: 600; }}
-.cs-card img {{ width: 100%; height: auto; aspect-ratio: 3 / 5; object-fit: contain; background: #020617; display: block; }}
+.cs-card img {{ width: 100%; height: auto; max-height: 175px; aspect-ratio: 3 / 5; object-fit: contain; background: #020617; display: block; }}
 .bottom-section {{
     display: flex;
     gap: 8px;
@@ -1014,6 +1088,15 @@ body {{
 .legend-row {{ display: flex; gap: 10px; margin-top: 4px; font-size: 9px; flex-wrap: wrap; }}
 .leg-item {{ display: flex; align-items: center; gap: 4px; }}
 .leg-box {{ width: 8px; height: 8px; border-radius: 2px; }}
+.notes-strip {{
+    font-size: 9px;
+    color: {("#111827" if grayscale else "#fbbf24")};
+    background: {("#f3f4f6" if grayscale else "#0f172a")};
+    border: 1px solid {("#4b5563" if grayscale else "#334155")};
+    border-left: 3px solid {("#111827" if grayscale else "#f59e0b")};
+    padding: 4px 8px;
+    border-radius: 3px;
+}}
 .footer-text {{
     font-size: 8px;
     color: #64748b;
@@ -1082,6 +1165,8 @@ body {{
             </div>
         </div>
     </div>
+
+    {notes_strip_html}
 
     <div class="footer-text">
         Generated by SlicerCBCTPlanner | Standard 8×10-Inch Orthogonal Film Print Layout | Page {page_number} of {total_pages}

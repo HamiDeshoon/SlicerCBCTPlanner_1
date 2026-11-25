@@ -144,6 +144,78 @@ def main() -> int:  # noqa: C901 - a linear verification script
     if not arches:
         return 1
 
+    # 2c. Edentulous arch fitting (zero all tooth labels, keep Mandible=1 & Maxilla=2 only)
+    edent_mask = np.where((mask == LOWER_JAW_ID) | (mask == UPPER_JAW_ID), mask, 0).astype(mask.dtype)
+    edent_fit = fit_arch_from_label_mask(edent_mask, canon_img.affine, jaw="lower", is_5class=False)
+    edent_valid_cs = 0
+    if edent_fit is not None and edent_fit.accepted:
+        edent_arch = DentalArch(edent_fit.points_ras, jaw_type="lower", ras_convention=True)
+        edent_engine = MeasurementEngine(
+            vol,
+            edent_mask,
+            arch=edent_arch,
+            arches={"lower": edent_arch},
+            is_dental_segmentator_5class=False,
+            extract_teeth_eagerly=False,
+        )
+        for frac in (0.20, 0.35, 0.50, 0.65, 0.80):
+            em, ecs = edent_engine.measure_at_arc_mm("lower", float(edent_arch.total_arc_length) * frac)
+            if (
+                ecs is not None
+                and em is not None
+                and em.bone_height_mm is not None
+                and em.bone_height_mm > 5.0
+                and em.crest_width_mm is not None
+                and em.crest_width_mm >= 2.0
+            ):
+                edent_valid_cs += 1
+    check(
+        "edentulous jawbone_crest arch fits real CT with valid cross-sections",
+        edent_fit is not None
+        and edent_fit.accepted
+        and edent_fit.method == "jawbone_crest"
+        and len(edent_fit.points_ras) >= 4
+        and edent_fit.arc_length_mm > 50.0
+        and edent_valid_cs >= 3,
+        "none"
+        if edent_fit is None
+        else (
+            f"method={edent_fit.method} accepted={edent_fit.accepted} pts={len(edent_fit.points_ras)} "
+            f"arc={edent_fit.arc_length_mm:.1f}mm valid_cs={edent_valid_cs}/5"
+        ),
+    )
+
+    # 2d. Shared occlusal arch never zigzags between jaws & missing posterior teeth extend along jawbone
+    shared_fit = fit_arch_from_label_mask(mask, canon_img.affine, jaw="shared", is_5class=False, end_extension_mm=12.0)
+    shared_dz_max = (
+        float(np.max(np.abs(np.diff(shared_fit.points_ras[:, 2])))) if shared_fit is not None else 99.0
+    )
+    check(
+        "shared occlusal arch blends lower+upper smoothly without Z zigzag",
+        shared_fit is not None and shared_fit.accepted and shared_dz_max < 3.0,
+        f"method={getattr(shared_fit, 'method', 'none')} arc={getattr(shared_fit, 'arc_length_mm', 0):.1f}mm max_dz={shared_dz_max:.2f}mm",
+    )
+    part_mask = mask.copy()
+    part_mask[np.isin(part_mask, [45, 46, 47, 48, 145, 146, 147, 148])] = 0
+    part_fit = fit_arch_from_label_mask(part_mask, canon_img.affine, jaw="lower", is_5class=False, end_extension_mm=12.0)
+    part_arch = DentalArch(part_fit.points_ras, jaw_type="lower", ras_convention=True) if (part_fit and part_fit.accepted) else None
+    part_eng = (
+        MeasurementEngine(vol, part_mask, arch=part_arch, arches={"lower": part_arch}, is_dental_segmentator_5class=False, extract_teeth_eagerly=False)
+        if part_arch is not None
+        else None
+    )
+    exp_span, exp_missing = part_eng.expand_missing_edentulous_span([46]) if part_eng is not None else ([], [])
+    check(
+        "missing 45/46/47 extends arch along posterior mandible & expands span to all three",
+        part_fit is not None
+        and part_fit.accepted
+        and part_fit.arc_length_mm > 130.0
+        and float(part_fit.points_ras[0, 0]) > 25.0
+        and exp_span == [45, 46, 47]
+        and exp_missing == [45, 46, 47],
+        f"arc={getattr(part_fit, 'arc_length_mm', 0):.1f}mm end0_x={float(part_fit.points_ras[0, 0]) if part_fit else 0:.1f} exp={exp_span}",
+    )
+
     engine = MeasurementEngine(
         vol,
         mask,
@@ -344,6 +416,17 @@ def main() -> int:  # noqa: C901 - a linear verification script
         + str(frontal_w0),
     )
 
+    reported_sub3_w0 = [r for r in measured if r["w0"] is not None and r["w0"] < 3.0]
+    withheld_single_plate = [r for r in measured if "only one cortical plate" in str(r["withheld"] or "")]
+    check(
+        "BL-12 never reports a <3 mm single-cortex plate as crest width W0",
+        not reported_sub3_w0
+        and bool(withheld_single_plate)
+        and all(r["w0"] is None and r["h"] is not None for r in withheld_single_plate),
+        f"sub-3mm reported={len(reported_sub3_w0)}; "
+        f"withheld single-plate arcs={[r['arc'] for r in withheld_single_plate]}",
+    )
+
     tilted = [r for r in measured if r["ridge_deg"] is not None and abs(r["ridge_deg"]) >= 15.0]
     on_bone = [r for r in tilted if r["w0_ends_on_bone"] and (r["w0"] or 0) >= 4.0]
     print(
@@ -505,14 +588,26 @@ def main() -> int:  # noqa: C901 - a linear verification script
     if arc0 is None:
         arc0 = total * 0.25
     specs: list[CrossSectionSliceSpec] = []
+    center_labels: list[str] = []
     offsets = np.linspace(-4.0, 4.0, 5)
     for idx, off in enumerate(offsets):
         m, c = engine.measure_at_arc_mm("lower", float(arc0 + off), fdi_hint=str(fdi))
         tile = None
         if c is not None:
-            rnd = core_print_render.render_cross_section(c, m, scale=3, show_masks=False,
-                                                         show_implant_guides=False, monochrome=True)
+            is_ctr = abs(float(off)) < 0.05
+            rnd = core_print_render.render_cross_section(
+                c,
+                m,
+                scale=3,
+                show_masks=False,
+                show_implant_guides=False,
+                monochrome=True,
+                show_footer=False,
+                inline_line_labels=is_ctr,
+            )
             tile = rnd.image
+            if is_ctr:
+                center_labels = [t for _x, _y, t in rnd.labels]
         uri = _image_to_data_uri(tile) if tile is not None else ""
         specs.append(
             CrossSectionSliceSpec(
@@ -537,7 +632,13 @@ def main() -> int:  # noqa: C901 - a linear verification script
     check("film specs carry rendered cross-sections", all(s._pil_image is not None for s in specs),
           f"{sum(s._pil_image is not None for s in specs)}/{len(specs)}")
 
+    from CBCTPlannerLib.core.annotations import AnnotationStore
+
+    flag_store = AnnotationStore()
+    flag_store.add("Focal apical lucency flagged for manual clinician review", fdi=int(fdi), kind="flag", severity="warning")
+    flag_store.add("Verify buccal cortical margin", fdi=int(fdi), kind="ai_comment", severity="info")
     engine_pl = PrintLayoutEngine(logic=None)
+    clinical_notes = engine_pl._collect_clinical_notes([int(fdi)], flag_store)
     record = {
         "quadrant": 4,
         "jaw_label": "Mandible",
@@ -546,6 +647,7 @@ def main() -> int:  # noqa: C901 - a linear verification script
         "slices": specs,
         "pano_b64": _image_to_data_uri(strip_img),
         "vr_b64": _image_to_data_uri(mip.image),
+        "clinical_notes": clinical_notes,
         "span_summary": {},
     }
     t_comp = time.perf_counter()
@@ -588,14 +690,21 @@ def main() -> int:  # noqa: C901 - a linear verification script
     html = engine_pl._build_8x10_html(
         specs, record["pano_b64"], record["vr_b64"], 4, "Mandible", [int(fdi)],
         "ToothFairy3S_0021", "TF3S-0021", 1, 1, grayscale=True,
+        clinical_notes=clinical_notes,
     )
     html_file = out_dir / "ToothFairy3S_0021_8x10.html"
     html_file.write_text(html, encoding="utf-8")
     transparent_css = ".pano-section, .pano-img, .vr-card, .vr-img { background: transparent !important; }" in html
     check(
-        "8x10 HTML keeps transparent pano/VR backgrounds",
-        transparent_css and "data:image/png;base64," in html and "@page" in html,
-        f"{len(html)} chars -> {html_file}",
+        "8x10 HTML keeps transparent pano/VR backgrounds and renders BL-14 notes strip + center inline labels",
+        transparent_css
+        and "data:image/png;base64," in html
+        and "@page" in html
+        and "Clinical Notes &amp; Review Flags:" in html
+        and "manual clinician review" in html
+        and any(t.startswith("H:") for t in center_labels)
+        and any(t.startswith("W0 ") for t in center_labels),
+        f"{len(html)} chars -> {html_file} | center_labels={center_labels}",
     )
 
     # ------------------------------------------- 7. tangential + review agent

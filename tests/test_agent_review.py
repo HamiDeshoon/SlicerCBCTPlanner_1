@@ -404,6 +404,11 @@ class TestAgentUrlFixesAndMeasurementEdit(unittest.TestCase):
         self.assertEqual(local.headers().get("User-Agent"), "SlicerCBCTPlanner/3.1")
         self.assertFalse(AgentEndpointConfig(url="http://", api_key="sk-123456").is_configured())
         self.assertTrue(AgentEndpointConfig(url="HTTPS://api.openai.com/v1", api_key="sk-123456").is_configured())
+        bare = AgentEndpointConfig(url="api.openai.com/v1", api_key="sk-123456")
+        self.assertTrue(bare.is_configured())
+        self.assertEqual(bare.resolved_url(), "https://api.openai.com/v1/chat/completions")
+        bare_local = AgentEndpointConfig(url="localhost:11434/v1", api_key="")
+        self.assertTrue(bare_local.is_configured())
 
     def test_redacted_masks_url_userinfo_and_query_key(self) -> None:
         cfg = AgentEndpointConfig(

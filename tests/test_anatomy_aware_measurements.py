@@ -66,7 +66,9 @@ from CBCTPlannerLib.core.measurements import (
     WITHHELD_NO_CANAL_SEG,
     WITHHELD_NO_MANDIBLE_SEG,
     WITHHELD_NO_SITE,
+    WITHHELD_W0_SINGLE_CORTEX,
     suggest_implant_dimensions,
+    withheld_badge,
 )
 from CBCTPlannerLib.core.volume_loader import CBCTVolume
 from CBCTPlannerLib.core_print_render import _px, render_cross_section
@@ -1048,6 +1050,53 @@ class TestWorkflowUIHelpers(unittest.TestCase):
             self.assertTrue(ok2, msg2)
 
 
+class TestBL12SingleCortexWithhold(unittest.TestCase):
+    """BL-12 regression guards: never report a 1-3 mm single cortical plate as crest width W0."""
+
+    def _build_straight_engine(self, mask: np.ndarray, img: np.ndarray) -> MeasurementEngine:
+        affine = np.eye(4, dtype=np.float64)
+        vol = CBCTVolume(img, (1.0, 1.0, 1.0), (0.0, 0.0, 0.0), np.eye(3, dtype=np.float64), affine)
+        arch = _make_straight_arch(y_mm=25.0, z_mm=25.0, jaw="lower")
+        return MeasurementEngine(vol, mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=False)
+
+    def test_single_cortical_plate_withholds_w0_keeps_height_and_badge(self) -> None:
+        img = np.full((50, 50, 50), -500.0, dtype=np.float32)
+        mask = np.zeros((50, 50, 50), dtype=np.uint16)
+        # Single 2 mm lingual cortical plate + basal base, no opposing buccal cortex near crest.
+        mask[10:28, 21:23, 10:40] = LOWER_JAW_ID
+        mask[10:14, 21:29, 10:40] = LOWER_JAW_ID
+        img[mask != 0] = 950.0
+
+        engine = self._build_straight_engine(mask, img)
+        meas, cs = engine.measure_at_arc_mm("lower", 15.0)
+        self.assertIsNotNone(cs)
+        self.assertIsNotNone(meas)
+        assert meas is not None
+        self.assertIsNotNone(meas.bone_height_mm)
+        self.assertGreater(meas.bone_height_mm or 0.0, 10.0)
+        self.assertIsNone(meas.crest_width_mm)
+        self.assertEqual(meas.withheld_reason, WITHHELD_W0_SINGLE_CORTEX)
+        self.assertEqual(withheld_badge(meas.withheld_reason), "W0: 1-cortex")
+
+    def test_deeper_caliper_rescue_retains_w0_when_opposing_cortex_exists_below(self) -> None:
+        img = np.full((50, 50, 50), -500.0, dtype=np.float32)
+        mask = np.zeros((50, 50, 50), dtype=np.uint16)
+        # Two cortical walls flanking a socket (#46), with buccal plate notched slightly apically (z<24)
+        # so the surface rim check stops on the taller lingual plate, while a deeper caliper (W5)
+        # crosses BOTH opposing cortices and rescues W0 across the socket.
+        mask[10:28, 21:23, 10:40] = LOWER_JAW_ID
+        mask[10:24, 27:29, 10:40] = LOWER_JAW_ID
+        mask[10:14, 21:29, 10:40] = LOWER_JAW_ID
+        mask[14:27, 23:27, 20:30] = 46
+        img[mask != 0] = 950.0
+
+        engine = self._build_straight_engine(mask, img)
+        meas = engine.measure_implant_site("46")
+        self.assertIsNotNone(meas)
+        assert meas is not None
+        self.assertIsNotNone(meas.crest_width_mm)
+        self.assertGreaterEqual(meas.crest_width_mm or 0.0, 5.0)
+        self.assertNotIn("only one cortical plate", meas.withheld_reason or "")
 
 
 if __name__ == "__main__":

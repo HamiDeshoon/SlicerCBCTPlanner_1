@@ -68,3 +68,13 @@
 - **Trigger**: Normalizing, validating, or redacting user-configured OpenAI-compatible URLs (`AgentEndpointConfig.resolved_url`, `is_configured`, `redacted` in `core/agent_review.py`).
 - **Observed Pattern**: Split the URL with `urllib.parse.urlsplit` before normalizing the path so query parameters (such as Azure `?api-version=...`) stay intact after `/chat/completions` is appended, strip fragments, validate a non-empty hostname (`netloc`), keep `is_configured()` aligned with `resolved_url()` (case-insensitive scheme), and strip/redact userinfo and query-string credentials (`?key=`, `?api_key=`) before logging or returning `redacted()`.
 - **Rationale**: Appending `/chat/completions` to a raw string corrupts query-string gateways (`...?api-version=2024-06-01/chat/completions`), and unredacted URL query parameters can leak API keys into UI status labels or error logs.
+
+## 11. Single-Cortex W0 Honesty (`BL-12`) & Coronal-Offset Re-anchoring (`BL-18`)
+- **Trigger**: Measuring crestal width `W0` in `core/measurements.py` or dragging `W0` handles in the Interactive Pre-Print Editor / `PrintLayoutEngine.py`.
+- **Observed Pattern**: After the anterior deeper-caliper rescue loop finishes, if `W0 < 3.0 mm` AND `_span_bone_runs(w0) <= 1`, withhold `W0` (`crest_width_mm = None`, `withheld_reason = WITHHELD_W0_SINGLE_CORTEX`, badge `"W0: 1-cortex"`) while retaining bone height `H` and crest-point anchoring (`crest_uv` fallback). Whenever `W0` is edited or dragged, re-anchor `h_start_uv` through `W0`'s midpoint via `reanchor_h_start_to_w0` preserving the signed distance (`coronal_offset_along_axis`) rather than snapping `h_start_uv` onto `W0`.
+- **Rationale**: A single cortical wall plate (`1–3 mm`) is not an alveolar ridge width `W0`, and flattening `h_start_uv` onto `W0` destroys clinician crest-level adjustments on tilted or scalloped ridges.
+
+## 12. Corner Legend Collision Avoidance (`W3/W5`) & Clinical Notes Print Strip (`BL-14`)
+- **Trigger**: Rendering `W3/W5` boxes in `core_print_render.render_cross_section` or composing 8×10″ film sheets in `PrintLayoutEngine`.
+- **Observed Pattern**: Register the `10 mm` scale bar in `occupied_rects` and score candidate legend corners (bottom-right → bottom-left above scale bar → top-left → top-right) against `occupied_rects`, drawn calipers/vital contours, and cortical bone/mask pixels while keeping pill bounds (`x >= 18, y >= 24`). Collect active `flag` / `ai_comment` entries from `AnnotationStore` and render a compact `Clinical Notes & Review Flags:` strip above the disclaimer on both PNG/PDF and HTML (grayscale and color).
+- **Rationale**: Keeps quantitative width boxes readable off the mandibular/maxillary cortex and surfaces clinician/AI flags directly on the printed film.

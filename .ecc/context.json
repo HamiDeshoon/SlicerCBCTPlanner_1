@@ -1,7 +1,7 @@
 {
-  "session_id": "slicer-cbct-planner-v3.1-fixes",
-  "updated_at": "2026-11-25T10:55:00+04:00",
-  "active_milestone": "Phase 4: Documentation audited against 552d2a89 (219 unit tests verified; 7 doc-vs-code contradictions fixed; BL-17/BL-18 logged)",
+  "session_id": "slicer-cbct-planner-v3.2-hardening",
+  "updated_at": "2026-11-25T14:35:00+03:30",
+  "active_milestone": "Post-v3.2 hardening + jaw-wise odontogram / missing-span expansion / full-jaw curves / full-screen cross-section viewer complete (uncommitted awaiting user review): 242 unit tests OK, verify_real_ct 27/27 PASS, verify_mcp_slicer 11/11 PASS, ruff clean",
   "decisions": [
     {
       "topic": "Print File & Measured Image Bug Fixes",
@@ -60,8 +60,13 @@
     },
     {
       "topic": "Remote review agent wire format",
-      "chosen": "OpenAI-compatible POST <base>/chat/completions with Authorization: Bearer; tolerant JSON parse; fixed action whitelist; nothing applied until 'Apply agent changes' (query-string gateway fix tracked as BL-17)",
-      "reason": "Any gateway (OpenAI, Azure, vLLM, Ollama shim, internal proxy) works with one implementation, and untrusted model output can never silently edit a clinical plan."
+      "chosen": "OpenAI-compatible POST <base>/chat/completions with Authorization: Bearer via urlsplit URL normalization (BL-17 closed); retry/backoff on 429/5xx (BL-15 closed); tolerant JSON parse; fixed action whitelist; nothing applied until 'Apply agent changes'",
+      "reason": "Any gateway (OpenAI, Azure ?api-version=..., bare host, vLLM, Ollama shim, internal proxy) works with one implementation, and untrusted model output can never silently edit a clinical plan."
+    },
+    {
+      "topic": "Post-v3.2 Hardening (Pre-Print, BL-12, BL-14, BL-18, Legend Avoidance, Edentulous Arch)",
+      "chosen": "Auto-populate H/W0 & last_cross_sections from MeasurementEngine in Pre-Print Editor; preserve coronal offset via reanchor_h_start_to_w0 on W0 drag; persist MeasurementOverrides in ParameterNode JSON + JSONL export; relocate W3/W5 corner legend off bone/scale bar; withhold <3 mm single-cortex W0 (BL-12) after deeper rescue; render AnnotationStore flags in 8x10 Clinical Notes strip (BL-14); verify edentulous jawbone_crest fit on real CT",
+      "reason": "Fixes blank Pre-Print canvas/cells when Step 5 was skipped, prevents coronal crest collapse when dragging W0, eliminates single-plate false W0 widths, and ensures annotations and legends remain clean on clinical 8x10 film."
     },
     {
       "topic": "Annotation model",
@@ -109,13 +114,16 @@
     "analysis/mcp_slicer_check/verify_mcp_slicer.py",
     "analysis/slicercbctplanner_1/BUSINESS_RULES.md",
     "analysis/slicercbctplanner_1/SESSION_NOTES_2026-11-24.md",
+    "analysis/slicercbctplanner_1/verify_real_ct.py",
     "tests/test_agent_review.py",
     "tests/test_agent_step_glue.py",
     "tests/test_anatomy_aware_measurements.py",
     "tests/test_clinical_delivery.py",
+    "tests/test_core_math.py",
     "tests/test_print_layout.py",
     "tests/test_slicer_integration.py",
-    "tests/test_tangential_view.py"
+    "tests/test_tangential_view.py",
+    "tests/test_v32_preprint_and_arch.py"
   ],
   "completed_tasks": [
     "Inspect SlicerCBCTPlanner_1 codebase",
@@ -151,16 +159,17 @@
     "Real-CT verification extended to 23/23: tangential section (101x141 @ 0.30 mm/px, crest drop 11.1 mm, 0.03 s) and agent mock round trip (49 KB payload, 3 applied, 1 rejected)",
     "Install and verify zhaoyouj/mcp-slicer 0.3.1 against Slicer 5.12.3 (11/11), add .mcp.json + launcher + harness",
     "Commit the whole Step 8 + MCP batch (9411c7b) and re-sync README / BUSINESS_RULES / instincts / session notes / this context file",
-    "Doc-vs-code audit pass on 552d2a89: verified 219 unit tests (1 skipped), 51 .py modules (28 CBCTPlannerLib / 13 core), 8 step chips, 22 active QSettings keys; fixed 7 doc contradictions and logged BL-17 (API URL bugs) and BL-18 (H from W0 midline)"
+    "Doc-vs-code audit pass on 552d2a89: verified 219 unit tests (1 skipped), 51 .py modules (28 CBCTPlannerLib / 13 core), 8 step chips, 22 active QSettings keys; fixed 7 doc contradictions and logged BL-17 (API URL bugs) and BL-18 (H from W0 midline)",
+    "Post-v3.2 hardening: W3/W5 legend corner auto-move off bone & scale bar; Interactive Pre-Print Editor H/W0 auto-populate + last_cross_sections + coronal-offset-preserving W0 drag + ParameterNode MeasurementOverrides JSON + JSONL export + Apply Edits & Print fix",
+    "Edentulous jawbone_crest arch verification added on ToothFairy3S_0021 (teeth zeroed, 4/5 valid cross-sections); BL-12 single-cortex W0 withhold (WITHHELD_W0_SINGLE_CORTEX) with deeper-caliper rescue; BL-14 Clinical Notes & Review Flags strip on 8x10 PNG/PDF/HTML; BL-15/BL-17 bare-host/retry hardening",
+    "Verified 2026-11-25: ruff clean, 242 unit tests OK, verify_real_ct 27/27 PASS, verify_mcp_slicer 11/11 PASS; shared occlusal blend (max_dz=1.34mm), full-jaw posterior bone extension on missing 45/46/47, jaw-wise odontogram, 5/6/7 click auto-expansion, Full Screen cross-section viewer & compact card layout"
   ],
   "next_tasks": [
-    "BL-18: anchor bone-height H line start at W0 midline midpoint (pt_l + pt_r) / 2",
-    "BL-17: fix AgentEndpointConfig.resolved_url() query-string handling (Azure ?api-version=), align is_configured(), allow keyless localhost, redact URL credentials, and send explicit User-Agent",
-    "BL-14: print annotations and agent comments into the 8x10 film and HTML report",
+    "Await user confirmation before committing/pushing post-v3.2 hardening changes",
     "BL-13: apply agent implant diameter/length edits via a plan override column",
-    "BL-15: retry/backoff on agent rate limits (422/429/5xx), using AgentError.is_retryable",
-    "BL-12: withhold W0 when the opposite cortex is absent from the section",
     "BL-01: smooth W0/W3/W5 along the arch (1-site Gaussian)",
+    "BL-05: dynamic half_v_mm for tall anterior mandibles",
+    "BL-06: PDL gap tolerance validation on real molar CT",
     "BL-16: vendored mcp-slicer copy with SLICER_WEB_SERVER_URL so the port is configurable",
     "OPT-03: pass PIL.Image/ndarray directly when composing the 8x10 film",
     "OPT-04: scipy.ndimage.label flood-fill in finalize_transparent_png_bytes"

@@ -641,6 +641,7 @@ def render_cross_section(
     scale_rect = _draw_pill_label(
         draw, bar_x1 + 4, bar_y - 8, "10 mm", fg=ruler_colour, bg=(8, 13, 24), font=font_sm, bounds=bounds
     )
+    occupied_rects.append((bar_x0 - 2.0, bar_y - 5.0, bar_x1 + 2.0, bar_y + 5.0))
     occupied_rects.append(scale_rect)
 
     crest_uv = geom["crest_uv"]
@@ -752,14 +753,84 @@ def render_cross_section(
                 font=font_md,
             )
 
-    # Corner depth key: W3/W5 calipers and values isolated from the anatomy.
+    # Corner depth key: W3/W5 calipers and values isolated from the anatomy and existing overlays.
     deep_depths = [d for d in sorted(width_endpoints.keys()) if float(d) > 0.0]
     if deep_depths:
         row_h = max(14, int(round(6.0 * scale)))
         box_w = max(78, int(round(28.0 * scale)))
         box_h = row_h * len(deep_depths) + 8
-        bx = float(max(4, width - box_w - 4))
-        by = float(max(4, safe_h - box_h - 4))
+        min_x = 18.0 if width >= box_w + 24 else 4.0
+        max_x = max(min_x, float(width - box_w - 4))
+        min_y = 24.0 if safe_h >= box_h + 28 else 4.0
+        max_y = max(min_y, float(safe_h - box_h - 4))
+        left_x = min(max_x, min_x)
+        bot_above_scale_y = max(min_y, min(max_y, float(bar_y - box_h - 10.0)))
+        top_below_l_y = min(max_y, max(min_y, float(l_rect[3]) + 6.0))
+        top_below_b_y = min(max_y, max(min_y, float(b_rect[3]) + 6.0))
+
+        # Keep bottom-right default when clean; otherwise move to a non-overlapping corner.
+        corner_candidates = [
+            (max_x, max_y),
+            (left_x, bot_above_scale_y),
+            (left_x, top_below_l_y),
+            (max_x, top_below_b_y),
+        ]
+
+        # Collect point samples from drawn caliper lines & vital structures to avoid occluding them.
+        avoid_pts: List[Tuple[float, float]] = []
+        for seg_p0, seg_p1 in overlay:
+            for t_i in range(9):
+                tf = t_i / 8.0
+                avoid_pts.append((seg_p0[0] + tf * (seg_p1[0] - seg_p0[0]), seg_p0[1] + tf * (seg_p1[1] - seg_p0[1])))
+        if is_mand:
+            if geom["canal_centroid_uv"] is not None:
+                avoid_pts.append(_px(geom["canal_centroid_uv"][0], geom["canal_centroid_uv"][1], u_coords, v_coords, scale))
+            for vu, vv in geom["vital_contour_uv"] or ():
+                avoid_pts.append(_px(float(vu), float(vv), u_coords, v_coords, scale))
+        for su, sv in geom["sinus_floor_uv"] or ():
+            avoid_pts.append(_px(float(su), float(sv), u_coords, v_coords, scale))
+
+        has_seg_mask = mask_arr is not None and getattr(mask_arr, "ndim", 0) == 2 and bool(np.any(mask_arr > 0))
+        src_arr = mask_arr if has_seg_mask else gray
+
+        def _corner_score(cx: float, cy: float) -> Tuple[int, int, int, float]:
+            rect_c = (cx, cy, cx + box_w, cy + box_h)
+            ov_area = 0.0
+            for r in occupied_rects:
+                ix = max(0.0, min(rect_c[2], r[2]) - max(rect_c[0], r[0]))
+                iy = max(0.0, min(rect_c[3], r[3]) - max(rect_c[1], r[1]))
+                ov_area += ix * iy
+            pt_hits = sum(
+                1
+                for px_v, py_v in avoid_pts
+                if (cx - 4.0) <= px_v <= (cx + box_w + 4.0) and (cy - 4.0) <= py_v <= (cy + box_h + 4.0)
+            )
+            anat_frac = 0.0
+            if src_arr is not None and getattr(src_arr, "ndim", 0) == 2 and src_arr.shape[0] > 0 and src_arr.shape[1] > 0:
+                c0 = max(0, min(src_arr.shape[1] - 1, int(math.floor(cx / max(1e-6, float(width)) * src_arr.shape[1]))))
+                c1 = max(c0 + 1, min(src_arr.shape[1], int(math.ceil((cx + box_w) / max(1e-6, float(width)) * src_arr.shape[1]))))
+                r0 = max(0, min(src_arr.shape[0] - 1, int(math.floor(cy / max(1e-6, float(safe_h)) * src_arr.shape[0]))))
+                r1 = max(r0 + 1, min(src_arr.shape[0], int(math.ceil((cy + box_h) / max(1e-6, float(safe_h)) * src_arr.shape[0]))))
+                patch = src_arr[r0:r1, c0:c1]
+                if has_seg_mask:
+                    anat_frac = float(np.mean(patch > 0))
+                elif dark_film:
+                    anat_frac = float(np.mean(patch < 160))
+                else:
+                    anat_frac = float(np.mean(patch > 95))
+            return (1 if ov_area > 0.0 else 0, pt_hits, 1 if anat_frac > 0.03 else 0, ov_area + anat_frac * 100.0)
+
+        bx, by = corner_candidates[0]
+        best_score = _corner_score(bx, by)
+        if best_score[:3] != (0, 0, 0):
+            for cand_x, cand_y in corner_candidates[1:]:
+                sc = _corner_score(cand_x, cand_y)
+                if sc < best_score:
+                    best_score = sc
+                    bx, by = cand_x, cand_y
+                if sc[:3] == (0, 0, 0):
+                    break
+
         draw.rectangle(
             [(bx, by), (bx + box_w, by + box_h)],
             fill=(2, 6, 23, 230),

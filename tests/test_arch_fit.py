@@ -340,6 +340,44 @@ class TestFitArchFromLabelMask(unittest.TestCase):
         self.assertTrue(res_mand.accepted)
         self.assertTrue(res_max.accepted)
 
+    def test_shared_mode_with_both_jaws_never_zigzags_in_z(self) -> None:
+        mask_low = _phantom("lower", is_5class=False)
+        mask_up = _phantom("upper", is_5class=False)
+        combined = np.where(mask_low > 0, mask_low, mask_up)
+        aff = _affine(combined.shape)
+        res = fit_arch_from_label_mask(combined, aff, jaw="shared", is_5class=False)
+        self.assertIsNotNone(res)
+        assert res is not None
+        self.assertTrue(res.accepted, res.reason)
+        self.assertIn("shared(", res.method)
+        # Blended lower+upper curve must stay smooth in Z with zero inter-jaw vertical zigzag.
+        self.assertLess(float(np.max(np.abs(np.diff(res.points_ras[:, 2])))), 2.0)
+
+    def test_jawbone_extends_partially_edentulous_posterior_arch(self) -> None:
+        # Stamp lower teeth except missing posterior right teeth (#45, #46, #47, #48), plus full mandible bone.
+        mask = np.zeros((40, 96, 96), dtype=np.int16)
+        aff = _affine(mask.shape)
+        angles_bone = np.linspace(0.05, np.pi - 0.05, 180)
+        for ang in angles_bone:
+            xy = _arch_centerline(np.array([ang]))[0]
+            vox = np.linalg.inv(aff) @ np.array([xy[0], xy[1], 6.0, 1.0])
+            _stamp(mask, vox[:3], 2.4, 1)  # LOWER_JAW_ID
+        order = JAW_TOOTH_ORDER["lower"]
+        for index, theta in enumerate(np.linspace(0.0, np.pi, 16)):
+            fdi = int(order[index])
+            if fdi in (45, 46, 47, 48):
+                continue
+            xy = _arch_centerline(np.array([theta]))[0]
+            vox = np.linalg.inv(aff) @ np.array([xy[0], xy[1], 7.0, 1.0])
+            _stamp(mask, vox[:3], 2.5, fdi)
+        res = fit_arch_from_label_mask(mask, aff, jaw="lower", is_5class=False, end_extension_mm=12.0)
+        self.assertIsNotNone(res)
+        assert res is not None
+        self.assertTrue(res.accepted, res.reason)
+        # Curve must extend posteriorly back along the right jawbone into missing molar region (X > 20, Y < 12).
+        self.assertGreater(float(res.points_ras[0, 0]), 20.0)
+        self.assertLess(float(res.points_ras[0, 1]), 12.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -914,14 +914,193 @@ def _rms_to_polyline(points: np.ndarray, polyline: np.ndarray, max_points: int =
 
 
 def _order_cloud_as_horseshoe(points_xy: np.ndarray) -> np.ndarray:
-    """Order a dense XY cloud from one posterior end, around the arch, to the other."""
-    centroid = np.asarray(points_xy, dtype=np.float64).mean(axis=0)
-    angles = np.arctan2(points_xy[:, 1] - centroid[1], points_xy[:, 0] - centroid[0])
-    order = np.argsort(angles)
-    sorted_angles = angles[order]
-    gaps = np.diff(np.concatenate([sorted_angles, [sorted_angles[0] + 2.0 * np.pi]]))
-    cut = int(np.argmax(gaps))
-    return np.roll(order, -(cut + 1))
+    """Order a dense XY cloud from Patient Right (+X), around anterior (+Y), to Patient Left (-X)."""
+    pts = np.asarray(points_xy, dtype=np.float64)
+    if len(pts) < 3:
+        return np.arange(len(pts))
+    y_min = float(np.min(pts[:, 1]))
+    x_mid = float(0.5 * (np.percentile(pts[:, 0], 5) + np.percentile(pts[:, 0], 95)))
+    ref_xy = np.array([x_mid, y_min - 25.0], dtype=np.float64)
+    angles = np.arctan2(pts[:, 1] - ref_xy[1], pts[:, 0] - ref_xy[0])
+    return np.argsort(angles)
+
+
+def _bin_horseshoe_cloud(
+    points_3d: np.ndarray,
+    num_bins: int,
+    *,
+    crest_mode: Optional[str] = None,
+) -> np.ndarray:
+    """Bin a single-jaw XY-ordered arch point cloud into uniform posterior-angle buckets."""
+    pts = np.asarray(points_3d, dtype=np.float64)
+    if len(pts) < 4:
+        return pts
+    y_min = float(np.min(pts[:, 1]))
+    x_mid = float(0.5 * (np.percentile(pts[:, 0], 5) + np.percentile(pts[:, 0], 95)))
+    ref_xy = np.array([x_mid, y_min - 25.0], dtype=np.float64)
+    angles = np.arctan2(pts[:, 1] - ref_xy[1], pts[:, 0] - ref_xy[0])
+    a_min = float(np.percentile(angles, 0.5))
+    a_max = float(np.percentile(angles, 99.5))
+    if a_max - a_min <= 1e-4:
+        return pts
+    edges = np.linspace(a_min, a_max, max(8, int(num_bins)) + 1)
+    centers: List[np.ndarray] = []
+    for i in range(len(edges) - 1):
+        in_bin = (angles >= edges[i]) & (angles <= edges[i + 1] if i == len(edges) - 2 else angles < edges[i + 1])
+        if not np.any(in_bin):
+            continue
+        sub = pts[in_bin]
+        if crest_mode == "lower" and len(sub) >= 6:
+            z_cut = float(np.percentile(sub[:, 2], 70))
+            sub = sub[sub[:, 2] >= z_cut]
+        elif crest_mode == "upper" and len(sub) >= 6:
+            z_cut = float(np.percentile(sub[:, 2], 30))
+            sub = sub[sub[:, 2] <= z_cut]
+        if len(sub) > 0:
+            centers.append(np.median(sub, axis=0))
+    out = np.asarray(centers, dtype=np.float64)
+    if len(out) >= 4:
+        out = _prune_pathological_points(out, max_deviation_mm=8.0)
+    if len(out) >= 2 and out[0, 0] < out[-1, 0]:
+        out = out[::-1].copy()
+    return out
+
+
+def _extract_jawbone_crest_points(
+    mask: np.ndarray,
+    matrix: np.ndarray,
+    jaw_key: str,
+    num_bins: int,
+) -> Optional[np.ndarray]:
+    """Extract ordered alveolar-ridge crest points for one jaw (`lower` or `upper`), rejecting ramus Z spikes."""
+    bone_labels = (1,) if jaw_key == "lower" else ((2,) if jaw_key == "upper" else (1,))
+    bz, by, bx = np.where(np.isin(mask, bone_labels))
+    if len(bx) < 30:
+        return None
+    b_step = max(1, len(bx) // 60000)
+    b_vox = np.column_stack(
+        [bx[::b_step], by[::b_step], bz[::b_step], np.ones(len(bx[::b_step]), dtype=np.float64)]
+    )
+    b_world = (matrix @ b_vox.T).T[:, :3]
+    # For mandible: suppress ascending vertical ramus / condyle Z spikes above anterior alveolar plane.
+    if jaw_key == "lower" and len(b_world) >= 60:
+        y_mid = float(np.median(b_world[:, 1]))
+        ant_mask = b_world[:, 1] >= (y_mid - 5.0)
+        if int(np.count_nonzero(ant_mask)) >= 20:
+            ant_top_z = float(np.percentile(b_world[ant_mask, 2], 88))
+            trimmed = b_world[b_world[:, 2] <= ant_top_z + 8.0]
+            if len(trimmed) >= 30:
+                b_world = trimmed
+    binned = _bin_horseshoe_cloud(
+        b_world, num_bins=max(24, num_bins), crest_mode=("lower" if jaw_key == "lower" else "upper")
+    )
+    return binned if len(binned) >= 4 else None
+
+
+def _extend_arch_with_jawbone_or_tangent(
+    ctrl: np.ndarray,
+    dense: np.ndarray,
+    extension_mm: float,
+    *,
+    mask: np.ndarray,
+    matrix: np.ndarray,
+    inverse_affine: np.ndarray,
+    jaw_key: str,
+    num_control_points: int,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Extend `ctrl`/`dense` along the segmented jawbone crest where available, falling back to tangent."""
+    if float(extension_mm) <= 0.0:
+        return ctrl, dense, 0.0
+    base_start = ctrl[0].copy()
+    base_end = ctrl[-1].copy()
+
+    bone_pts = (
+        _extract_jawbone_crest_points(mask, matrix, jaw_key, num_bins=max(32, num_control_points * 3))
+        if jaw_key in ("lower", "upper")
+        else None
+    )
+    if bone_pts is not None and len(bone_pts) >= 4:
+        # Order monotonically from Right (+X) -> Left (-X) via posterior ref and pick jaw extensions past ends.
+        all_pts = np.vstack([bone_pts, ctrl])
+        y_min = float(np.min(all_pts[:, 1]))
+        x_mid = float(0.5 * (np.percentile(all_pts[:, 0], 5) + np.percentile(all_pts[:, 0], 95)))
+        ref_xy = np.array([x_mid, y_min - 25.0], dtype=np.float64)
+        a_start = float(np.arctan2(ctrl[0, 1] - ref_xy[1], ctrl[0, 0] - ref_xy[0]))
+        a_end = float(np.arctan2(ctrl[-1, 1] - ref_xy[1], ctrl[-1, 0] - ref_xy[0]))
+        a_lo, a_hi = min(a_start, a_end), max(a_start, a_end)
+        bone_angles = np.arctan2(bone_pts[:, 1] - ref_xy[1], bone_pts[:, 0] - ref_xy[0])
+
+        # Left side has larger angle (X < 0) when ctrl[0,0] > ctrl[-1,0] (Right -> Left = small -> large angle).
+        right_mask = (bone_angles < (a_lo - 0.03)) & (np.abs(bone_pts[:, 2] - base_start[2]) <= 10.0)
+        left_mask = (bone_angles > (a_hi + 0.03)) & (np.abs(bone_pts[:, 2] - base_end[2]) <= 10.0)
+
+        max_reach = max(float(extension_mm), 45.0)
+        right_ext = bone_pts[right_mask]
+        if len(right_ext) > 0:
+            right_ext = right_ext[np.linalg.norm(right_ext - base_start, axis=1) <= max_reach]
+            right_ext = right_ext[np.argsort(np.arctan2(right_ext[:, 1] - ref_xy[1], right_ext[:, 0] - ref_xy[0]))]
+            if len(right_ext) > 0:
+                right_ext = right_ext.copy()
+                # Re-base bone crest Z smoothly onto the tooth-row endpoint Z to avoid vertical seam steps.
+                z_shift = float(base_start[2] - right_ext[-1, 2])
+                right_ext[:, 2] += z_shift
+        left_ext = bone_pts[left_mask]
+        if len(left_ext) > 0:
+            left_ext = left_ext[np.linalg.norm(left_ext - base_end, axis=1) <= max_reach]
+            left_ext = left_ext[np.argsort(np.arctan2(left_ext[:, 1] - ref_xy[1], left_ext[:, 0] - ref_xy[0]))]
+            if len(left_ext) > 0:
+                left_ext = left_ext.copy()
+                z_shift = float(base_end[2] - left_ext[0, 2])
+                left_ext[:, 2] += z_shift
+
+        # Fill any side still lacking jawbone points with short FOV-bounded tangent samples.
+        tan_only = _extend_arch_endpoints(
+            ctrl, float(extension_mm), inverse_affine=inverse_affine, shape_zyx=mask.shape
+        )
+        merged_pieces: List[np.ndarray] = []
+        if len(right_ext) > 0:
+            merged_pieces.append(right_ext)
+        else:
+            # Take start extension samples before ctrl[0]
+            start_d = np.linalg.norm(tan_only - base_start, axis=1)
+            start_idx = int(np.argmin(start_d))
+            if start_idx > 0:
+                merged_pieces.append(tan_only[:start_idx])
+        merged_pieces.append(ctrl)
+        if len(left_ext) > 0:
+            merged_pieces.append(left_ext)
+        else:
+            end_d = np.linalg.norm(tan_only - base_end, axis=1)
+            end_idx = int(np.argmin(end_d))
+            if end_idx + 1 < len(tan_only):
+                merged_pieces.append(tan_only[end_idx + 1 :])
+
+        if len(right_ext) > 0 or len(left_ext) > 0:
+            combined = np.vstack(merged_pieces)
+            target_n = max(int(num_control_points), 13)
+            new_ctrl, new_dense = _spline_through_ordered(combined, target_n, smoothing=0.25)
+            if len(new_ctrl) >= 4:
+                if new_ctrl[0, 0] < new_ctrl[-1, 0]:
+                    new_ctrl = new_ctrl[::-1].copy()
+                if new_dense[0, 0] < new_dense[-1, 0]:
+                    new_dense = new_dense[::-1].copy()
+                ext_dist = min(
+                    float(np.linalg.norm(new_ctrl[0] - base_start)),
+                    float(np.linalg.norm(new_ctrl[-1] - base_end)),
+                )
+                return new_ctrl, new_dense, ext_dist
+
+    ext_ctrl = _extend_arch_endpoints(
+        ctrl, float(extension_mm), inverse_affine=inverse_affine, shape_zyx=mask.shape
+    )
+    ext_dense = _extend_arch_endpoints(
+        dense, float(extension_mm), inverse_affine=inverse_affine, shape_zyx=mask.shape
+    )
+    ext_dist = min(
+        float(np.linalg.norm(ext_ctrl[0] - base_start)),
+        float(np.linalg.norm(ext_ctrl[-1] - base_end)),
+    )
+    return ext_ctrl, ext_dense, ext_dist
 
 
 def _monotonic_descending_x(points: np.ndarray) -> bool:
@@ -955,60 +1134,64 @@ def fit_arch_from_label_mask(
         raise ValueError("mask_zyx must be 3D and affine must be 4x4")
 
     jaw_key = jaw_key_from_text(jaw) or "shared"
+    if jaw_key == "shared":
+        low_fit = fit_arch_from_label_mask(
+            mask,
+            matrix,
+            jaw="lower",
+            is_5class=is_5class,
+            num_control_points=num_control_points,
+            end_extension_mm=end_extension_mm,
+        )
+        up_fit = fit_arch_from_label_mask(
+            mask,
+            matrix,
+            jaw="upper",
+            is_5class=is_5class,
+            num_control_points=num_control_points,
+            end_extension_mm=end_extension_mm,
+        )
+        if low_fit is not None and low_fit.accepted and up_fit is not None and up_fit.accepted:
+            low_pts = low_fit.points_ras if low_fit.points_ras[0, 0] >= low_fit.points_ras[-1, 0] else low_fit.points_ras[::-1]
+            up_pts = up_fit.points_ras if up_fit.points_ras[0, 0] >= up_fit.points_ras[-1, 0] else up_fit.points_ras[::-1]
+            # Resample each jaw uniformly to matching control counts so blending never mixes unsorted Z heights.
+            n_sh = max(len(low_pts), len(up_pts), int(num_control_points))
+            low_ctrl, _ = _spline_through_ordered(low_pts, n_sh, smoothing=0.05)
+            up_ctrl, _ = _spline_through_ordered(up_pts, n_sh, smoothing=0.05)
+            shared_raw = 0.5 * (low_ctrl + up_ctrl)
+            sh_ctrl, sh_dense = _spline_through_ordered(shared_raw, n_sh, smoothing=0.05)
+            if sh_ctrl[0, 0] < sh_ctrl[-1, 0]:
+                sh_ctrl = sh_ctrl[::-1].copy()
+            return ArchFitResult(
+                points_ras=sh_ctrl,
+                arc_length_mm=_polyline_arc_length(sh_dense),
+                residual_rms_mm=max(float(low_fit.residual_rms_mm), float(up_fit.residual_rms_mm)),
+                n_points_used=int(low_fit.n_points_used + up_fit.n_points_used),
+                method=f"shared({low_fit.method}+{up_fit.method})",
+                accepted=True,
+                reason="",
+                tooth_bearing_arc_mm=0.5 * (float(low_fit.tooth_bearing_arc_mm) + float(up_fit.tooth_bearing_arc_mm)),
+                end_extension_mm=float(end_extension_mm),
+                applied_extension_mm=min(float(low_fit.applied_extension_mm), float(up_fit.applied_extension_mm)),
+            )
+        if low_fit is not None and (up_fit is None or low_fit.accepted):
+            return low_fit
+        return up_fit
+
     if is_5class:
-        if jaw_key == "lower":
-            labels = (4,)
-        elif jaw_key == "upper":
-            labels = (3,)
-        else:
-            labels = (3, 4)
+        labels = (4,) if jaw_key == "lower" else (3,)
     else:
         from .labels import MANDIBULAR_TEETH_IDS, MAXILLARY_TEETH_IDS
 
-        if jaw_key == "lower":
-            labels = tuple(MANDIBULAR_TEETH_IDS)
-        elif jaw_key == "upper":
-            labels = tuple(MAXILLARY_TEETH_IDS)
-        else:
-            labels = tuple(MANDIBULAR_TEETH_IDS) + tuple(MAXILLARY_TEETH_IDS)
+        labels = tuple(MANDIBULAR_TEETH_IDS) if jaw_key == "lower" else tuple(MAXILLARY_TEETH_IDS)
 
     def _fit_from_jawbone_crest() -> Optional[ArchFitResult]:
-        bone_labels = (1,) if jaw_key == "lower" else ((2,) if jaw_key == "upper" else (1, 2))
-        bz, by, bx = np.where(np.isin(mask, bone_labels))
-        if len(bx) < 30:
+        b_binned = _extract_jawbone_crest_points(mask, matrix, jaw_key, num_bins=max(24, num_control_points * 3))
+        if b_binned is None or len(b_binned) < 4:
             return None
-        b_step = max(1, len(bx) // 60000)
-        b_vox = np.column_stack(
-            [bx[::b_step], by[::b_step], bz[::b_step], np.ones(len(bx[::b_step]), dtype=np.float64)]
-        )
-        b_world = (matrix @ b_vox.T).T[:, :3]
-        # Keep the alveolar crest band: superior 30% for Mandible, inferior 30% for Maxilla.
-        if jaw_key == "lower":
-            crest_pts = b_world[b_world[:, 2] >= float(np.percentile(b_world[:, 2], 70))]
-        elif jaw_key == "upper":
-            crest_pts = b_world[b_world[:, 2] <= float(np.percentile(b_world[:, 2], 30))]
-        else:
-            crest_pts = b_world
-        if len(crest_pts) < 30:
-            crest_pts = b_world
-        b_order_idx = _order_cloud_as_horseshoe(crest_pts[:, :2])
-        b_ordered = crest_pts[b_order_idx]
-        b_bins = max(24, num_control_points * 3)
-        b_edges = np.linspace(0, len(b_ordered), b_bins + 1).astype(int)
-        b_binned = np.asarray(
-            [
-                np.median(b_ordered[b_edges[i] : max(b_edges[i] + 1, b_edges[i + 1])], axis=0)
-                for i in range(b_bins)
-            ],
-            dtype=np.float64,
-        )
-        if len(b_binned) < 4:
-            return None
-        if b_binned[0, 0] < b_binned[-1, 0]:
-            b_binned = b_binned[::-1].copy()
-        b_ctrl, b_dense = _spline_through_ordered(b_binned, num_control_points, smoothing=0.10)
+        b_ctrl, b_dense = _spline_through_ordered(b_binned, num_control_points, smoothing=0.20)
         b_arc = _polyline_arc_length(b_dense)
-        b_res = _rms_to_polyline(crest_pts, b_dense)
+        b_res = _rms_to_polyline(b_binned, b_dense)
         inv_aff = np.linalg.inv(matrix)
         b_base = b_ctrl.copy()
         b_ctrl = _extend_arch_endpoints(
@@ -1029,7 +1212,7 @@ def fit_arch_from_label_mask(
             points_ras=b_ctrl,
             arc_length_mm=_polyline_arc_length(b_dense),
             residual_rms_mm=b_res,
-            n_points_used=int(len(crest_pts)),
+            n_points_used=int(len(b_binned)),
             method="jawbone_crest",
             accepted=b_acc,
             reason=b_reason,
@@ -1092,30 +1275,13 @@ def fit_arch_from_label_mask(
             crown = world
         if len(crown) < 30:
             crown = world
-        xy = crown[:, :2]
-        order_idx = _order_cloud_as_horseshoe(xy)
-        ordered = crown[order_idx]
-
-        # Bin medians along the horseshoe angle to suppress voxel-density noise.
         bin_count = max(24, num_control_points * 3)
-        edges = np.linspace(0, len(ordered), bin_count + 1).astype(int)
-        binned = [
-            np.median(ordered[edges[i] : max(edges[i] + 1, edges[i + 1])], axis=0) for i in range(bin_count)
-        ]
-        binned = np.asarray(binned, dtype=np.float64)
-        if _monotonic_descending_x(binned):
-            ordered = binned
-        else:
-            # Fallback: legacy angular binned fit on the ordered cloud.
-            ordered = np.asarray(
-                [np.median(chunk, axis=0) for chunk in np.array_split(ordered, bin_count)],
-                dtype=np.float64,
-            )
+        ordered = _bin_horseshoe_cloud(crown, num_bins=bin_count)
         if len(ordered) < 4:
             return None
         if ordered[0, 0] < ordered[-1, 0]:
             ordered = ordered[::-1].copy()
-        ctrl, dense = _spline_through_ordered(ordered, num_control_points, smoothing=0.05)
+        ctrl, dense = _spline_through_ordered(ordered, num_control_points, smoothing=0.12)
         residual = _rms_to_polyline(crown, dense)
         n_used = len(crown)
 
@@ -1124,18 +1290,17 @@ def fit_arch_from_label_mask(
     # Clip against the true voxel field of view, not just a world AABB: an oblique
     # AABB can include corners that are outside the scanned volume.
     inverse_affine = np.linalg.inv(matrix)
-    base_ctrl = ctrl.copy()
-    ctrl = _extend_arch_endpoints(
-        ctrl, float(end_extension_mm), inverse_affine=inverse_affine, shape_zyx=mask.shape
-    )
-    dense = _extend_arch_endpoints(
-        dense, float(end_extension_mm), inverse_affine=inverse_affine, shape_zyx=mask.shape
+    ctrl, dense, applied_extension = _extend_arch_with_jawbone_or_tangent(
+        ctrl,
+        dense,
+        float(end_extension_mm),
+        mask=mask,
+        matrix=matrix,
+        inverse_affine=inverse_affine,
+        jaw_key=jaw_key,
+        num_control_points=num_control_points,
     )
     arc_length = _polyline_arc_length(dense)
-    applied_extension = min(
-        float(np.linalg.norm(ctrl[0] - base_ctrl[0])),
-        float(np.linalg.norm(ctrl[-1] - base_ctrl[-1])),
-    )
 
     reason = ""
     accepted = True

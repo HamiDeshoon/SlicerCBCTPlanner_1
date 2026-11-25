@@ -23,12 +23,17 @@ from CBCTPlannerLib.PrintLayoutEngine import (  # noqa: E402
     _image_to_data_uri,
     _paste_contain,
 )
+from CBCTPlannerLib.core.annotations import AnnotationStore  # noqa: E402
 from CBCTPlannerLib.core.arch_detector import DentalArch  # noqa: E402
-from CBCTPlannerLib.core.measurements import MeasurementEngine  # noqa: E402
+from CBCTPlannerLib.core.measurements import CrossSectionData, MeasurementEngine  # noqa: E402
 from CBCTPlannerLib.core.print_layout import slice_count_for_selection  # noqa: E402
 from CBCTPlannerLib.core.labels import sort_teeth_anatomically  # noqa: E402
 from CBCTPlannerLib.core.volume_loader import CBCTVolume  # noqa: E402
-from CBCTPlannerLib.core_print_render import render_3d_mip_card, render_panoramic_strip  # noqa: E402
+from CBCTPlannerLib.core_print_render import (  # noqa: E402
+    render_3d_mip_card,
+    render_cross_section,
+    render_panoramic_strip,
+)
 
 
 class TestPrintLayoutRules(unittest.TestCase):
@@ -225,7 +230,6 @@ class TestPrintLayoutRules(unittest.TestCase):
 
 
     def test_grayscale_layout_includes_vr_and_omits_redundant_card_footer(self) -> None:
-        from types import SimpleNamespace
         from CBCTPlannerLib.PrintLayoutEngine import CrossSectionSliceSpec
 
         ple = PrintLayoutEngine(logic=None)
@@ -257,7 +261,7 @@ class TestPrintLayoutRules(unittest.TestCase):
 
     def test_generate_8x10_layout_applies_measurement_overrides(self) -> None:
         from types import SimpleNamespace
-        from CBCTPlannerLib.core.measurements import CrossSectionData, ImplantSiteMeasurement
+        from CBCTPlannerLib.core.measurements import CrossSectionData
         from CBCTPlannerLib.core.arch_detector import DentalArch
 
         mask_arr = np.zeros((40, 40, 40), dtype=np.int16)
@@ -326,6 +330,165 @@ class TestPrintLayoutRules(unittest.TestCase):
             self.assertTrue(center_specs)
             self.assertAlmostEqual(center_specs[0].height_mm, 13.5)
             self.assertAlmostEqual(center_specs[0].crest_width_mm, 7.8)
+
+    def test_w3_w5_legend_moves_off_overlapping_corner_and_avoids_scale_bar(self) -> None:
+        u = np.linspace(-10.0, 10.0, 61)
+        v = np.linspace(-15.0, 15.0, 91)
+        img_cs = np.full((len(v), len(u)), -500.0, dtype=np.float32)
+        mask_cs = np.zeros((len(v), len(u)), dtype=np.int16)
+        # Occupy bottom-right corner (`v` lowest indices -> bottom rows after render flip).
+        mask_cs[:28, 32:] = 1
+        img_cs[:28, 32:] = 800.0
+        cs = CrossSectionData(
+            u_coords=u,
+            v_coords=v,
+            img_cs=img_cs,
+            mask_cs=mask_cs,
+            frame=None,
+            crest_v=6.0,
+            width_segments={},
+            canal_centroid_uv=None,
+            crest_uv=(-2.0, 6.0),
+            basal_uv=(-2.0, -4.0),
+            width_endpoints_uv={
+                0.0: ((-5.0, 6.0), (1.0, 6.0)),
+                3.0: ((-5.5, 3.0), (1.5, 3.0)),
+                5.0: ((-6.0, 1.0), (2.0, 1.0)),
+            },
+        )
+        meas = SimpleNamespace(
+            bone_height_mm=10.0,
+            crest_width_mm=6.0,
+            bone_width_at_depths_mm={0.0: 6.0, 3.0: 7.0, 5.0: 8.0},
+            misch_density_class="D2",
+            provenance="label_derived",
+            withheld_reason=None,
+        )
+        rnd = render_cross_section(cs, meas, scale=3, show_masks=False, monochrome=True, show_footer=False)
+        self.assertTrue(rnd.available)
+        key_labels = [(x, y) for x, y, t in rnd.labels if t == "W3/W5 key"]
+        self.assertEqual(len(key_labels), 1)
+        kx, ky = key_labels[0]
+        # Moved off bottom-right (x stays left of midpoint) and sits above bottom scale bar.
+        self.assertLess(kx, rnd.image.width * 0.45)
+        self.assertGreaterEqual(ky, 24.0)
+        self.assertLess(ky, rnd.image.height - 32.0)
+
+        # Now occupy BOTH bottom corners on a standard 30 mm field -> legend relocates to top-left below L badge.
+        u2 = np.linspace(-15.0, 15.0, 91)
+        img2 = np.full((len(v), len(u2)), -500.0, dtype=np.float32)
+        mask_cs2 = np.zeros((len(v), len(u2)), dtype=np.int16)
+        mask_cs2[:30, :] = 1
+        img2[:30, :] = 800.0
+        cs2 = CrossSectionData(
+            u_coords=u2,
+            v_coords=v,
+            img_cs=img2,
+            mask_cs=mask_cs2,
+            frame=None,
+            crest_v=4.0,
+            width_segments={},
+            canal_centroid_uv=None,
+            crest_uv=(0.0, 4.0),
+            basal_uv=(0.0, -4.0),
+            width_endpoints_uv={
+                0.0: ((-3.0, 4.0), (3.0, 4.0)),
+                3.0: ((-3.5, 1.0), (3.5, 1.0)),
+            },
+        )
+        rnd2 = render_cross_section(cs2, meas, scale=3, show_masks=False, monochrome=True, show_footer=False)
+        kx2, ky2 = [(x, y) for x, y, t in rnd2.labels if t == "W3/W5 key"][0]
+        self.assertGreaterEqual(ky2, 24.0)
+        self.assertLess(ky2, rnd2.image.height * 0.45)
+
+    def test_bl14_clinical_notes_strip_renders_when_flagged_and_omits_when_empty(self) -> None:
+        mask_arr = np.zeros((40, 40, 40), dtype=np.int16)
+        img_arr = np.full((40, 40, 40), -500.0, dtype=np.float32)
+        arch = DentalArch(
+            control_points=np.array([[5.0, 20.0, 20.0], [15.0, 20.0, 20.0], [25.0, 20.0, 20.0], [35.0, 20.0, 20.0]], dtype=np.float64),
+            jaw_type="lower",
+            ras_convention=True,
+        )
+
+        class _MultiStubEngine:
+            volume = SimpleNamespace(image=img_arr, spacing=(1.0, 1.0, 1.0))
+            mask = mask_arr
+            arch_mand = arch
+            arch_max = None
+            last_withheld_reason = None
+
+            def get_site_center_ras(self, fdi):
+                return np.array([15.0 if str(fdi) == "46" else 25.0, 20.0, 20.0], dtype=np.float64)
+
+            def _arch_for_fdi(self, _fdi):
+                return self.arch_mand
+
+            def measure_at_arc_mm(self, _jaw_key, _arc_mm, fdi_hint=None):
+                u = np.linspace(-10.0, 10.0, 41)
+                v = np.linspace(-15.0, 15.0, 61)
+                cs = CrossSectionData(
+                    u_coords=u,
+                    v_coords=v,
+                    img_cs=np.zeros((len(v), len(u)), dtype=np.float32),
+                    mask_cs=np.zeros((len(v), len(u)), dtype=np.int16),
+                    frame=None,
+                    crest_v=5.0,
+                    width_segments={},
+                    canal_centroid_uv=None,
+                    crest_uv=(0.0, 5.0),
+                    basal_uv=(0.0, -5.0),
+                    width_endpoints_uv={0.0: ((-3.0, 5.0), (3.0, 5.0))},
+                )
+                meas = SimpleNamespace(
+                    tooth_fdi=str(fdi_hint or "46"),
+                    bone_height_mm=10.0,
+                    crest_width_mm=6.0,
+                    bone_width_at_depths_mm={0.0: 6.0, 3.0: 7.0},
+                    distance_to_vital_structure_mm=None,
+                    misch_density_class="D2",
+                    mean_density_hu=700.0,
+                    provenance="label_derived",
+                    withheld_reason=None,
+                )
+                return meas, cs
+
+        logic = SimpleNamespace(_get_or_build_measurement_engine=lambda _v, _s: _MultiStubEngine())
+        store = AnnotationStore()
+        store.add("Suspected radiolucency — manual review", fdi=46, kind="flag", severity="warning")
+        store.add("Verify cortical plate", fdi=47, kind="ai_comment", severity="info")
+        store.add("Routine observation", fdi=46, kind="comment", severity="info")
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path, pdf_path, specs = PrintLayoutEngine(logic=logic).generate_8x10_layout(
+                volumeNode=object(),
+                segmentationNode=None,
+                selected_fdis=[46, 47],
+                out_dir=Path(tmp),
+                grayscale=True,
+                annotation_store=store,
+            )
+            html_doc = Path(html_path).read_text(encoding="utf-8")
+            self.assertIn("Clinical Notes &amp; Review Flags:", html_doc)
+            self.assertIn("Suspected radiolucency", html_doc)
+            self.assertIn("Verify cortical plate", html_doc)
+            self.assertNotIn("Routine observation", html_doc)
+            self.assertTrue((Path(tmp) / "CBCT_8x10_Print_Layout.png").exists())
+            self.assertTrue(Path(pdf_path).exists())
+            self.assertTrue(any(abs(float(s.offset_mm)) < 0.05 for s in specs))
+
+        with tempfile.TemporaryDirectory() as tmp_empty:
+            html_empty, _pdf2, _specs2 = PrintLayoutEngine(logic=logic).generate_8x10_layout(
+                volumeNode=object(),
+                segmentationNode=None,
+                selected_fdis=[46, 47],
+                out_dir=Path(tmp_empty),
+                grayscale=True,
+                annotation_store=None,
+            )
+            html_doc_empty = Path(html_empty).read_text(encoding="utf-8")
+            self.assertNotIn("Clinical Notes &amp; Review Flags:", html_doc_empty)
 
 
 if __name__ == "__main__":

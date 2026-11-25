@@ -67,11 +67,17 @@ something a remote review agent can work with, and adds a ridge-parallel section
   the annotations, or error messages (`redact_secrets`). Requests are anonymised (no patient identifiers) and run on
   a worker thread with a poll timer, so Slicer never freezes.
 
-**Tangential (ridge-parallel) sections** (`core/tangential.py`)
-- The plane spanned by the arch *tangent* and the occlusal axis at a given arc position — it looks **along** the ridge
-  instead of across it, showing crest continuity between adjacent teeth (slab `mean`/`max`/`min`, 0.3 mm pixels).
-- Follows the cross-section cursor by default (debounced), or can be stepped manually; the cortical crest line and the
-  crest drop are drawn on the section, and it can be saved as PNG.
+- **Tangential (ridge-parallel) sections** (`core/tangential.py`, embedded inside **Step 4** alongside the arch & cross-section viewports and shared with **Step 8**)
+  - The plane spanned by the arch *tangent* and the occlusal axis at a given arc position — it looks **along** the ridge instead of across it, showing crest continuity between adjacent teeth (slab `mean`/`max`/`min`, 0.3 mm pixels).
+  - Follows the cross-section cursor by default (debounced), or can be stepped manually; the cortical crest line and the crest drop are drawn on the section, and it can be saved as PNG.
+- **Interactive Pre-Print Editor & Keypoint Overrides** (`CBCTPlanner.py`, `PrintLayoutEngine.py`, `core_print_render.py`)
+  - Opens before 8×10″ film composition, auto-populating `H` and `W0` (and real cross-section images) from `MeasurementEngine` even when Step 5 has not yet been run.
+  - Supports interactive handle dragging (`H` and `W0`, keeping `H` passing through `W0`'s midpoint while preserving its coronal crest offset), freehand inspection lines/circles, ParameterNode JSON persistence (`MeasurementOverrides`), and `.jsonl` export of corrected keypoints/overlays for ML training.
+  - Cross-section corner legends (`W3/W5`) automatically relocate away from overlapping cortical bone, caliper overlays, vital structures, and the `10 mm` scale bar; `AnnotationStore` flags (`flag`) and agent comments (`ai_comment`) render into a compact clinical notes strip on both the 8×10″ PNG/PDF and HTML report (`BL-14`).
+- **Edentulous & Partial-Jaw Arch Fitting (`jawbone_crest` + Jaw-Aware Odontogram)** (`core/arch_detector.py`, `CBCTPlanner.py`)
+  - When < 30 tooth voxels exist, `fit_arch_from_label_mask` falls back to alveolar `jawbone_crest` (filtering ascending ramus Z spikes). When posterior/anterior teeth are missing on a jaw with segmented jawbone (`end_extension_mm > 0`), the fitted curve follows the segmented jawbone alveolar ridge posteriorly instead of stopping at the last surviving tooth centroid; `"shared"` mode fits lower and upper separately and blends them so lower+upper points never zig-zag in panoramic views.
+  - Step 5's odontogram hides the absent jaw's quadrant/tooth buttons when only Mandible or Maxilla is present, marks missing teeth distinctly while keeping them clickable, and auto-selects + measures contiguous missing spans (e.g. clicking `#46` when `45/46/47` are missing measures all three).
+  - Step 5's cross-section viewer supports one-click/button **Full Screen** inspection with keyboard `Prev`/`Next` navigation, compact thumbnail cards, and proportional 8×10″ print card sizing.
 
 ## MCP server for 3D Slicer ([zhaoyouj/mcp-slicer](https://github.com/zhaoyouj/mcp-slicer))
 
@@ -114,34 +120,20 @@ JPEG captures of the application window, the Red slice view (matching the widget
 
 ## Roadmap / Future Updates
 
-Nothing below is implemented yet. It is the agreed backlog after the v3.1 feature pass, ordered by clinical value;
-the measurement items are tracked as `BL-*` in `analysis/slicercbctplanner_1/BUSINESS_RULES.md`.
+Open items below are the remaining backlog after the v3.2+ hardening pass (`BL-12`, `BL-14`, `BL-15`, `BL-17`, and `BL-18` were closed on 2026-11-25); status and closed evidence live in `analysis/slicercbctplanner_1/BUSINESS_RULES.md`.
 
 ### Agent & annotations
-- **Print the annotations** — agent comments and clinician notes are stored and exportable to JSON, but they do not
-  appear on the 8×10 film or in the HTML report yet (`BL-14`).
 - **Let the agent change implant selection** — `set_implant_diameter` is accepted and then reported as skipped, because
   the plan table is derived from measurements; the plan needs an explicit override column first (`BL-13`).
-- **Retry/backoff on rate limits** — a `429`/`5xx` answer currently surfaces as a failed request; `AgentError.is_retryable`
-  is already exposed for a backoff loop (`BL-15`).
-- **Endpoint URL normalization & gateway compatibility** — parse with `urlsplit` so query-string URLs (e.g., Azure
-  `?api-version=...`) are not mangled, align `is_configured()` with `resolved_url()`, allow keyless localhost shims,
-  redact URL credentials/query keys, and send an explicit `User-Agent` header (`BL-17`).
 - **Token/image budget** — the payload is built once with up to 8 images; long cases would benefit from a per-image
   budget and a size estimate before sending.
 - **Review history** — one request/response pair is kept in memory; a per-case log (request id, model, latency, applied
   actions) would make the agent auditable.
 
-### Measurement honesty
-- **Withhold `W0` when the opposite cortex is absent** (`BL-12`) — 185/205 sections in the real-CT sweep cut a single
-  plate and currently report 1–3 mm as a crest width instead of withholding it the way `H~` is marked.
+### Measurement & arch refinements
 - **Smooth `W0`/`W3`/`W5` along the arch** (`BL-01`) — a 1-site Gaussian would stop isolated slices between roots from
   spiking.
 - **Dynamic `half_v_mm`** (`BL-05`) for very tall anterior mandibles, and **PDL gap validation** on real molars (`BL-06`).
-- **One residual interproximal section** at the FDI 43 edge (arc 39.9 mm) still reads a 1.75 mm plate while its
-  neighbours bridge 7.6–7.9 mm.
-- **Anchor bone height `H` from the `W0` midline** (`BL-18`) — start the vertical/apical height line at the midpoint
-  of the `W0` segment instead of the initial `crest_uv` point.
 
 ### Rendering & performance
 - `1.0×` vs `1.25×` RaySum scale and gamma/CLAHE post-processing (`BL-03`); user-adjustable VR `Zoom` (`BL-04`).
@@ -154,13 +146,13 @@ the measurement items are tracked as `BL-*` in `analysis/slicercbctplanner_1/BUS
 
 ## Running Tests
 ```bash
-python -m unittest discover -s tests -v      # 219 tests (1 skipped if external ToothFairy3 NIfTI is absent)
+python -m unittest discover -s tests -v      # 242 tests across 17 modules (0 failures)
 ```
 
 Two headless harnesses run inside 3D Slicer's *own* Python (they need VTK/Qt, so the plain interpreter cannot run them):
 
 ```bash
-# measurement + print + tangential + agent round trip on a real CT (23 checks)
+# measurement + edentulous/shared/partial jaw + BL-12 + 8x10 BL-14 + tangential + agent round trip (27 checks)
 "D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" analysis/slicercbctplanner_1/verify_real_ct.py
 
 # boot Slicer with the REST API and exercise every MCP tool (11 checks)

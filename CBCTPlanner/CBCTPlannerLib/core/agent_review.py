@@ -201,7 +201,12 @@ class AgentEndpointConfig:
         raw = self.url.strip()
         if not raw:
             return False
-        parts = urllib.parse.urlsplit(raw)
+        candidate = (
+            raw
+            if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", raw)
+            else ("https://" + raw.lstrip("/"))
+        )
+        parts = urllib.parse.urlsplit(candidate)
         if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
             return False
         return bool(self.api_key) or self._is_loopback_host(parts.hostname)

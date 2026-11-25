@@ -104,6 +104,9 @@ WITHHELD_WIDTH_BORDER = "widths withheld: jaw mask touches cross-section border"
 WITHHELD_WIDTH_SPAN = "widths withheld: jaw mask spans the cross-section field"
 WITHHELD_HEIGHT_SPAN = "height withheld: jaw mask exceeds cross-section height"
 WITHHELD_NO_CREST = "crest not resolved in cross-section"
+WITHHELD_W0_SINGLE_CORTEX = (
+    "W0 withheld: cross-section cuts only one cortical plate (missing opposite cortex)"
+)
 WITHHELD_NO_ARCH = "no fitted dental arch for this jaw; fit or draw the arch first"
 WITHHELD_NO_SITE = "no tooth segmentation and no fitted arch at this planning site"
 WITHHELD_METRIC_FAILED = "metric computation failed"
@@ -117,6 +120,7 @@ _WITHHELD_BADGES = (
     ("spans the cross-section", "W: field-wide"),
     ("exceeds cross-section height", "H: field-tall"),
     ("crest not resolved", "no crest"),
+    ("only one cortical plate", "W0: 1-cortex"),
     ("metric computation failed", "metric failed"),
 )
 
@@ -176,6 +180,51 @@ def _uv_to_world(
         + float(v) * np.asarray(B, dtype=np.float64)
     )
     return (float(pt[0]), float(pt[1]), float(pt[2]))
+
+
+def coronal_offset_along_axis(
+    h_start_uv: Sequence[float],
+    h_end_uv: Sequence[float],
+    w0_start_uv: Sequence[float],
+    w0_end_uv: Sequence[float],
+) -> float:
+    """Signed distance (mm) of `h_start_uv` coronal to `W0` midpoint along the H ray."""
+    mid_u = 0.5 * (float(w0_start_uv[0]) + float(w0_end_uv[0]))
+    mid_v = 0.5 * (float(w0_start_uv[1]) + float(w0_end_uv[1]))
+    du = mid_u - float(h_end_uv[0])
+    dv = mid_v - float(h_end_uv[1])
+    seg_len = math.hypot(du, dv)
+    if seg_len <= 1e-4:
+        return float(math.hypot(float(h_start_uv[0]) - mid_u, float(h_start_uv[1]) - mid_v))
+    return ((float(h_start_uv[0]) - mid_u) * du + (float(h_start_uv[1]) - mid_v) * dv) / seg_len
+
+
+def reanchor_h_start_to_w0(
+    h_start_uv: Sequence[float],
+    h_end_uv: Sequence[float],
+    w0_start_uv: Sequence[float],
+    w0_end_uv: Sequence[float],
+    coronal_offset_mm: Optional[float] = None,
+) -> Tuple[float, float]:
+    """Keep H passing through W0's midpoint while preserving its coronal crest offset."""
+    mid_u = 0.5 * (float(w0_start_uv[0]) + float(w0_end_uv[0]))
+    mid_v = 0.5 * (float(w0_start_uv[1]) + float(w0_end_uv[1]))
+    offset = (
+        coronal_offset_along_axis(h_start_uv, h_end_uv, w0_start_uv, w0_end_uv)
+        if coronal_offset_mm is None
+        else float(coronal_offset_mm)
+    )
+    if abs(offset) <= 1e-4:
+        return (round(mid_u, 2), round(mid_v, 2))
+    du = mid_u - float(h_end_uv[0])
+    dv = mid_v - float(h_end_uv[1])
+    seg_len = math.hypot(du, dv)
+    if seg_len <= 1e-4:
+        return (round(mid_u, 2), round(mid_v, 2))
+    return (
+        round(mid_u + offset * (du / seg_len), 2),
+        round(mid_v + offset * (dv / seg_len), 2),
+    )
 
 
 def _same_jaw_tooth_mask(
@@ -516,12 +565,13 @@ class MeasurementEngine:
             Tuple[Optional[ImplantSiteMeasurement], Optional[CrossSectionData]],
         ] = {}
         self._present_labels_cache: Optional[set] = None
+        self.last_cross_sections: Dict[str, CrossSectionData] = {}
         # Reason recorded by the most recent site/cross-section measurement (None when all metrics measured).
         self.last_withheld_reason: Optional[str] = None
 
     def invalidate_caches(self, *, mask_changed: bool = True) -> None:
         """Clear cached measurements, spans, and (optionally) mask-derived distance transforms."""
-        for attr in ("_site_cache", "_arc_cache", "_tooth_span_cache"):
+        for attr in ("_site_cache", "_arc_cache", "_tooth_span_cache", "last_cross_sections"):
             c = getattr(self, attr, None)
             if c is not None:
                 c.clear()
@@ -730,16 +780,22 @@ class MeasurementEngine:
         return None if resolved is None else resolved[0]
 
     def is_tooth_missing(self, fdi: int) -> bool:
-        """Return True when `fdi` has no segmented tooth mask (edentulous site)."""
+        """Return True when `fdi` has no segmented tooth mask (edentulous site within an existing jaw)."""
         fdi_str = resolve_fdi_number(fdi)
         if fdi_str is None:
             return False
+        is_mand = is_mandibular_fdi(fdi_str)
+        if getattr(self, "mask", None) is not None:
+            arch = self._arch_for_fdi(fdi_str)
+            jaw_id = self._jaw_id(is_mand)
+            present_ids = self._present_label_ids()
+            if arch is None and jaw_id not in present_ids:
+                return False
         if not self.is_dental_segmentator_5class:
             return self._get_tooth_info(fdi_str) is None
         center = self.get_site_center_ras(fdi_str)
         if center is None:
             return False
-        is_mand = is_mandibular_fdi(fdi_str)
         tooth_lbl = get_tooth_group_label_id(is_mand, is_5class=True)
         vox = self.volume.world_to_voxel(center)
         vx, vy, vz = int(round(vox[0])), int(round(vox[1])), int(round(vox[2]))
@@ -832,6 +888,7 @@ class MeasurementEngine:
             res = self._measure_from_cs(
                 fdi_str, info, is_mandible, jaw_id, tooth, cs, site_source, is_approx_site
             )
+            self.last_cross_sections[fdi_str] = cs
             self._site_cache[cache_key] = res
             return res
         except Exception:
@@ -1534,6 +1591,7 @@ class MeasurementEngine:
         d_apical: Optional[Tuple[float, float]] = None,
         d_bl: Optional[Tuple[float, float]] = None,
         tooth_mask: Optional[np.ndarray] = None,
+        withheld_notes: Optional[List[str]] = None,
     ) -> Tuple[
         Dict[float, Tuple[float, float]], Dict[float, Tuple[Tuple[float, float], Tuple[float, float]]]
     ]:
@@ -1747,6 +1805,17 @@ class MeasurementEngine:
                     endpoints_uv[0.0] = interp
                     break
 
+        # BL-12: after all rescue attempts, if W0 still cuts only a single cortical plate
+        # (< 3.0 mm and <= 1 cortical run), withhold W0 rather than reporting a 1-3 mm plate.
+        w0 = endpoints_uv.get(0.0)
+        if w0 is not None:
+            w0_len = math.hypot(w0[1][0] - w0[0][0], w0[1][1] - w0[0][1])
+            if w0_len < 3.0 and _span_bone_runs(w0) <= 1:
+                endpoints_uv.pop(0.0, None)
+                segments.pop(0.0, None)
+                if withheld_notes is not None:
+                    withheld_notes.append(WITHHELD_W0_SINGLE_CORTEX)
+
         return segments, endpoints_uv
 
     # ------------------------------------------------------------------
@@ -1872,6 +1941,7 @@ class MeasurementEngine:
         # 4. Anatomy-aware buccal & lingual widths (Part 3.4) — computed before height so H starts at the W0 midline
         depths = [0.0, 3.0, 5.0, 6.0, 9.0]
         if width_ok:
+            w0_notes: List[str] = []
             segs_u, segs_uv = self._compute_bone_widths_with_endpoints_in_cs(
                 u_coords,
                 v_coords,
@@ -1885,6 +1955,7 @@ class MeasurementEngine:
                 d_apical=d_apical,
                 d_bl=d_bl,
                 tooth_mask=same_jaw_tooth,
+                withheld_notes=w0_notes,
             )
             cs.width_segments = segs_u
             cs.width_endpoints_uv = segs_uv
@@ -1909,6 +1980,17 @@ class MeasurementEngine:
                     )
                 else:
                     widths[depth] = None
+                    if depth == 0.0 and w0_notes:
+                        records["width_0"] = MeasurementRecord(
+                            measurement_type="bone_width_w0",
+                            value_mm=None,
+                            source_labels=(jaw_id,),
+                            provenance=PROVENANCE_UNAVAILABLE,
+                            quality=QUALITY_UNAVAILABLE,
+                            withheld_reason=w0_notes[0],
+                        )
+            if w0_notes:
+                withheld_reason = _join_reasons(withheld_reason, *w0_notes)
             if 0.0 in segs_uv and crest_uv is not None:
                 w0_l, w0_r = segs_uv[0.0]
                 w0_mid_u = 0.5 * (float(w0_l[0]) + float(w0_r[0]))
@@ -2410,6 +2492,7 @@ class MeasurementEngine:
                 d_apical = (math.sin(rad), -math.cos(rad)) if is_mand else (math.sin(rad), math.cos(rad))
                 d_bl = (math.cos(rad), math.sin(rad) if is_mand else -math.sin(rad))
                 depths = [0.0, 3.0, 5.0, 6.0, 9.0]
+                w0_move_notes: List[str] = []
                 segs_u, segs_uv = MeasurementEngine._compute_bone_widths_with_endpoints_in_cs(
                     u_coords,
                     v_coords,
@@ -2423,8 +2506,9 @@ class MeasurementEngine:
                     d_apical=d_apical,
                     d_bl=d_bl,
                     tooth_mask=same_tooth,
+                    withheld_notes=w0_move_notes,
                 )
-                if segs_uv:
+                if segs_uv or w0_move_notes:
                     cs.width_segments = segs_u
                     cs.width_endpoints_uv = segs_uv
                     new_widths: Dict[float, Optional[float]] = {}
@@ -2449,6 +2533,8 @@ class MeasurementEngine:
                         else:
                             new_widths[depth] = None
                             records.pop(f"width_{depth:g}", None)
+                    if w0_move_notes:
+                        cs.withheld_reason = _join_reasons(getattr(cs, "withheld_reason", None), *w0_move_notes)
                     if meas is not None:
                         meas.bone_width_at_depths_mm = new_widths
                         meas.crest_width_mm = new_widths.get(0.0)
@@ -2456,6 +2542,8 @@ class MeasurementEngine:
                             new_widths.get(6.0) if new_widths.get(6.0) is not None else new_widths.get(3.0)
                         )
                         meas.apical_width_mm = new_widths.get(9.0)
+                        if w0_move_notes:
+                            meas.withheld_reason = _join_reasons(meas.withheld_reason, *w0_move_notes)
 
         if meas is not None:
             meas.bone_height_mm = value

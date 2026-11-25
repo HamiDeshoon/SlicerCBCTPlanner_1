@@ -416,3 +416,43 @@ pick one and go.
 | `BL-16` | Vendored `mcp-slicer` with `SLICER_WEB_SERVER_URL` | Port 2016 is hardcoded upstream | S |
 | `BL-07`/`BL-09` | Test-helper extraction; trim unused `core/diagnostics.py` | Maintenance only | S |
 | `OPT-05` | Structured (JSON/Parquet) batch manifest for cohort QA | Phase 7 stores `.npy` only | M |
+
+---
+
+## 15. Post-v3.2 Hardening & Backlog Closure (2026-11-25)
+
+Uncommitted local hardening pass (awaiting user confirmation before commit/push):
+
+### Changes & Closed Backlog Items
+- **`core_print_render.py` (Corner Legend Overlap Avoidance)**: Added `scale_rect` (`10 mm` scale bar) to `occupied_rects` and replaced the fixed bottom-right `W3/W5` legend coordinates with a 4-corner collision-scoring selector avoiding `occupied_rects`, caliper/vital overlays, and cortical bone/mask pixels while preserving pill bounds (`x >= 18, y >= 24`). Verified on `ToothFairy3S_0021` 8×10 grayscale film (moved cleanly to empty bottom-left above the `10 mm` scale bar) and in `test_w3_w5_legend_moves_off_overlapping_corner_and_avoids_scale_bar`.
+- **`core/measurements.py` (`BL-12`, `BL-18`)**:
+  - **Closed `BL-12`**: Added `WITHHELD_W0_SINGLE_CORTEX` (badge `"W0: 1-cortex"`). After the anterior deeper-caliper rescue runs, if `W0 < 3.0 mm` with `runs <= 1`, `W0` is withheld (`None`) with `WITHHELD_W0_SINGLE_CORTEX` while keeping `H` intact. Propagated through `_measure_from_cs` and `_move_crest`. Guarded by `TestBL12SingleCortexWithhold`, updated `test_partially_dentate_crest_comes_from_jaw_bone_not_the_root`, and `verify_real_ct.py` (`0` sub-3 mm W0 plates reported; 5 single-plate arcs `[34.0, 39.0, 39.5, 57.5, 58.0]` withheld cleanly).
+  - **Closed `BL-18` & Coronal Offset Preservation**: `MeasurementEngine` now tracks `last_cross_sections` for the Pre-Print Editor; added `coronal_offset_along_axis` and `reanchor_h_start_to_w0` so updating/dragging `W0` keeps `H` passing through `W0`'s midpoint while preserving its coronal crest offset (keeping `crest_uv` fallback when `W0` is withheld).
+- **`PrintLayoutEngine.py` (`BL-14` & Multi-Tooth Center Inline Labels)**:
+  - **Closed `BL-14`**: `generate_8x10_layout` now accepts `annotation_store`, collects `flag` / `ai_comment` entries via `_collect_clinical_notes`, and renders a compact `Clinical Notes & Review Flags:` strip in `_compose_page_image` (PNG/PDF) and `_build_8x10_html` (both grayscale and color).
+  - Ensured multi-tooth spans always render inline labels (`H`, `W0`, `IAN`) on the center slice (`s_idx == n_slices // 2` or `abs(arc_mm - center_arc) < 0.05`) without duplicate card footers.
+- **`CBCTPlanner.py` (Interactive Pre-Print Editor & Step 4 Tangential)**:
+  - Fixed missing `import math`, auto-populated `H`/`W0` & slice images from `MeasurementEngine` in `_buildPrePrintReviewRows` / `_showPrePrintReviewDialog` when `treatmentPlanByFDI` is empty, preserved coronal crest offset on `W0` drag via `reanchor_h_start_to_w0`, fixed `"Apply Edits && Print"`, persisted `_measurementOverridesByFDI` (including `custom_overlays`) in ParameterNode `"MeasurementOverrides"` JSON (cleared on `onSceneStartClose`), and added `"Export corrected keypoints (.jsonl)"`.
+  - Documented Step 4's embedded Tangential (ridge-parallel) viewer alongside Step 4's arch/cross-section controls.
+- **`core/agent_review.py` (`BL-15`, `BL-17`)**:
+  - **Closed `BL-15` & `BL-17`**: `AgentClient._post` handles retry/backoff on 429/5xx (`Retry-After` respected); `AgentEndpointConfig` uses `urlsplit`, preserves query params, redacts userinfo/query keys, sends explicit `User-Agent`, and aligns `is_configured()` with `resolved_url()` for bare hostnames as well as `http(s)://`.
+- **`verify_real_ct.py` (Edentulous `jawbone_crest` & Real-CT Guards)**:
+  - Zeroed all tooth labels on `ToothFairy3S_0021` (`LOWER_JAW_ID` / `UPPER_JAW_ID` only) and verified `fit_arch_from_label_mask(..., jaw="lower", is_5class=False)` returns `accepted=True`, `method="jawbone_crest"`, `pts=11`, `arc=153.4 mm`, `4/5` valid cross-sections.
+
+### Final Verification After Last Edit (2026-11-25)
+| Check | Result |
+|---|---|
+| `python -m ruff check CBCTPlanner tests` | **All checks passed** (`0` errors) |
+| `python -m unittest discover -s tests` | **242 tests OK** (`0` failures, `0` skipped, `12.58 s`) |
+| `PythonSlicer.exe analysis/slicercbctplanner_1/verify_real_ct.py` | **27/27 PASS** (`205` sections, real-CT edentulous `5/5`, shared occlusal `max_dz=1.34 mm`, missing `45/46/47` arch `144.5 mm` + span `[45, 46, 47]`, BL-12, 8×10 BL-14, tangential, mock agent) |
+| `python analysis/mcp_slicer_check/verify_mcp_slicer.py` | **11/11 PASS** (Slicer 5.12.3 rev 34627) |
+| Visual Inspection (8×10 PNG + Live Slicer 5.12.3 GUI) | Inspected compact-card `ToothFairy3S_0021_8x10.png` (top-right VR, proportional slice cards, bottom-left W3/W5 legend off cortex above scale bar, center inline labels, no duplicate footers, BL-14 notes strip), `step4_tangential.png`, and updated `preprint_editor.png`. |
+
+### Jaw-Wise Odontogram, Contiguous Missing Span, Full-Jaw Curves & Full-Screen Viewer (2026-11-25)
+- **Full-jaw & Z-smooth arch curves (`core/arch_detector.py`, `CBCTPlanner.py`)**:
+  - `fit_arch_from_label_mask(..., jaw="shared")` fits lower and upper separately and blends smoothly instead of mixing raw upper/lower voxels (`max_dz` dropped from `12.9 mm` zigzag to `1.34 mm`).
+  - `_extract_jawbone_crest_points` + `_extend_arch_with_jawbone_or_tangent` use posterior-referenced uniform angular bins, clamp ascending mandibular ramus Z spikes, and follow the curved jawbone alveolar ridge past missing posterior molars (`45/46/47/48` missing -> `arc=144.5 mm`, reaching `X=33.4 mm` posterior mandible).
+- **Jaw-wise tooth buttons & auto-measuring missing spans (`CBCTPlanner.py`, `core/measurements.py`)**:
+  - `_refreshOdontogramAvailability()` hides upper buttons when only lower jaw exists (and vice versa), styles missing teeth dashed while keeping them clickable, and `onOdontogramToothClicked` / `toggleToothPlanMembership` auto-expand & measure contiguous missing sites (`[45, 46, 47]` when any one of them is clicked).
+- **Full-screen cross-section viewer & compact cards (`CBCTPlanner.py`, `PrintLayoutEngine.py`)**:
+  - Added **Full Screen** button and clickable preview (`onFullScreenGalleryClicked`) with keyboard `Left`/`Right`/`Esc` navigation; shrank Step 5 gallery thumbnails (`84×108`, compact 1-line `H/W0`); capped 8×10 1–2 row print card height proportionally.
