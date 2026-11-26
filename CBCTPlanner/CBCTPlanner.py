@@ -116,6 +116,7 @@ from CBCTPlannerLib import (
     CheckpointSpec,
     CrossSectionNavigator,
     CursorSettings,
+    DOCShapeAXIResult,
     GuideSleeveSpec,
     ImpactedToothCLICResult,
     ImplantPlannerLogic,
@@ -179,7 +180,6 @@ from CBCTPlannerLib.core.measurements import (
     MISCH_APPROXIMATE_DISCLAIMER,
     WITHHELD_NO_SEGMENTATION,
     MeasurementEngine,
-    coronal_offset_along_axis,
     reanchor_h_start_to_w0,
     withheld_badge,
 )
@@ -375,6 +375,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnRunNativeASO: Any = None
         self.btnRunNativeCLIC: Any = None
         self.btnRunNativeVFACE: Any = None
+        self.btnRunNativeDOCShapeAXI: Any = None
         self.btnRunAutoCropROI: Any = None
         self.adtResultsLabel: Any = None
 
@@ -1352,9 +1353,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.inlineGalleryActiveImageLabel = qt.QLabel("No active cross-section rendered yet.")
         self.inlineGalleryActiveImageLabel.setAlignment(qt.Qt.AlignCenter)
         self.inlineGalleryActiveImageLabel.setMinimumHeight(240)
-        self.inlineGalleryActiveImageLabel.setCursor(qt.Qt.PointingHandCursor)
-        self.inlineGalleryActiveImageLabel.setToolTip("Click to open the active cross-section in Full Screen.")
-        self.inlineGalleryActiveImageLabel.mouseReleaseEvent = lambda _ev: self.onFullScreenGalleryClicked()
+        self.inlineGalleryActiveImageLabel.setToolTip("Click 'Full Screen' above to inspect this cross-section full-screen.")
         self.inlineGalleryActiveImageLabel.setStyleSheet(
             "background-color: #020617; color: #94a3b8; border: 1px solid #1e293b; border-radius: 6px; padding: 6px;"
         )
@@ -1543,6 +1542,18 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         canalRow.addWidget(self.canalMarginSpin)
         step6Layout.addRow("Mandibular Canal:", canalRow)
 
+        endoRow = qt.QHBoxLayout()
+        self.btnAnalyzeEndoTooth = qt.QPushButton("Analyze Multi-Root Canals")
+        self.btnAnalyzeEndoTooth.setToolTip(
+            "Reconstruct multi-root canal topology, bifurcations, local EDT radius, curvature, "
+            "and access cavity corridor for selected tooth/teeth (automated planning aid)."
+        )
+        self.btnExportEndoJson = qt.QPushButton("Export Endo JSON")
+        self.btnExportEndoJson.setToolTip("Save multi-root endodontic analysis results to JSON.")
+        endoRow.addWidget(self.btnAnalyzeEndoTooth)
+        endoRow.addWidget(self.btnExportEndoJson)
+        step6Layout.addRow("Endodontics (Multi-Root):", endoRow)
+
         guideRow = qt.QHBoxLayout()
         self.guideSupportCombo = qt.QComboBox()
         self.guideSupportCombo.addItem("Tooth-Supported", "tooth_supported")
@@ -1636,13 +1647,18 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnRunAutoCropROI.setToolTip(
             "Fit a tight 3D Region of Interest (ROI) bounding box around the segmented dental arches."
         )
+        self.btnRunNativeDOCShapeAXI = qt.QPushButton("🔬 DOCShapeAXI: Shape & Explainability")
+        self.btnRunNativeDOCShapeAXI.setToolTip(
+            "Run DOCShapeAXI Airway / Condyle / Cleft 3D shape analysis and export VTK vertex saliency (ColdToHotRainbow)."
+        )
         adtNativeRow2.addWidget(self.btnRunNativeCLIC)
         adtNativeRow2.addWidget(self.btnRunNativeVFACE)
+        adtNativeRow2.addWidget(self.btnRunNativeDOCShapeAXI)
         adtNativeRow2.addWidget(self.btnRunAutoCropROI)
-        step7Layout.addRow("CLI-C, VFACE & Crop:", adtNativeRow2)
+        step7Layout.addRow("CLI-C, VFACE, ShapeAXI & Crop:", adtNativeRow2)
 
         self.adtResultsLabel = qt.QLabel(
-            "AutomatedDentalTools ready — click ALI, ASO, CLI-C, VFACE, or AutoCrop3D above."
+            "AutomatedDentalTools ready — click ALI, ASO, CLI-C, VFACE, DOCShapeAXI, or AutoCrop3D above."
         )
         self.adtResultsLabel.setWordWrap(True)
         self.adtResultsLabel.setStyleSheet(
@@ -1660,6 +1676,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "AutoCrop3D",
             "BatchDentalSegmentator",
             "MRI2CBCT",
+            "DOCShapeAXI",
             "CLI-C",
             "VFACE",
         ):
@@ -1759,6 +1776,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnExportPlan.clicked.connect(self.onExportTreatmentPlan)
 
         self.btnExtractCanals.clicked.connect(self.onExtractCanalsClicked)
+        self.btnAnalyzeEndoTooth.clicked.connect(self.onAnalyzeEndoToothClicked)
+        self.btnExportEndoJson.clicked.connect(self.onExportEndoJsonClicked)
         self.btnTraceRightCanal.clicked.connect(lambda: self.onTraceCanalManual("Right"))
         self.btnTraceLeftCanal.clicked.connect(lambda: self.onTraceCanalManual("Left"))
         self.canalMarginSpin.valueChanged.connect(self.onCanalMarginChanged)
@@ -1795,6 +1814,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.btnRunNativeASO.clicked.connect(self.onRunNativeASOClicked)
         self.btnRunNativeCLIC.clicked.connect(self.onRunNativeCLICClicked)
         self.btnRunNativeVFACE.clicked.connect(self.onRunNativeVFACEClicked)
+        self.btnRunNativeDOCShapeAXI.clicked.connect(self.onRunNativeDOCShapeAXIClicked)
         self.btnRunAutoCropROI.clicked.connect(self.onRunAutoCropROIClicked)
 
         # Step 8 (review agent + tangential sections) is built last so it can read every
@@ -2826,7 +2846,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         jaw = self._effectiveJawKey()
         if segNode is None:
-            if slicer:
+            if slicer and getattr(slicer, "app", None) is not None:
                 slicer.util.warningDisplay(
                     "Auto-fit needs segmented teeth.\n"
                     "Select/segment a jaw first, or use 'Place / Draw Arch Points on Axial'."
@@ -3191,13 +3211,104 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._parameterNode.SetParameter("SelectedTeethFDI", ",".join(str(t) for t in ordered))
 
     def _detectJawAndTeethAvailability(self) -> Tuple[bool, bool, Optional[Set[int]]]:
-        """Detect which jaws (`lower`/`upper`) and individual FDI teeth exist in the active scan."""
+        """Detect which jaws (`lower`/`upper`) and individual FDI teeth exist without blocking UI."""
         volNode = self.volumeSelector.currentNode() if getattr(self, "volumeSelector", None) else None
         segNode = (
             self.segmentationSelector.currentNode() if getattr(self, "segmentationSelector", None) else None
         )
         logic = getattr(self, "logic", None)
-        if segNode is not None and volNode is not None and logic is not None and hasattr(logic, "_extract_combined_label_mask"):
+
+        # 1. Fast path: use already-built cached MeasurementEngine when mask token matches (< 1 ms).
+        if segNode is not None and volNode is not None and logic is not None:
+            cached = getattr(logic, "_cached_engine", None)
+            cached_key = getattr(logic, "_cached_engine_key", None)
+            if cached is not None and cached_key is not None and hasattr(logic, "_mask_cache_token"):
+                try:
+                    if cached_key[0] == logic._mask_cache_token(volNode, segNode):
+                        present_ids = cached._present_label_ids()
+                        if getattr(cached, "is_dental_segmentator_5class", False):
+                            has_low = (LOWER_JAW_ID in present_ids) or (4 in present_ids)
+                            has_up = (UPPER_JAW_ID in present_ids) or (3 in present_ids)
+                            if has_low or has_up:
+                                return has_low, has_up, None
+                        else:
+                            mand_p = {
+                                int(f)
+                                for f in (Q3_TEETH + Q4_TEETH)
+                                if FDI_TO_TOOTH_ID.get(str(f), f) in present_ids
+                            }
+                            max_p = {
+                                int(f)
+                                for f in (Q1_TEETH + Q2_TEETH)
+                                if FDI_TO_TOOTH_ID.get(str(f), f) in present_ids
+                            }
+                            has_low = (LOWER_JAW_ID in present_ids) or bool(mand_p)
+                            has_up = (UPPER_JAW_ID in present_ids) or bool(max_p)
+                            if has_low or has_up:
+                                return has_low, has_up, (mand_p | max_p)
+                except Exception:
+                    logger.debug("Cached engine availability lookup skipped", exc_info=True)
+
+        # 2. Live Slicer metadata path: inspect segment names/tags directly (0 ms, never copies VTK labelmaps on UI refresh).
+        if segNode is not None and hasattr(segNode, "GetSegmentation"):
+            try:
+                segmentation = segNode.GetSegmentation()
+                if segmentation is not None:
+                    n_seg = segmentation.GetNumberOfSegments()
+                    matched_records = []
+                    for idx in range(n_seg):
+                        seg = segmentation.GetNthSegment(idx)
+                        sid = segmentation.GetNthSegmentID(idx)
+                        sname = seg.GetName() if seg else ""
+                        fdi_attr = safe_get_segment_tag(seg, "CBCTPlanner.FDI") if seg else None
+                        term_str = safe_get_segment_tag(seg, "TerminologyEntry") if seg else None
+                        lbl, cat, is5, prec = match_segment_to_label_and_precedence(
+                            sid, sname, fdi_attribute=fdi_attr, terminology_str=term_str
+                        )
+                        if lbl != 0:
+                            matched_records.append((lbl, cat, is5, prec, sname.lower()))
+                    if matched_records:
+                        is_5cls = resolve_combined_mask_scheme([r[:4] for r in matched_records])
+                        lbl_set = {r[0] for r in matched_records}
+                        if is_5cls:
+                            has_low = any("mandible" in r[4] or "lower" in r[4] for r in matched_records) or (4 in lbl_set)
+                            has_up = any("maxilla" in r[4] or "upper" in r[4] for r in matched_records) or (3 in lbl_set)
+                            if has_low or has_up:
+                                return has_low, has_up, None
+                        else:
+                            mand_p = {
+                                int(f)
+                                for f in (Q3_TEETH + Q4_TEETH)
+                                if FDI_TO_TOOTH_ID.get(str(f), f) in lbl_set
+                            }
+                            max_p = {
+                                int(f)
+                                for f in (Q1_TEETH + Q2_TEETH)
+                                if FDI_TO_TOOTH_ID.get(str(f), f) in lbl_set
+                            }
+                            has_low = (
+                                any("mandible" in r[4] or "lower" in r[4] for r in matched_records)
+                                or (LOWER_JAW_ID in lbl_set)
+                                or bool(mand_p)
+                            )
+                            has_up = (
+                                any("maxilla" in r[4] or "upper" in r[4] for r in matched_records)
+                                or (UPPER_JAW_ID in lbl_set)
+                                or bool(max_p)
+                            )
+                            if has_low or has_up:
+                                return has_low, has_up, (mand_p | max_p)
+            except Exception:
+                logger.debug("Segment metadata availability probe skipped", exc_info=True)
+
+        # 3. Headless stub / unit-test fallback (when segNode has no GetSegmentation).
+        if (
+            segNode is not None
+            and not hasattr(segNode, "GetSegmentation")
+            and volNode is not None
+            and logic is not None
+            and hasattr(logic, "_extract_combined_label_mask")
+        ):
             try:
                 mask, is_5class = logic._extract_combined_label_mask(volNode, segNode)
             except Exception:
@@ -3306,7 +3417,11 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if jaw_combo is not None and (arch_mode is None or not str(arch_mode.currentText).startswith("Shared")):
             target = "Lower" if (has_lower and not has_upper) else ("Upper" if (has_upper and not has_lower) else None)
             if target and hasattr(jaw_combo, "currentText") and jaw_combo.currentText != target:
+                if hasattr(jaw_combo, "blockSignals"):
+                    jaw_combo.blockSignals(True)
                 jaw_combo.setCurrentText(target)
+                if hasattr(jaw_combo, "blockSignals"):
+                    jaw_combo.blockSignals(False)
 
         for fdi_num, btn in (getattr(self, "toothButtons", {}) or {}).items():
             self._applyToothButtonStyle(btn, int(fdi_num), int(fdi_num) in self.selectedTeeth)
@@ -3364,8 +3479,8 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not volNode or not self.logic:
             return
 
-        modifiers = qt.QApplication.keyboardModifiers() if qt else 0
-        ctrl_held = bool(modifiers & qt.Qt.ControlModifier) if qt else False
+        modifiers = qt.QApplication.keyboardModifiers() if (qt and hasattr(qt, "QApplication")) else 0
+        ctrl_held = bool(modifiers & qt.Qt.ControlModifier) if (qt and hasattr(qt, "Qt")) else False
 
         self.activeToothFDI = int(fdi)
         if not self.archModeCombo.currentText.startswith("Shared"):
@@ -3845,7 +3960,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 if curve is None or curve.GetNumberOfControlPoints() < 4:
                     reason = self.logic.last_arch_fit_error or "no accepted arch fit"
                     self.globalStatusLabel.setText(f"Print layout stopped: {reason}")
-                    if slicer:
+                    if slicer and getattr(slicer, "app", None) is not None:
                         slicer.util.warningDisplay(
                             "Could not fit the dental arch for the print layout:\n"
                             f"{reason}\n\nFit or draw the arch in Step 2, then retry."
@@ -3878,14 +3993,15 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         engine = PrintLayoutEngine(logic=self.logic)
 
         progress = None
-        if qt is not None and self.parent is not None:
-            progress = qt.QProgressDialog("Rendering clinical film pages…", "", 0, 0, self.parent)
+        parent_widget = getattr(self, "parent", None)
+        if qt is not None and parent_widget is not None:
+            progress = qt.QProgressDialog("Rendering clinical film pages…", "", 0, 0, parent_widget)
             progress.setWindowTitle("Generating 8x10 layout")
             progress.setCancelButton(None)
             progress.show()
             qt.QApplication.processEvents()
 
-        if qt is not None and self.parent is not None and not getattr(self, "_skipPrePrintReview", False):
+        if qt is not None and parent_widget is not None and not getattr(self, "_skipPrePrintReview", False):
             decision = self._showPrePrintReviewDialog(selected_fdis)
             if decision == "cancel":
                 return
@@ -3926,7 +4042,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.globalStatusLabel.setText(
             f"Saved print files to {out_dir}: {pdf_file.name}" + (f", {png_file.name}" if png_file else "")
         )
-        if slicer:
+        if slicer and getattr(slicer, "app", None) is not None:
             slicer.util.showStatusMessage(f"Generated 8×10″ Print Layout: {pdf_file}", 5000)
 
     def _resolveMeasurementEngine(self) -> Optional[Any]:
@@ -4083,6 +4199,12 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             h_end_t = tuple(float(v) for v in h_end)
             w0_l_t = tuple(float(v) for v in w0_l)
             w0_r_t = tuple(float(v) for v in w0_r)
+            # Enforce strict T-junction: H starts at W0 midpoint unless user explicitly overrides h_start.
+            if "h_start_uv" not in ov and (w0_pair is not None or "w0_start_uv" in ov):
+                h_start_t = (
+                    round(0.5 * (w0_l_t[0] + w0_r_t[0]), 2),
+                    round(0.5 * (w0_l_t[1] + w0_r_t[1]), 2),
+                )
             site_state[fdi] = {
                 "fdi": fdi,
                 "cs": cs_obj,
@@ -4093,7 +4215,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 "h_end_uv": h_end_t,
                 "w0_start_uv": w0_l_t,
                 "w0_end_uv": w0_r_t,
-                "_h_coronal_offset_mm": coronal_offset_along_axis(h_start_t, h_end_t, w0_l_t, w0_r_t),
+                "_h_coronal_offset_mm": 0.0,
                 "custom_overlays": [dict(x) for x in (ov.get("custom_overlays") or [])],
                 "notes": list(r["notes"]),
             }
@@ -4258,7 +4380,7 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             fdi = int(rows[r_idx]["fdi"])
             st = site_state[fdi]
             st[key] = _px_to_uv(float(pos_scene.x()), float(pos_scene.y()))
-            # Recompute H / W0 mm live and keep H passing through W0's midpoint preserving coronal offset.
+            # Recompute H / W0 mm live and keep H passing cleanly from W0 midpoint (strict T-junction).
             if key in ("w0_start_uv", "w0_end_uv"):
                 w0_l, w0_r = st["w0_start_uv"], st["w0_end_uv"]
                 st["w0_mm"] = round(math.hypot(w0_r[0] - w0_l[0], w0_r[1] - w0_l[1]), 2)
@@ -4267,13 +4389,12 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     st["h_end_uv"],
                     w0_l,
                     w0_r,
-                    coronal_offset_mm=st.get("_h_coronal_offset_mm"),
+                    coronal_offset_mm=0.0,
                 )
+                st["_h_coronal_offset_mm"] = 0.0
                 tbl.item(r_idx, 2).setText(f"{st['w0_mm']:.1f}")
             elif key in ("h_start_uv", "h_end_uv"):
-                st["_h_coronal_offset_mm"] = coronal_offset_along_axis(
-                    st["h_start_uv"], st["h_end_uv"], st["w0_start_uv"], st["w0_end_uv"]
-                )
+                st["_h_coronal_offset_mm"] = 0.0
             h0, h1 = st["h_start_uv"], st["h_end_uv"]
             st["h_mm"] = round(math.hypot(h1[0] - h0[0], h1[1] - h0[1]), 2)
             tbl.item(r_idx, 1).setText(f"{st['h_mm']:.1f}")
@@ -4534,6 +4655,42 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onCanalMarginChanged(self, val: float) -> None:
         if self._parameterNode is not None and not self._updatingGUIFromParameterNode:
             self._parameterNode.SetParameter("CanalSafetyMarginMm", f"{float(val):.1f}")
+
+    def onAnalyzeEndoToothClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode()
+        segNode = self.segmentationSelector.currentNode()
+        if not volNode or not segNode or not self.logic:
+            if slicer:
+                slicer.util.warningDisplay("Select both a CBCT volume and a Segmentation node first.")
+            return
+        targets = list(self.selectedTeeth) if getattr(self, "selectedTeeth", None) else [46]
+        analyses = []
+        for fdi in targets:
+            res = self.logic.analyze_tooth_endodontics(fdi, volNode, segNode)
+            if res is not None:
+                analyses.append(res)
+        avail = [a for a in analyses if a.available]
+        summary = ", ".join(
+            f"#{a.fdi}: {a.total_canals} canal(s), {len(a.bifurcations)} bif"
+            for a in avail
+        )
+        self.step6HintLabel.setText(
+            f"Endo analyzed ({len(avail)}/{len(analyses)} teeth): {summary or 'no segmented pulp found'}"
+        )
+
+    def onExportEndoJsonClicked(self) -> None:
+        if not self.logic or not self.logic.canals.endo_analyses_by_fdi:
+            if slicer:
+                slicer.util.warningDisplay("Run 'Analyze Multi-Root Canals' first before exporting JSON.")
+            return
+        out_dir = Path(self.printOutputDirEdit.text().strip() or str(Path.home() / "Documents"))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "endodontic_analyses.json"
+        payload = {
+            fdi: res.to_dict() for fdi, res in self.logic.canals.endo_analyses_by_fdi.items()
+        }
+        out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self.step6HintLabel.setText(f"Saved multi-root endodontic JSON -> {out_path}")
 
     def onAnalyzeAirwayClicked(self) -> None:
         volNode = self.volumeSelector.currentNode()
@@ -4989,24 +5146,20 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if reason:
                 tip_parts.append(f"Note: {reason}")
             card.setToolTip("\n".join(tip_parts))
-            card.setCursor(qt.Qt.PointingHandCursor)
-            card.mouseReleaseEvent = lambda _ev, s_i=idx: self._selectGallerySlice(s_i)
-            card.mouseDoubleClickEvent = lambda _ev, s_i=idx: (
-                self._selectGallerySlice(s_i),
-                self.onFullScreenGalleryClicked(),
-            )
 
             c_lay = qt.QVBoxLayout(card)
             c_lay.setContentsMargins(2, 2, 2, 2)
             c_lay.setSpacing(1)
 
             fdi_prefix = f"#{fdi_val} " if fdi_val is not None else ""
-            hdr = qt.QLabel(f"<b>{fdi_prefix}S{idx + 1}</b> ({off:+.1f})")
-            hdr.setAlignment(qt.Qt.AlignCenter)
+            hdr = qt.QPushButton(f"{fdi_prefix}S{idx + 1} ({off:+.1f})")
+            hdr.setFlat(True)
+            hdr.setToolTip("Click to focus this slice in the active viewer")
+            hdr.clicked.connect(lambda _checked=False, s_i=idx: self._selectGallerySlice(s_i))
             hdr.setStyleSheet(
-                "color: #ffffff; background-color: #0c4a6e; border-radius: 2px; padding: 1px 2px; font-size: 9px;"
+                "color: #ffffff; background-color: #0c4a6e; border-radius: 2px; padding: 1px 2px; font-size: 9px; font-weight: bold;"
                 if is_center
-                else "color: #38bdf8; font-size: 9px;"
+                else "color: #38bdf8; font-size: 9px; font-weight: bold; border: none; padding: 1px 2px;"
             )
             c_lay.addWidget(hdr)
 
@@ -5108,6 +5261,18 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.adtResultsLabel.setText(f"VFACE Asymmetry: {vf.summary_text}")
         self.step7HintLabel.setText(f"VFACE: {vf.summary_text}")
 
+    def onRunNativeDOCShapeAXIClicked(self) -> None:
+        volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
+        segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
+        if not volNode or not self.logic:
+            return
+        jaw_text = str(self.activeJawCombo.currentText or "Lower") if hasattr(self, "activeJawCombo") else "Lower"
+        dtype = "Condyle" if (segNode is not None and jaw_text == "Lower") else ("Cleft" if segNode is not None else "Airway")
+        res, _modelNode = self.logic.run_native_doc_shapeaxi(volNode, segNode, data_type=dtype, task="severity")
+        if getattr(self, "adtResultsLabel", None) is not None:
+            self.adtResultsLabel.setText(res.summary_text)
+        self.step7HintLabel.setText(res.summary_text)
+
     def onRunAutoCropROIClicked(self) -> None:
         volNode = self.volumeSelector.currentNode() if hasattr(self, "volumeSelector") else None
         segNode = self.segmentationSelector.currentNode() if hasattr(self, "segmentationSelector") else None
@@ -5134,6 +5299,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 return
             if tool_name == "CLI-C":
                 self.onRunNativeCLICClicked()
+                return
+            if tool_name == "DOCShapeAXI":
+                self.onRunNativeDOCShapeAXIClicked()
                 return
             if tool_name == "VFACE":
                 self.onRunNativeVFACEClicked()
@@ -5662,22 +5830,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     @staticmethod
     def _serialize_corrected_keypoints_jsonl(overrides_by_fdi: Dict[int, Dict[str, Any]]) -> str:
         """Serialise corrected H/W0 keypoints and custom overlays as newline-delimited JSON."""
-        ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        lines: List[str] = []
-        for fdi in sorted(overrides_by_fdi):
-            ov = overrides_by_fdi[fdi] or {}
-            record: Dict[str, Any] = {"fdi": int(fdi), "timestamp": ts}
-            for key in ("h_mm", "w0_mm"):
-                if ov.get(key) is not None:
-                    record[key] = round(float(ov[key]), 3)
-            for key in ("h_start_uv", "h_end_uv", "w0_start_uv", "w0_end_uv"):
-                pt = ov.get(key)
-                if isinstance(pt, (list, tuple)) and len(pt) == 2:
-                    record[key] = [round(float(pt[0]), 3), round(float(pt[1]), 3)]
-            if ov.get("custom_overlays"):
-                record["custom_overlays"] = [dict(x) for x in ov["custom_overlays"]]
-            lines.append(json.dumps(record, ensure_ascii=False))
-        return ("\n".join(lines) + "\n") if lines else ""
+        from CBCTPlannerLib.core.case_state import serialize_corrected_keypoints_jsonl
+
+        return serialize_corrected_keypoints_jsonl(overrides_by_fdi)
 
     def _saveOverridesToParameterNode(self) -> None:
         """Persist `_measurementOverridesByFDI` (including custom_overlays) as JSON on ParameterNode."""
@@ -5685,23 +5840,12 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if pn is None or not hasattr(pn, "SetParameter"):
             return
         try:
-            payload: Dict[str, Any] = {}
-            for fdi, ov in (getattr(self, "_measurementOverridesByFDI", {}) or {}).items():
-                if not isinstance(ov, dict):
-                    continue
-                entry: Dict[str, Any] = {}
-                for k in ("h_mm", "w0_mm"):
-                    if ov.get(k) is not None:
-                        entry[k] = float(ov[k])
-                for k in ("h_start_uv", "h_end_uv", "w0_start_uv", "w0_end_uv"):
-                    pt = ov.get(k)
-                    if isinstance(pt, (list, tuple)) and len(pt) == 2:
-                        entry[k] = [float(pt[0]), float(pt[1])]
-                if ov.get("custom_overlays"):
-                    entry["custom_overlays"] = [dict(x) for x in ov["custom_overlays"]]
-                if entry:
-                    payload[str(int(fdi))] = entry
-            pn.SetParameter("MeasurementOverrides", json.dumps(payload, ensure_ascii=False))
+            from CBCTPlannerLib.core.case_state import serialize_overrides_payload
+
+            pn.SetParameter(
+                "MeasurementOverrides",
+                serialize_overrides_payload(getattr(self, "_measurementOverridesByFDI", {}) or {}),
+            )
         except Exception:
             logger.debug("Could not persist measurement overrides to ParameterNode", exc_info=True)
 
@@ -5710,41 +5854,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         pn = getattr(self, "_parameterNode", None)
         if pn is None or not hasattr(pn, "GetParameter"):
             return
-        raw = str(pn.GetParameter("MeasurementOverrides") or "").strip()
-        if not raw or raw == "{}":
-            return
-        try:
-            parsed = json.loads(raw)
-        except (TypeError, ValueError):
-            return
-        if not isinstance(parsed, dict):
-            return
-        restored: Dict[int, Dict[str, Any]] = {}
-        for fdi_str, ov in parsed.items():
-            try:
-                fdi_i = int(fdi_str)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(ov, dict):
-                continue
-            entry: Dict[str, Any] = {}
-            for k in ("h_mm", "w0_mm"):
-                if ov.get(k) is not None:
-                    try:
-                        entry[k] = float(ov[k])
-                    except (TypeError, ValueError):
-                        pass
-            for k in ("h_start_uv", "h_end_uv", "w0_start_uv", "w0_end_uv"):
-                pt = ov.get(k)
-                if isinstance(pt, (list, tuple)) and len(pt) == 2:
-                    try:
-                        entry[k] = (float(pt[0]), float(pt[1]))
-                    except (TypeError, ValueError):
-                        pass
-            if isinstance(ov.get("custom_overlays"), list):
-                entry["custom_overlays"] = [dict(x) for x in ov["custom_overlays"] if isinstance(x, dict)]
-            if entry:
-                restored[fdi_i] = entry
+        from CBCTPlannerLib.core.case_state import deserialize_overrides_payload
+
+        restored = deserialize_overrides_payload(str(pn.GetParameter("MeasurementOverrides") or ""))
         if restored:
             if not hasattr(self, "_measurementOverridesByFDI") or not isinstance(self._measurementOverridesByFDI, dict):
                 self._measurementOverridesByFDI = {}
@@ -5786,7 +5898,9 @@ class CBCTPlannerWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     if "h_start_uv" not in edits:
                         basal_pt = edits.get("h_end_uv") or getattr(cs, "basal_uv", None)
                         if getattr(cs, "crest_uv", None) is not None and basal_pt is not None:
-                            cs.crest_uv = reanchor_h_start_to_w0(cs.crest_uv, basal_pt, w0_l, w0_r)
+                            cs.crest_uv = reanchor_h_start_to_w0(
+                                cs.crest_uv, basal_pt, w0_l, w0_r, coronal_offset_mm=0.0
+                            )
                         else:
                             cs.crest_uv = (0.5 * (w0_l[0] + w0_r[0]), 0.5 * (w0_l[1] + w0_r[1]))
                 if "h_start_uv" in edits:
@@ -6390,6 +6504,7 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             "VRVisible",
             "VRCropEnabled",
             "MeasurementOverrides",
+            "EndoAnalyses",
         )
         return {k: (parameterNode.GetParameter(k) or "") for k in keys}
 
@@ -8107,6 +8222,59 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         self.implants.create_or_update_implant_mrml_nodes(volumeNode, imp, show_safety_zone=True)
         return imp
 
+    def analyze_tooth_endodontics(
+        self,
+        fdi: int,
+        volumeNode: Any,
+        segmentationNode: Any,
+        *,
+        allow_intensity_refinement: bool = False,
+    ) -> Any:
+        """Analyze multi-root canal topology, bifurcation, curvature, and access trajectory in Slicer."""
+        if slicer is None or volumeNode is None or segmentationNode is None:
+            return None
+        from CBCTPlannerLib.EndodonticEngine import EndodonticEngine
+
+        vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+        mask, _is_5c = self._extract_combined_label_mask(volumeNode, segmentationNode)
+        res = EndodonticEngine().analyze_tooth(
+            fdi=fdi,
+            mask_zyx=mask,
+            affine_ras=vol.affine,
+            image_zyx=vol.image,
+            allow_intensity_refinement=allow_intensity_refinement,
+        )
+        self.canals.endo_analyses_by_fdi[str(res.fdi)] = res
+        pNode = self.getParameterNode()
+        if pNode is not None and hasattr(pNode, "SetParameter"):
+            pNode.SetParameter(
+                "EndoAnalyses",
+                json.dumps(
+                    {k: v.to_dict() for k, v in self.canals.endo_analyses_by_fdi.items()},
+                    ensure_ascii=False,
+                ),
+            )
+        if res.available and res.canals:
+            for branch in res.canals:
+                curve_name = f"Endo_{res.fdi}_{branch.canal_id}"
+                curve = slicer.mrmlScene.GetFirstNodeByName(curve_name)
+                if not curve:
+                    curve = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsCurveNode", curve_name)
+                    curve.CreateDefaultDisplayNodes()
+                curve.RemoveAllControlPoints()
+                for pt in branch.points_ras_mm:
+                    curve.AddControlPoint(float(pt[0]), float(pt[1]), float(pt[2]))
+            if res.access_cavity is not None:
+                acc_name = f"Endo_{res.fdi}_AccessCorridor"
+                acc_line = slicer.mrmlScene.GetFirstNodeByName(acc_name)
+                if not acc_line:
+                    acc_line = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", acc_name)
+                    acc_line.CreateDefaultDisplayNodes()
+                acc_line.RemoveAllControlPoints()
+                acc_line.AddControlPoint(*[float(v) for v in res.access_cavity.entry_ras_mm])
+                acc_line.AddControlPoint(*[float(v) for v in res.access_cavity.target_ras_mm])
+        return res
+
     def update_fdi_overlays_from_segmentation(
         self, volumeNode: Any, segmentationNode: Any, visible: bool = True
     ) -> Any:
@@ -8307,7 +8475,20 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         for index, (meas, cs, target_fdi, arc_mm) in enumerate(measured):
             data_uri = ""
             if cs is not None:
-                render = render_cross_section(cs, meas, scale=3, show_masks=False, show_implant_guides=True)
+                from CBCTPlannerLib.core_print_render import select_periodic_depth_key
+
+                is_center_s = abs(float(arc_mm) - center_arc) < 0.05
+                render = render_cross_section(
+                    cs,
+                    meas,
+                    scale=3,
+                    show_masks=False,
+                    show_implant_guides=True,
+                    inline_line_labels=True,
+                    depth_key_depths=select_periodic_depth_key(
+                        index, len(measured), is_center=is_center_s, stride=4
+                    ),
+                )
                 if render.available and render.image is not None:
                     import base64 as _b64
                     import io as _io
@@ -8599,6 +8780,47 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         )
         return self.adt_engine.compute_vface_asymmetry_analysis(vol, mask=mask, is_5class=is_5c)
 
+    def run_native_doc_shapeaxi(
+        self,
+        volumeNode: Any,
+        segmentationNode: Any = None,
+        *,
+        data_type: str = "Airway",
+        task: str = "severity",
+        surface_path: Optional[Path] = None,
+        out_vtk_path: Optional[Path] = None,
+        checkpoint_path: Optional[Path] = None,
+    ) -> Tuple[DOCShapeAXIResult, Any]:
+        """Run native DOCShapeAXI 3D surface classification/regression + Slicer Model saliency node."""
+        vol = CBCTVolume.from_slicer_volume_node(volumeNode, copy_image=False)
+        mask = None
+        if segmentationNode is not None:
+            mask, _ = self._extract_combined_label_mask(volumeNode, segmentationNode)
+        vtk_dst = out_vtk_path
+        if vtk_dst is None and slicer is not None:
+            tmp_dir = Path(getattr(slicer.app, "temporaryPath", ".") or ".")
+            vtk_dst = tmp_dir / f"{volumeNode.GetName()}_ShapeAXI_{data_type}.vtk"
+        res = self.adt_engine.run_doc_shapeaxi(
+            data_type=data_type,
+            task=task,
+            surface_path=surface_path,
+            volume=vol,
+            mask=mask,
+            out_vtk_path=vtk_dst,
+            checkpoint_path=checkpoint_path,
+        )
+        model_node = None
+        if res.explainability_vtk_path and slicer is not None and hasattr(slicer.util, "loadModel"):
+            try:
+                model_node = slicer.util.loadModel(res.explainability_vtk_path)
+                disp = model_node.GetDisplayNode() if model_node is not None else None
+                if disp is not None:
+                    disp.SetScalarVisibility(True)
+                    disp.SetActiveScalar("ShapeAXI_Saliency", 0)
+            except Exception:
+                logger.debug("DOCShapeAXI model load skipped cleanly", exc_info=True)
+        return res, model_node
+
     def run_native_autocrop_roi(
         self, volumeNode: Any, segmentationNode: Any = None, padding_mm: float = 10.0
     ) -> Tuple[np.ndarray, np.ndarray, Any]:
@@ -8628,17 +8850,106 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         return min_ras, max_ras, roiNode
 
     @staticmethod
-    def export_treatment_plan_files(plan_data: Sequence[Dict[str, Any]], out_dir: Path) -> Tuple[Path, Path]:
-        """B22: Export JSON and CSV where numeric columns are empty `""` when unmeasured (never string 'not measured')."""
+    def export_treatment_plan_files(
+        plan_data: Sequence[Dict[str, Any]],
+        out_dir: Path,
+        *,
+        implants: Optional[Sequence[Any]] = None,
+        endo_analyses: Optional[Sequence[Any]] = None,
+    ) -> Tuple[Path, Path]:
+        """B22 & Phase 9: Export structured provenance JSON + CSV (empty cell when unmeasured)."""
+        from dataclasses import asdict
+
+        from CBCTPlannerLib.core.contracts import (
+            SOURCE_ESTIMATED,
+            StructuredMeasurementEntry,
+            StructuredReportEnvelope,
+            UNIT_HU,
+            UNIT_MM,
+            UncertaintyClearance,
+            normalize_provenance,
+        )
+
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
         out_json = out_path / "treatment_plan.json"
         out_csv = out_path / "treatment_plan.csv"
 
+        entries: List[StructuredMeasurementEntry] = []
+        for item in plan_data:
+            fdi_s = str(item.get("fdi") or "")
+            jaw_s = str(item.get("jaw") or "")
+            src = item.get("source")
+            loc = item.get("pos_ras")
+            loc_t = (float(loc[0]), float(loc[1]), float(loc[2])) if (loc and len(loc) == 3) else None
+            for metric_name, key, unit_val in (
+                ("bone_height_h", "height_mm", UNIT_MM),
+                ("crest_width_w0", "w_crest_mm", UNIT_MM),
+                ("width_3mm", "w_3mm", UNIT_MM),
+                ("width_5mm", "w_5mm", UNIT_MM),
+                ("nerve_clearance", "nerve_clearance_mm", UNIT_MM),
+                ("trabecular_gray", "hu", UNIT_HU),
+            ):
+                val = item.get(key)
+                is_gray = metric_name == "trabecular_gray"
+                entry_src = (
+                    SOURCE_ESTIMATED
+                    if (is_gray and val is not None)
+                    else normalize_provenance(src, value=val)
+                )
+                entries.append(
+                    StructuredMeasurementEntry(
+                        name=metric_name,
+                        value=None if val is None else float(val),
+                        unit=unit_val,
+                        source_type=entry_src,
+                        method="cbct_gray_value_mean" if is_gray else str(src or "treatment_plan"),
+                        structure=jaw_s.lower() or "alveolar_ridge",
+                        fdi=fdi_s or None,
+                        location_ras_mm=loc_t,
+                        withheld_reason=item.get("withheld_reason") if val is None else None,
+                        caveats=(["CBCT gray values are not calibrated HU"] if is_gray else []),
+                    )
+                )
+
+        clr_list: List[UncertaintyClearance] = []
+        implant_dicts: List[Dict[str, Any]] = []
+        for imp in implants or []:
+            if hasattr(imp, "clearances") and isinstance(imp.clearances, dict):
+                for _k, cd in imp.clearances.items():
+                    if isinstance(cd, dict):
+                        clr_list.append(
+                            UncertaintyClearance(
+                                structure_id=str(cd.get("structure_id", "")),
+                                structure_label=str(cd.get("structure_label", "")),
+                                nominal_clearance_mm=cd.get("nominal_clearance_mm"),
+                                estimated_uncertainty_mm=cd.get("estimated_uncertainty_mm"),
+                                effective_clearance_mm=cd.get("effective_clearance_mm"),
+                                method=str(cd.get("method", "capsule_sdf")),
+                                data_quality=str(cd.get("data_quality", "measured")),
+                                withheld_reason=cd.get("withheld_reason"),
+                                limitation_note=cd.get("limitation_note"),
+                            )
+                        )
+            implant_dicts.append(asdict(imp) if hasattr(imp, "__dataclass_fields__") else dict(imp))
+
+        endo_dicts = [
+            e.to_dict() if hasattr(e, "to_dict") else dict(e) for e in (endo_analyses or [])
+        ]
+        envelope = StructuredReportEnvelope(
+            software_version=SOFTWARE_VERSION,
+            measurements=entries,
+            clearances=clr_list,
+            notes=[CLINICAL_DISCLAIMER_TEXT],
+        )
         payload = {
+            "schema_version": envelope.schema_version,
             "software_version": SOFTWARE_VERSION,
             "disclaimer": CLINICAL_DISCLAIMER_TEXT,
             "sites": list(plan_data),
+            "implants": implant_dicts,
+            "endodontics": endo_dicts,
+            "report_envelope": envelope.to_dict(),
         }
         out_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 

@@ -409,6 +409,25 @@ def _resolve_engine_overlay_data(cs: Any, meas: Optional[Any]) -> Dict[str, Any]
     }
 
 
+def select_periodic_depth_key(
+    slice_index: int,
+    total_slices: int,
+    *,
+    is_center: bool = False,
+    stride: int = 4,
+) -> Tuple[float, ...]:
+    """Select at most one depth (`W3` or `W5`) every `stride` slices to avoid repeating crowded tables."""
+    if total_slices <= 1:
+        return (3.0,)
+    step = max(2, int(stride))
+    if slice_index % step == 0:
+        slot = slice_index // step
+        return (3.0,) if (slot % 2 == 0) else (5.0,)
+    if is_center:
+        return (3.0,)
+    return ()
+
+
 def render_cross_section(
     cs: Any,
     meas: Optional[Any],
@@ -424,6 +443,8 @@ def render_cross_section(
     show_footer: bool = True,
     inline_line_labels: bool = False,
     custom_overlays: Optional[Sequence[Dict[str, Any]]] = None,
+    show_depth_key: bool = True,
+    depth_key_depths: Optional[Sequence[float]] = None,
 ) -> CrossSectionRender:
     """Render one arch cross-section strictly from engine-supplied measurement endpoints.
 
@@ -543,6 +564,24 @@ def render_cross_section(
         labels.append((chosen[0], chosen[1], text))
         return rect
 
+    def _draw_leader_to_anchor(
+        rect: Tuple[float, float, float, float],
+        anchor: Tuple[float, float],
+        *,
+        fg: Tuple[int, int, int],
+    ) -> None:
+        """Draw a crisp hairline leader from the nearest pill edge to the anatomical anchor point."""
+        ax, ay = float(anchor[0]), float(anchor[1])
+        rx0, ry0, rx1, ry1 = rect
+        edge_x = min(max(ax, rx0), rx1)
+        edge_y = min(max(ay, ry0), ry1)
+        dist = math.hypot(ax - edge_x, ay - edge_y)
+        l_col = (int(fg[0]), int(fg[1]), int(fg[2]), 235)
+        if dist >= 1.5:
+            draw.line([(edge_x, edge_y), (ax, ay)], fill=l_col, width=max(1, min(2, scale - 1)))
+        dot_r = max(1.8, 0.7 * float(scale))
+        draw.ellipse([ax - dot_r, ay - dot_r, ax + dot_r, ay + dot_r], fill=l_col)
+
     def _place_caption(
         anchor: Tuple[float, float],
         text: str,
@@ -550,17 +589,21 @@ def render_cross_section(
         fg: Tuple[int, int, int],
         border: Optional[Tuple[int, int, int]] = None,
         font: Any = None,
+        connect_leader: bool = True,
     ) -> Tuple[float, float, float, float]:
-        """Place a measurement caption on its own line/ring (when inline_line_labels) or in the right gutter."""
+        """Place a measurement caption attached directly to its geometry (or gutter with leader)."""
         if inline_line_labels:
-            return _place_non_overlapping_pill(
-                float(anchor[0]) + 4.0,
-                float(anchor[1]) - 8.0,
+            rect = _place_non_overlapping_pill(
+                float(anchor[0]) + 6.0,
+                float(anchor[1]) - 10.0,
                 text,
                 fg=fg,
                 border=border,
                 font=font,
             )
+            if connect_leader:
+                _draw_leader_to_anchor(rect, anchor, fg=fg)
+            return rect
         tw, th = _text_size(draw, text, font)
         bw, bh = tw + 8, th + 4
         px = max(2.0, float(width - caption_gutter - bw + 2))
@@ -582,13 +625,15 @@ def render_cross_section(
         occupied_rects.append(rect)
         labels.append((px, py, text))
         caption_cursor[0] = py + bh + 3
-        # Short colour stub on the caption's leading edge instead of a leader across the bone.
-        stub = max(6.0, 3.0 * scale)
-        draw.line(
-            [(px - stub - 2, py + bh * 0.5), (px - 2, py + bh * 0.5)],
-            fill=(int(fg[0]), int(fg[1]), int(fg[2]), 220),
-            width=1,
-        )
+        if connect_leader:
+            _draw_leader_to_anchor(rect, anchor, fg=fg)
+        else:
+            stub = max(6.0, 3.0 * scale)
+            draw.line(
+                [(px - stub - 2, py + bh * 0.5), (px - 2, py + bh * 0.5)],
+                fill=(int(fg[0]), int(fg[1]), int(fg[2]), 220),
+                width=1,
+            )
         return rect
 
     # Draw the bottom footer bar BEFORE calipers so a deep basal height end-cap is never occluded.
@@ -753,8 +798,17 @@ def render_cross_section(
                 font=font_md,
             )
 
-    # Corner depth key: W3/W5 calipers and values isolated from the anatomy and existing overlays.
-    deep_depths = [d for d in sorted(width_endpoints.keys()) if float(d) > 0.0]
+    # Corner depth key: isolated periodic W3 or W5 caliper readout (never crowding every slice).
+    if not show_depth_key:
+        deep_depths: List[float] = []
+    elif depth_key_depths is not None:
+        deep_depths = [
+            float(d)
+            for d in depth_key_depths
+            if float(d) > 0.0 and float(d) in width_endpoints
+        ]
+    else:
+        deep_depths = [d for d in sorted(width_endpoints.keys()) if float(d) > 0.0]
     if deep_depths:
         row_h = max(14, int(round(6.0 * scale)))
         box_w = max(78, int(round(28.0 * scale)))
@@ -1394,5 +1448,6 @@ __all__ = [
     "render_3d_mip_card",
     "render_cross_section",
     "render_panoramic_strip",
+    "select_periodic_depth_key",
     "unavailable_tile",
 ]

@@ -210,6 +210,108 @@ class ToothArcSite:
     is_missing_tooth: bool = False
 
 
+def compute_parallel_transport_frames(
+    points_3d: np.ndarray,
+    *,
+    occlusal_normal: Sequence[float] = (0.0, 0.0, 1.0),
+    ras_convention: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute rotation-minimizing (Bishop-style parallel transport) `(T, N, B)` frames.
+
+    Propagates `(N, B)` via minimal Rodrigues rotation along the arch tangent `T` rather than
+    flipping individual points against `chord_mid`, eliminating 180-degree frame discontinuities
+    on asymmetric partial arches, steep S-curves, and tilted/anisotropic CBCT scans while keeping
+    `(T, N, B)` right-handed (`cross(N, T) == B`) with `N` outward buccal and `B` superior.
+    """
+    pts = np.asarray(points_3d, dtype=np.float64)
+    m = len(pts)
+    if m < 2:
+        t0 = np.array([[-1.0, 0.0, 0.0]], dtype=np.float64)
+        n0 = np.array([[0.0, 1.0, 0.0]], dtype=np.float64)
+        b0 = np.array([[0.0, 0.0, 1.0]], dtype=np.float64)
+        return np.repeat(t0, max(1, m), axis=0), np.repeat(n0, max(1, m), axis=0), np.repeat(b0, max(1, m), axis=0)
+
+    up = np.asarray(occlusal_normal, dtype=np.float64).reshape(3)
+    up_norm = float(np.linalg.norm(up))
+    up = up / up_norm if up_norm > 1e-8 else np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    if up[2] < 0:
+        up = -up
+
+    raw_deriv = np.gradient(pts, axis=0)
+    # Keep cross-section / panoramic tangents close to occlusal horizon when clearly planar,
+    # while falling back smoothly to the 3D derivative when steep vertical curvature dominates.
+    proj = raw_deriv - np.outer(raw_deriv @ up, up)
+    proj_norms = np.linalg.norm(proj, axis=1)
+    raw_norms = np.linalg.norm(raw_deriv, axis=1)
+    tangents = np.zeros((m, 3), dtype=np.float64)
+    for i in range(m):
+        if proj_norms[i] >= max(1e-6, 0.15 * float(raw_norms[i])):
+            tangents[i] = proj[i] / proj_norms[i]
+        elif raw_norms[i] > 1e-8:
+            tangents[i] = raw_deriv[i] / raw_norms[i]
+        elif i > 0:
+            tangents[i] = tangents[i - 1]
+        else:
+            tangents[i] = np.array([-1.0 if ras_convention else 1.0, 0.0, 0.0], dtype=np.float64)
+
+    # Global outward orientation chosen consistently from the full curve before propagation
+    ref_tang = tangents[0]
+    n0 = np.cross(ref_tang, up)
+    if not ras_convention:
+        n0 = -n0
+    n0_norm = float(np.linalg.norm(n0))
+    if n0_norm <= 1e-8:
+        alt = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        if abs(float(np.dot(alt, ref_tang))) > 0.9:
+            alt = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        n0 = np.cross(ref_tang, alt)
+        n0_norm = float(np.linalg.norm(n0))
+    n0 /= max(1e-8, n0_norm)
+    b0 = np.cross(n0, ref_tang)
+    b0 /= max(1e-8, float(np.linalg.norm(b0)))
+    if float(np.dot(b0, up)) < 0.0:
+        b0 = -b0
+        n0 = np.cross(ref_tang, b0)
+        n0 /= max(1e-8, float(np.linalg.norm(n0)))
+
+    normals = np.zeros((m, 3), dtype=np.float64)
+    binormals = np.zeros((m, 3), dtype=np.float64)
+    normals[0] = n0
+    binormals[0] = b0
+
+    for i in range(1, m):
+        t_prev = tangents[i - 1]
+        t_cur = tangents[i]
+        v = np.cross(t_prev, t_cur)
+        s2 = float(np.dot(v, v))
+        c = float(np.dot(t_prev, t_cur))
+        n_vec = normals[i - 1].copy()
+        if s2 > 1e-16 and c > -0.9999:
+            vx = np.array(
+                [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]],
+                dtype=np.float64,
+            )
+            R = np.eye(3, dtype=np.float64) + vx + (vx @ vx) / (1.0 + c)
+            n_vec = R @ n_vec
+        elif c <= -0.9999:
+            # 180-degree reversal fallback: keep buccal continuity
+            n_vec = n_vec - float(np.dot(n_vec, t_cur)) * t_cur
+
+        # Project strictly orthogonal to current tangent without flipping sign
+        n_vec = n_vec - float(np.dot(n_vec, t_cur)) * t_cur
+        n_len = float(np.linalg.norm(n_vec))
+        if n_len <= 1e-8:
+            n_vec = np.cross(t_cur, binormals[i - 1])
+            n_len = float(np.linalg.norm(n_vec))
+        n_vec /= max(1e-8, n_len)
+        b_vec = np.cross(n_vec, t_cur)
+        b_vec /= max(1e-8, float(np.linalg.norm(b_vec)))
+        normals[i] = n_vec
+        binormals[i] = b_vec
+
+    return tangents, normals, binormals
+
+
 class DentalArch:
     """Parametric 3D Dental Arch Spline with RAS Right-to-Left (+X to -X) orientation."""
 
@@ -283,6 +385,13 @@ class DentalArch:
         self.u_dense = u_dense
         self.pts_dense = pts_dense
         self.t_dense = self.cum_arc_lengths / max(self.total_arc_length, 1e-9)
+        self._dense_tangents, self._dense_normals, self._dense_binormals = (
+            compute_parallel_transport_frames(
+                self.pts_dense,
+                occlusal_normal=self.occlusal_normal,
+                ras_convention=self.ras_convention,
+            )
+        )
 
     def _eval_raw(self, u_vals: np.ndarray) -> np.ndarray:
         u_arr = np.atleast_1d(np.asarray(u_vals, dtype=np.float64))
@@ -324,10 +433,6 @@ class DentalArch:
     def get_frame_at_mm(self, arc_mm: float, occlusal_normal: Optional[Sequence[float]] = None) -> ArchFrame:
         arc_clamped = float(np.clip(arc_mm, 0.0, self.total_arc_length))
         t = arc_clamped / max(1e-9, self.total_arc_length)
-        u = self._arc_to_u(arc_clamped)
-
-        pt = self._eval_raw(np.array([u]))[0]
-        d_pt = self._eval_deriv_raw(u)
 
         up = (
             np.asarray(occlusal_normal, dtype=np.float64)
@@ -339,31 +444,65 @@ class DentalArch:
         if up[2] < 0:
             up = -up
 
-        t_proj = d_pt - np.dot(d_pt, up) * up
-        t_norm = float(np.linalg.norm(t_proj))
-        tangent = t_proj / t_norm if t_norm > 1e-8 else np.array([-1.0, 0.0, 0.0], dtype=np.float64)
+        if occlusal_normal is None or float(np.linalg.norm(up - self.occlusal_normal)) < 1e-6:
+            pt = np.array(
+                [np.interp(arc_clamped, self.cum_arc_lengths, self.pts_dense[:, d]) for d in range(3)],
+                dtype=np.float64,
+            )
+            tangent = np.array(
+                [np.interp(arc_clamped, self.cum_arc_lengths, self._dense_tangents[:, d]) for d in range(3)],
+                dtype=np.float64,
+            )
+            normal = np.array(
+                [np.interp(arc_clamped, self.cum_arc_lengths, self._dense_normals[:, d]) for d in range(3)],
+                dtype=np.float64,
+            )
+            binormal = np.array(
+                [np.interp(arc_clamped, self.cum_arc_lengths, self._dense_binormals[:, d]) for d in range(3)],
+                dtype=np.float64,
+            )
+            tangent /= max(1e-8, float(np.linalg.norm(tangent)))
+            normal = normal - np.dot(normal, tangent) * tangent
+            normal /= max(1e-8, float(np.linalg.norm(normal)))
+            binormal = np.cross(normal, tangent)
+            binormal /= max(1e-8, float(np.linalg.norm(binormal)))
+            if np.dot(binormal, up) < 0:
+                binormal = -binormal
+                normal = np.cross(tangent, binormal)
+                normal /= max(1e-8, float(np.linalg.norm(normal)))
+            return ArchFrame(
+                point=pt,
+                tangent=tangent,
+                normal=normal,
+                binormal=binormal,
+                t=t,
+                arc_length_mm=arc_clamped,
+            )
 
-        normal = np.cross(tangent, up)
-        n_norm = float(np.linalg.norm(normal))
-        normal = normal / n_norm if n_norm > 1e-8 else np.array([0.0, 1.0, 0.0], dtype=np.float64)
-
-        chord_mid = 0.5 * (self.control_points[0] + self.control_points[-1])
-        outward_vec = pt - chord_mid
-        outward_in_plane = outward_vec - np.dot(outward_vec, up) * up
-        if np.linalg.norm(outward_in_plane) > 1e-3 and np.dot(normal, outward_in_plane) < 0:
-            normal = -normal
-
+        t_arr, n_arr, b_arr = compute_parallel_transport_frames(
+            self.pts_dense, occlusal_normal=up, ras_convention=self.ras_convention
+        )
+        pt = np.array(
+            [np.interp(arc_clamped, self.cum_arc_lengths, self.pts_dense[:, d]) for d in range(3)],
+            dtype=np.float64,
+        )
+        tangent = np.array(
+            [np.interp(arc_clamped, self.cum_arc_lengths, t_arr[:, d]) for d in range(3)],
+            dtype=np.float64,
+        )
+        normal = np.array(
+            [np.interp(arc_clamped, self.cum_arc_lengths, n_arr[:, d]) for d in range(3)],
+            dtype=np.float64,
+        )
+        binormal = np.array(
+            [np.interp(arc_clamped, self.cum_arc_lengths, b_arr[:, d]) for d in range(3)],
+            dtype=np.float64,
+        )
+        tangent /= max(1e-8, float(np.linalg.norm(tangent)))
+        normal = normal - np.dot(normal, tangent) * tangent
+        normal /= max(1e-8, float(np.linalg.norm(normal)))
         binormal = np.cross(normal, tangent)
-        b_norm = float(np.linalg.norm(binormal))
-        binormal = binormal / b_norm if b_norm > 1e-8 else up
-        if np.dot(binormal, up) < 0:
-            binormal = -binormal
-        # Re-orthogonalize normal against (tangent, binormal) to eliminate numerical drift
-        normal = normal - np.dot(normal, tangent) * tangent - np.dot(normal, binormal) * binormal
-        n_norm2 = float(np.linalg.norm(normal))
-        if n_norm2 > 1e-8:
-            normal = normal / n_norm2
-
+        binormal /= max(1e-8, float(np.linalg.norm(binormal)))
         return ArchFrame(
             point=pt,
             tangent=tangent,
@@ -533,14 +672,15 @@ def fit_dental_arch_from_points(
     # 1. Remove vertex-density bias via spatial voxel-grid averaging when given a dense surface cloud
     pts = _voxel_grid_downsample(raw_pts, grid_size_mm=1.5) if len(raw_pts) > 32 else raw_pts.copy()
 
-    # 2. Robust outlier rejection in Z (occlusal band) and XY
-    if len(pts) >= 12:
+    # 2. Robust outlier rejection in Z (occlusal band) and XY even for sparse FDI point sets
+    if len(pts) >= 5:
         med = np.median(pts, axis=0)
         dev = np.abs(pts - med)
         mad = np.median(dev, axis=0)
-        mad = np.where(mad < 1.0, 1.0, mad)
-        valid = np.all(dev < 4.0 * mad, axis=1)
-        if int(np.sum(valid)) >= 6:
+        scale = np.maximum(mad, np.array([6.0, 6.0, 3.5], dtype=np.float64))
+        max_dev = np.maximum(4.5 * scale, np.array([32.0, 32.0, 20.0], dtype=np.float64))
+        valid = np.all(dev <= max_dev, axis=1)
+        if int(np.sum(valid)) >= 4:
             pts = pts[valid]
 
     # 3. Order points around the open horseshoe arch in the XY plane
@@ -751,12 +891,15 @@ class ArchFitResult:
     arc_length_mm: float
     residual_rms_mm: float
     n_points_used: int
-    method: str  # "fdi_centroids" | "principal_curve"
+    method: str  # "fdi_centroids" | "jawbone_crest" | "principal_curve"
     accepted: bool = True
     reason: str = ""
     tooth_bearing_arc_mm: float = 0.0
     end_extension_mm: float = 0.0
     applied_extension_mm: float = 0.0
+    raw_points_ras: Optional[np.ndarray] = None
+    smoothing_mm: float = 0.0
+    is_smoothed: bool = True
 
 
 def _polyline_arc_length(points: np.ndarray) -> float:
@@ -971,9 +1114,16 @@ def _extract_jawbone_crest_points(
     matrix: np.ndarray,
     jaw_key: str,
     num_bins: int,
+    *,
+    is_5class: bool = False,
 ) -> Optional[np.ndarray]:
     """Extract ordered alveolar-ridge crest points for one jaw (`lower` or `upper`), rejecting ramus Z spikes."""
-    bone_labels = (1,) if jaw_key == "lower" else ((2,) if jaw_key == "upper" else (1,))
+    from .labels import get_jaw_label_id
+
+    if jaw_key in ("lower", "upper"):
+        bone_labels = (get_jaw_label_id(jaw_key == "lower", is_5class=is_5class),)
+    else:
+        bone_labels = (get_jaw_label_id(True, is_5class=is_5class),)
     bz, by, bx = np.where(np.isin(mask, bone_labels))
     if len(bx) < 30:
         return None
@@ -982,13 +1132,32 @@ def _extract_jawbone_crest_points(
         [bx[::b_step], by[::b_step], bz[::b_step], np.ones(len(bx[::b_step]), dtype=np.float64)]
     )
     b_world = (matrix @ b_vox.T).T[:, :3]
-    # For mandible: suppress ascending vertical ramus / condyle Z spikes above anterior alveolar plane.
+    # Anatomical landmark clipping (Gonion/Condylion ramus exclusion + alveolar corridor)
     if jaw_key == "lower" and len(b_world) >= 60:
         y_mid = float(np.median(b_world[:, 1]))
+        x_mid = float(0.5 * (np.percentile(b_world[:, 0], 10) + np.percentile(b_world[:, 0], 90)))
         ant_mask = b_world[:, 1] >= (y_mid - 5.0)
+        # Estimate Gonion posterior boundary from inferior-posterior mandibular angles on each side
+        go_ys: List[float] = []
+        for hemi in (b_world[b_world[:, 0] >= x_mid], b_world[b_world[:, 0] < x_mid]):
+            if len(hemi) >= 12:
+                go_score = -hemi[:, 1] - 0.8 * hemi[:, 2]
+                go_ys.append(float(hemi[int(np.argmax(go_score)), 1]))
         if int(np.count_nonzero(ant_mask)) >= 20:
             ant_top_z = float(np.percentile(b_world[ant_mask, 2], 88))
-            trimmed = b_world[b_world[:, 2] <= ant_top_z + 8.0]
+            keep = b_world[:, 2] <= ant_top_z + 8.0
+            if go_ys:
+                keep &= b_world[:, 1] >= float(min(go_ys)) + 1.0
+            trimmed = b_world[keep]
+            if len(trimmed) >= 30:
+                b_world = trimmed
+    elif jaw_key == "upper" and len(b_world) >= 60:
+        # Exclude superior orbital/frontal zygomatic bone well above the ANS hard-palate plane
+        y_mid = float(np.median(b_world[:, 1]))
+        ant_u = b_world[b_world[:, 1] >= (y_mid - 5.0)]
+        if int(np.count_nonzero(ant_u)) >= 20:
+            inf_z = float(np.percentile(ant_u[:, 2], 12))
+            trimmed = b_world[b_world[:, 2] <= inf_z + 24.0]
             if len(trimmed) >= 30:
                 b_world = trimmed
     binned = _bin_horseshoe_cloud(
@@ -1007,6 +1176,7 @@ def _extend_arch_with_jawbone_or_tangent(
     inverse_affine: np.ndarray,
     jaw_key: str,
     num_control_points: int,
+    is_5class: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Extend `ctrl`/`dense` along the segmented jawbone crest where available, falling back to tangent."""
     if float(extension_mm) <= 0.0:
@@ -1015,7 +1185,9 @@ def _extend_arch_with_jawbone_or_tangent(
     base_end = ctrl[-1].copy()
 
     bone_pts = (
-        _extract_jawbone_crest_points(mask, matrix, jaw_key, num_bins=max(32, num_control_points * 3))
+        _extract_jawbone_crest_points(
+            mask, matrix, jaw_key, num_bins=max(32, num_control_points * 3), is_5class=is_5class
+        )
         if jaw_key in ("lower", "upper")
         else None
     )
@@ -1186,7 +1358,9 @@ def fit_arch_from_label_mask(
         labels = tuple(MANDIBULAR_TEETH_IDS) if jaw_key == "lower" else tuple(MAXILLARY_TEETH_IDS)
 
     def _fit_from_jawbone_crest() -> Optional[ArchFitResult]:
-        b_binned = _extract_jawbone_crest_points(mask, matrix, jaw_key, num_bins=max(24, num_control_points * 3))
+        b_binned = _extract_jawbone_crest_points(
+            mask, matrix, jaw_key, num_bins=max(24, num_control_points * 3), is_5class=is_5class
+        )
         if b_binned is None or len(b_binned) < 4:
             return None
         b_ctrl, b_dense = _spline_through_ordered(b_binned, num_control_points, smoothing=0.20)
@@ -1299,6 +1473,7 @@ def fit_arch_from_label_mask(
         inverse_affine=inverse_affine,
         jaw_key=jaw_key,
         num_control_points=num_control_points,
+        is_5class=is_5class,
     )
     arc_length = _polyline_arc_length(dense)
 

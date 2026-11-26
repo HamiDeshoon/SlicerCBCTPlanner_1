@@ -78,3 +78,18 @@
 - **Trigger**: Rendering `W3/W5` boxes in `core_print_render.render_cross_section` or composing 8×10″ film sheets in `PrintLayoutEngine`.
 - **Observed Pattern**: Register the `10 mm` scale bar in `occupied_rects` and score candidate legend corners (bottom-right → bottom-left above scale bar → top-left → top-right) against `occupied_rects`, drawn calipers/vital contours, and cortical bone/mask pixels while keeping pill bounds (`x >= 18, y >= 24`). Collect active `flag` / `ai_comment` entries from `AnnotationStore` and render a compact `Clinical Notes & Review Flags:` strip above the disclaimer on both PNG/PDF and HTML (grayscale and color).
 - **Rationale**: Keeps quantitative width boxes readable off the mandibular/maxillary cortex and surfaces clinician/AI flags directly on the printed film.
+
+## 13. Single Version Source & Complete CMake Script/Resource Enumeration
+- **Trigger**: Adding Python modules or resources under `CBCTPlanner/` or updating release version metadata.
+- **Observed Pattern**: Store the authoritative version in `CBCTPlanner/Resources/VERSION` (`3.3.0`), load it dynamically in `Utils.SOFTWARE_VERSION`, `pyproject.toml`, and root `CMakeLists.txt`, enumerate every `.py` and `Resources/*` file inside `CBCTPlanner/CMakeLists.txt`, and verify isolated staged imports via `tests/test_packaging_completeness.py` (`cwd=tempdir`, clean `PYTHONPATH`).
+- **Rationale**: Prevents broken Slicer installs where source-cwd imports pass locally while installed extension directories miss subpackages (`WorkflowUIHelpers.py`, `adt/`, `core/`).
+
+## 14. Parallel-Transport (Bishop) Arch Frames & Half-Voxel Pano Edge Clamp
+- **Trigger**: Computing orthonormal `(T, N, B)` frames in `core/arch_detector.py` / `PanoramicCurveLogic.py` or sampling panoramic slabs near volume borders.
+- **Observed Pattern**: Use `compute_parallel_transport_frames` (Rodrigues minimal rotation propagation) instead of per-point `chord_mid` outward flipping so partial hemi-arches and steep curves never suffer 180-deg frame flips. In panoramic `map_coordinates`, clamp in-FOV fractional boundary coordinates (`[-0.5, dim - 0.5]`) to `[0, dim - 1 - 1e-5]` with `mode='nearest'` while painting `~in_fov` pixels `-1000.0`, eliminating dark 1px border blending.
+- **Rationale**: Ensures twist-free cross-sections/CPRs and crisp border slices across tilted/anisotropic CBCT volumes.
+
+## 15. Multi-Root Endodontic Topology Graphs & Exact Capsule Implant SDFs
+- **Trigger**: Analyzing root canals (`EndodonticEngine.py`, `CanalTracer.py`) or implant clearances (`ImplantPlanner.py`).
+- **Observed Pattern**: Never extract canals by naive Z-sorting with constant `0.5 mm` radii; build a 26-neighbor EDT-ridge weighted geodesic tree + 3D spherical local-maxima NMS to recover multiple roots, bifurcations, local EDT radius profiles, Schneider 3D curvature, and outer dentin wall thickness. Use closed-form capsule segment-segment distance + tapered capsule SDFs + `UncertaintyClearance` (reporting explicit limitation notes instead of invented calibration constants).
+- **Rationale**: Multi-root molars and tight surgical corridors require true topological branching, exact apical hemispherical geometry, and transparent uncertainty accounting.

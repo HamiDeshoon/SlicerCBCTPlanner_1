@@ -1,8 +1,8 @@
-# SlicerCBCTPlanner v3.1 — Dental Radiology, Implantology & AI Suite for 3D Slicer
+# SlicerCBCTPlanner v3.3 — Dental Radiology, Implantology, Endodontics & AI Suite for 3D Slicer
 
-**SlicerCBCTPlanner v3.1** is a full-stack 3D Slicer scripted extension for automated pre-implant CBCT bone morphometry, 3D vivid tooth/root visualization, cephalometric & orthodontic analysis, and deep-learning Metal Artifact Reduction (MAR).
+**SlicerCBCTPlanner v3.3 (`3.3.0`)** is a full-stack 3D Slicer scripted extension for automated pre-implant CBCT bone morphometry, parallel-transport dental arch & RaySum panoramic CPR, multi-root endodontic topology reconstruction, capsule implant & uncertainty planning, 3D vivid tooth/root visualization, `SlicerAutomatedDentalTools`-compatible native analysis (`adt`), and deep-learning Metal Artifact Reduction (MAR).
 
-## Key Features & Upgrades (v3.0 → v3.1)
+## Key Features & Upgrades (v3.0 → v3.3)
 
 ### 1. Fixed Print File Generation & Live Measured Cross-Section Gallery
 - **Root-Cause Fixes**:
@@ -120,7 +120,7 @@ JPEG captures of the application window, the Red slice view (matching the widget
 
 ## Roadmap / Future Updates
 
-Open items below are the remaining backlog after the v3.2+ hardening pass (`BL-12`, `BL-14`, `BL-15`, `BL-17`, and `BL-18` were closed on 2026-11-25); status and closed evidence live in `analysis/slicercbctplanner_1/BUSINESS_RULES.md`.
+Open items below are the remaining backlog after the v3.3 hardening pass (`BL-12`, `BL-14`, `BL-15`, `BL-17`, `BL-18`, `OPT-01`, and `OPT-03` are closed as of 2026-11-26; single version source is `CBCTPlanner/Resources/VERSION`); full status and closed evidence live in `analysis/slicercbctplanner_1/BUSINESS_RULES.md`.
 
 ### Agent & annotations
 - **Let the agent change implant selection** — `set_implant_diameter` is accepted and then reported as skipped, because
@@ -137,7 +137,6 @@ Open items below are the remaining backlog after the v3.2+ hardening pass (`BL-1
 
 ### Rendering & performance
 - `1.0×` vs `1.25×` RaySum scale and gamma/CLAHE post-processing (`BL-03`); user-adjustable VR `Zoom` (`BL-04`).
-- Reuse RGBA tiles instead of the `RGBA → base64 → PIL.Image` round-trip when composing the film (`OPT-03`).
 - Vectorise `finalize_transparent_png_bytes` with `scipy.ndimage.label` (`OPT-04`).
 
 ### MCP
@@ -146,13 +145,16 @@ Open items below are the remaining backlog after the v3.2+ hardening pass (`BL-1
 
 ## Running Tests
 ```bash
-python -m unittest discover -s tests -v      # 242 tests across 17 modules (0 failures)
+python -m unittest discover -s tests -v      # 265 tests across 24 modules (0 failures)
 ```
 
-Two headless harnesses run inside 3D Slicer's *own* Python (they need VTK/Qt, so the plain interpreter cannot run them):
+Three headless harnesses and benchmark scripts verify 3D Slicer 5.12.3 integration:
 
 ```bash
-# measurement + edentulous/shared/partial jaw + BL-12 + 8x10 BL-14 + tangential + agent round trip (27 checks)
+# same 265 unit tests inside 3D Slicer's own Python (with VTK, SimpleITK, scikit-image)
+"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" -m unittest discover -s tests
+
+# measurement + edentulous/shared/partial jaw + BL-12 + 8x10 BL-14 + tangential + agent + v3.3/adt checks (32 checks)
 "D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" analysis/slicercbctplanner_1/verify_real_ct.py
 
 # boot Slicer with the REST API and exercise every MCP tool (11 checks)

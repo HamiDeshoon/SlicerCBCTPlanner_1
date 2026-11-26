@@ -66,6 +66,7 @@ class CanalTracerLogic:
     def __init__(self) -> None:
         self.canals_by_side: Dict[str, CanalTraceData] = {}
         self.root_canals_by_fdi: Dict[str, CanalTraceData] = {}
+        self.endo_analyses_by_fdi: Dict[str, Any] = {}
 
     @classmethod
     def extract_canals_from_mask(
@@ -155,14 +156,60 @@ class CanalTracerLogic:
         return results
 
     @classmethod
+    def extract_endodontic_analysis(
+        cls,
+        fdi: int,
+        volume: CBCTVolume,
+        mask: np.ndarray,
+        *,
+        allow_intensity_refinement: bool = False,
+        optional_checkpoint_path: Optional[Any] = None,
+        manual_access_entry_ras: Optional[Any] = None,
+        manual_access_target_ras: Optional[Any] = None,
+    ) -> Any:
+        """Analyze multi-root canal topology, local EDT radii, curvature, and access corridor."""
+        from .EndodonticEngine import EndodonticEngine
+
+        engine = EndodonticEngine()
+        return engine.analyze_tooth(
+            fdi=fdi,
+            mask_zyx=mask,
+            affine_ras=volume.affine,
+            image_zyx=getattr(volume, "image", None),
+            allow_intensity_refinement=allow_intensity_refinement,
+            optional_checkpoint_path=optional_checkpoint_path,
+            manual_access_entry_ras=manual_access_entry_ras,
+            manual_access_target_ras=manual_access_target_ras,
+        )
+
+    @classmethod
     def extract_root_canal_for_tooth(
         cls,
         fdi: int,
         volume: CBCTVolume,
         mask: np.ndarray,
+        *,
+        allow_intensity_refinement: bool = False,
     ) -> Optional[CanalTraceData]:
-        """F1: Extract root-canal centerline from segmented pulp mask (`FDI_TO_PULP_ID`) when present."""
+        """F1 + Phase 6: Extract topology-aware root canal centerline(s) with real EDT radii."""
         fdi_str = str(fdi)
+        analysis = cls.extract_endodontic_analysis(
+            fdi=fdi,
+            volume=volume,
+            mask=mask,
+            allow_intensity_refinement=allow_intensity_refinement,
+        )
+        if analysis is not None and analysis.available and analysis.canals:
+            primary = analysis.canals[0]
+            return CanalTraceData(
+                side=f"Root_{fdi_str}",
+                control_points_ras=np.asarray(primary.points_ras_mm, dtype=np.float64),
+                radii_mm=np.asarray(primary.radii_mm, dtype=np.float64),
+                mean_radius_mm=float(primary.mean_radius_mm),
+                source="segmentation" if analysis.pulp_source_type == "measured" else analysis.pulp_source_type,
+            )
+
+        # Fallback for tiny 4-5 voxel sparse tests below graph threshold
         pulp_id = FDI_TO_PULP_ID.get(fdi_str)
         if pulp_id is None:
             return None
@@ -171,19 +218,18 @@ class CanalTracerLogic:
             return None
         pz, py, px = np.where(bin_pulp)
         w_pts = volume.voxel_to_world(np.column_stack([px, py, pz]))
-        # Order along Superior-Inferior axis (Z) from crown to apex
         is_lower = is_mandibular_fdi(fdi)
         order = np.argsort(w_pts[:, 2])[::-1] if is_lower else np.argsort(w_pts[:, 2])
         w_sorted = w_pts[order]
         n_bins = min(8, max(4, len(w_sorted) // 2))
         chunks = np.array_split(w_sorted, n_bins)
         ctrl = np.array([np.mean(ch, axis=0) for ch in chunks if len(ch) > 0], dtype=np.float64)
-        radii = np.full(len(ctrl), 0.5, dtype=np.float64)
+        radii = np.full(len(ctrl), float(np.min(volume.spacing)) * 0.75, dtype=np.float64)
         return CanalTraceData(
             side=f"Root_{fdi_str}",
             control_points_ras=ctrl,
             radii_mm=radii,
-            mean_radius_mm=0.5,
+            mean_radius_mm=float(np.mean(radii)),
             source="segmentation",
         )
 

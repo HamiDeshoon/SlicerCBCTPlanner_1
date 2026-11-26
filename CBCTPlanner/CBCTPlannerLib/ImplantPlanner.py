@@ -30,17 +30,29 @@ except ImportError:
 
 try:
     import vtk  # type: ignore
+    from vtk.util.numpy_support import numpy_to_vtk  # type: ignore
 except ImportError:
     vtk = None
+    numpy_to_vtk = None
 
-from .CanalTracer import CanalTraceData, CanalTracerLogic
+from .CanalTracer import CanalTraceData
+from .core.contracts import (
+    SOURCE_MEASURED,
+    SOURCE_NOT_AVAILABLE,
+    UncertaintyClearance,
+)
 from .core.labels import (
     DENTALSEGMENTATOR_CANAL_ID,
     LEFT_IAN_ID,
+    LEFT_INCISIVE_CANAL_ID,
     LEFT_SINUS_ID,
+    LINGUAL_CANAL_ID,
     LOWER_JAW_ID,
+    PULP_ID_TO_FDI,
     RIGHT_IAN_ID,
+    RIGHT_INCISIVE_CANAL_ID,
     RIGHT_SINUS_ID,
+    TOOTH_ID_TO_FDI,
     UPPER_JAW_ID,
 )
 from .core.measurements import MISCH_APPROXIMATE_DISCLAIMER, MeasurementEngine
@@ -90,6 +102,10 @@ class PlacedImplant:
     outer_shell_gray_approx: Optional[float] = None
     misch_class_approx: Optional[str] = None
     inside_bone_fraction: Optional[float] = None
+    adjacent_tooth_clearance_mm: Optional[float] = None
+    nearest_tooth_fdi: Optional[str] = None
+    cortical_perforation: bool = False
+    clearances: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     is_verified_safe: bool = True
     verification_warnings: List[str] = field(default_factory=list)
 
@@ -286,87 +302,304 @@ class ImplantPlannerLogic:
         out = [imp for imp in self.placed_implants.values() if include_unconfirmed or imp.clinician_confirmed]
         return sorted(out, key=lambda x: x.fdi)
 
+    @staticmethod
+    def capsule_axis_segment(
+        crest_ras: Sequence[float],
+        apex_ras: Sequence[float],
+        radius_apical_mm: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return `(p_crest, p_dome_center)` so apical hemispherical cap ends flush at `apex_ras`."""
+        p0 = np.asarray(crest_ras, dtype=np.float64).reshape(3)
+        p1 = np.asarray(apex_ras, dtype=np.float64).reshape(3)
+        axis = p1 - p0
+        length = float(np.linalg.norm(axis))
+        if length <= 1e-8:
+            return p0, p1
+        u = axis / length
+        r_cap = min(0.49 * length, max(0.0, float(radius_apical_mm)))
+        return p0, p1 - u * r_cap
+
+    @staticmethod
+    def closest_points_between_segments(
+        a0: Sequence[float],
+        a1: Sequence[float],
+        b0: Sequence[float],
+        b1: Sequence[float],
+    ) -> Tuple[np.ndarray, np.ndarray, float, float, float]:
+        """Exact closed-form 3D segment-segment closest points `(pa, pb, dist, ta, tb)`."""
+        p0 = np.asarray(a0, dtype=np.float64).reshape(3)
+        p1 = np.asarray(a1, dtype=np.float64).reshape(3)
+        q0 = np.asarray(b0, dtype=np.float64).reshape(3)
+        q1 = np.asarray(b1, dtype=np.float64).reshape(3)
+
+        u = p1 - p0
+        v = q1 - q0
+        w = p0 - q0
+        a = float(np.dot(u, u))
+        b = float(np.dot(u, v))
+        c = float(np.dot(v, v))
+        d = float(np.dot(u, w))
+        e = float(np.dot(v, w))
+        denom = a * c - b * b
+        eps = 1e-12
+
+        if denom < eps:
+            s_n, s_d = 0.0, 1.0
+            t_n, t_d = e, c
+        else:
+            s_n = b * e - c * d
+            t_n = a * e - b * d
+            s_d = denom
+            t_d = denom
+            if s_n < 0.0:
+                s_n = 0.0
+                t_n = e
+                t_d = c
+            elif s_n > s_d:
+                s_n = s_d
+                t_n = e + b
+                t_d = c
+
+        if t_n < 0.0:
+            t_n = 0.0
+            if -d < 0.0:
+                s_n = 0.0
+            elif -d > a:
+                s_n = s_d
+            else:
+                s_n = -d
+                s_d = a
+        elif t_n > t_d:
+            t_n = t_d
+            if (-d + b) < 0.0:
+                s_n = 0.0
+            elif (-d + b) > a:
+                s_n = s_d
+            else:
+                s_n = -d + b
+                s_d = a
+
+        ta = 0.0 if abs(s_n) < eps else (s_n / max(eps, s_d))
+        tb = 0.0 if abs(t_n) < eps else (t_n / max(eps, t_d))
+        ta = float(np.clip(ta, 0.0, 1.0))
+        tb = float(np.clip(tb, 0.0, 1.0))
+        pa = p0 + ta * u
+        pb = q0 + tb * v
+        return pa, pb, float(np.linalg.norm(pa - pb)), ta, tb
+
+    @classmethod
+    def distance_points_to_capsule_surface(
+        cls,
+        points_ras: np.ndarray,
+        crest_ras: Sequence[float],
+        apex_ras: Sequence[float],
+        radius_top_mm: float,
+        radius_bottom_mm: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Exact signed distances `(M,)` and closest capsule points `(M, 3)` for tapered body + apical dome."""
+        pts = np.atleast_2d(np.asarray(points_ras, dtype=np.float64)).reshape(-1, 3)
+        p0, p_cap = cls.capsule_axis_segment(crest_ras, apex_ras, radius_bottom_mm)
+        axis = p_cap - p0
+        seg_len = float(np.linalg.norm(axis))
+        if seg_len <= 1e-8:
+            vecs = pts - p0[None, :]
+            norms = np.linalg.norm(vecs, axis=1)
+            r_mid = 0.5 * (float(radius_top_mm) + float(radius_bottom_mm))
+            safe_dir = np.where(norms[:, None] > 1e-8, vecs / np.maximum(norms[:, None], 1e-8), np.array([[0.0, 0.0, 1.0]]))
+            return norms - r_mid, p0[None, :] + r_mid * safe_dir
+
+        u = axis / seg_len
+        rel = pts - p0[None, :]
+        proj = np.clip(rel @ u, 0.0, seg_len)
+        t = proj / seg_len
+        closest_axis = p0[None, :] + proj[:, None] * u[None, :]
+        radial = pts - closest_axis
+        radial_d = np.linalg.norm(radial, axis=1)
+        r_at_t = (1.0 - t) * float(radius_top_mm) + t * float(radius_bottom_mm)
+        # Signed distance: negative means inside the implant capsule body
+        signed_d = radial_d - r_at_t
+        unit_rad = np.where(
+            radial_d[:, None] > 1e-8,
+            radial / np.maximum(radial_d[:, None], 1e-8),
+            np.array([[1.0, 0.0, 0.0]]),
+        )
+        closest_surf = closest_axis + r_at_t[:, None] * unit_rad
+        return signed_d, closest_surf
+
     def recompute_all_verifications(
         self,
         volume: Optional[CBCTVolume] = None,
         mask: Optional[np.ndarray] = None,
         is_5class: bool = False,
         canals: Optional[Dict[str, CanalTraceData]] = None,
+        uncertainty_priors_mm: Optional[Dict[str, float]] = None,
     ) -> None:
-        """F2, F9, F12: Recompute parallelism angles, inter-implant distances, canal/sinus clearance, and peri-implant gray values."""
+        """F2, F9, F12 & Phase 7: Closed-form capsule distances, tooth/canal/sinus/cortical checks & uncertainty."""
+        priors = dict(uncertainty_priors_mm or {})
+        q_bound_mm: Optional[float] = None
+        if volume is not None and getattr(volume, "spacing", None) is not None:
+            sx_s, sy_s, sz_s = (float(v) for v in volume.spacing)
+            q_bound_mm = 0.5 * math.sqrt(sx_s * sx_s + sy_s * sy_s + sz_s * sz_s)
+
+        def _make_clearance(
+            *,
+            structure_id: str,
+            structure_label: str,
+            nominal_mm: Optional[float],
+            closest_anat: Optional[np.ndarray],
+            closest_dev: Optional[np.ndarray],
+            method: str,
+            withheld_reason: Optional[str] = None,
+        ) -> UncertaintyClearance:
+            unc = priors.get(structure_id) or priors.get(structure_id.split("_")[0])
+            if nominal_mm is None:
+                return UncertaintyClearance(
+                    structure_id=structure_id,
+                    structure_label=structure_label,
+                    nominal_clearance_mm=None,
+                    estimated_uncertainty_mm=unc,
+                    effective_clearance_mm=None,
+                    method=method,
+                    data_quality=SOURCE_NOT_AVAILABLE,
+                    withheld_reason=withheld_reason or "structure unavailable",
+                )
+            unc_val = float(unc) if unc is not None else None
+            eff_mm = float(nominal_mm - unc_val) if unc_val is not None else float(nominal_mm)
+            lim_note = (
+                None
+                if unc_val is not None
+                else (
+                    f"No calibrated uncertainty prior provided; voxel quantization lower bound +/-{q_bound_mm:.2f} mm"
+                    if q_bound_mm is not None
+                    else "No calibrated uncertainty or imaging spacing metadata provided"
+                )
+            )
+            return UncertaintyClearance(
+                structure_id=structure_id,
+                structure_label=structure_label,
+                nominal_clearance_mm=float(nominal_mm),
+                estimated_uncertainty_mm=unc_val,
+                effective_clearance_mm=eff_mm,
+                closest_anatomical_point_ras=(
+                    tuple(float(v) for v in closest_anat) if closest_anat is not None else None
+                ),
+                closest_device_point_ras=(
+                    tuple(float(v) for v in closest_dev) if closest_dev is not None else None
+                ),
+                method=method,
+                data_quality=SOURCE_MEASURED,
+                limitation_note=lim_note,
+            )
+
         fdis = sorted(self.placed_implants.keys())
         for fdi in fdis:
             imp = self.placed_implants[fdi]
             imp.parallelism_deg_by_fdi.clear()
             imp.verification_warnings.clear()
+            imp.clearances.clear()
             imp.min_neighbor_implant_distance_mm = None
+            imp.canal_clearance_mm = None
+            imp.sinus_clearance_mm = None
+            imp.adjacent_tooth_clearance_mm = None
+            imp.nearest_tooth_fdi = None
+            imp.cortical_perforation = False
 
             p_crest = np.asarray(imp.crest_point_ras, dtype=np.float64)
             p_apex = np.asarray(imp.apex_point_ras, dtype=np.float64)
             u_axis = np.asarray(imp.axis_apical_ras, dtype=np.float64)
             u_axis /= max(1e-8, float(np.linalg.norm(u_axis)))
+            r_top = 0.5 * float(imp.platform_diameter_mm)
+            r_bot = 0.5 * float(imp.apical_diameter_mm)
+            a0, a1 = self.capsule_axis_segment(p_crest, p_apex, r_bot)
             surf_pts = self.sample_cylinder_surface_points(
                 p_crest,
                 p_apex,
-                radius_top_mm=0.5 * imp.platform_diameter_mm,
-                radius_bottom_mm=0.5 * imp.apical_diameter_mm,
+                radius_top_mm=r_top,
+                radius_bottom_mm=r_bot,
             )
 
-            # 1. Inter-implant parallelism & surface-to-surface clearance
+            # 1. Exact closed-form capsule-to-capsule inter-implant parallelism & surface clearance
             min_imp_dist = float("inf")
+            closest_neighbor_clr: Optional[UncertaintyClearance] = None
             for other_fdi in fdis:
                 if other_fdi == fdi:
                     continue
                 other = self.placed_implants[other_fdi]
                 v_axis = np.asarray(other.axis_apical_ras, dtype=np.float64)
                 v_axis /= max(1e-8, float(np.linalg.norm(v_axis)))
-                # Angle between implant axes in [0, 90] deg
                 cos_ang = float(np.clip(abs(np.dot(u_axis, v_axis)), 0.0, 1.0))
-                ang_deg = round(math.degrees(math.acos(cos_ang)), 2)
-                imp.parallelism_deg_by_fdi[str(other_fdi)] = ang_deg
+                imp.parallelism_deg_by_fdi[str(other_fdi)] = round(math.degrees(math.acos(cos_ang)), 2)
 
-                other_surf = self.sample_cylinder_surface_points(
-                    other.crest_point_ras,
-                    other.apex_point_ras,
-                    radius_top_mm=0.5 * other.platform_diameter_mm,
-                    radius_bottom_mm=0.5 * other.apical_diameter_mm,
+                ob0, ob1 = self.capsule_axis_segment(
+                    other.crest_point_ras, other.apex_point_ras, 0.5 * other.apical_diameter_mm
                 )
-                d_mat = np.linalg.norm(surf_pts[:, None, :] - other_surf[None, :, :], axis=2)
-                d_min = float(np.min(d_mat))
-                if d_min < min_imp_dist:
-                    min_imp_dist = d_min
-                if d_min < 3.0:
+                pa, pb, center_d, ta, tb = self.closest_points_between_segments(a0, a1, ob0, ob1)
+                ra = (1.0 - ta) * r_top + ta * r_bot
+                rb = (1.0 - tb) * (0.5 * other.platform_diameter_mm) + tb * (0.5 * other.apical_diameter_mm)
+                d_surf = center_d - (ra + rb)
+                if d_surf < min_imp_dist:
+                    min_imp_dist = d_surf
+                    vec_ab = pb - pa
+                    u_ab = vec_ab / max(1e-8, float(np.linalg.norm(vec_ab))) if center_d > 1e-8 else u_axis
+                    closest_neighbor_clr = _make_clearance(
+                        structure_id="neighbor_implant",
+                        structure_label=f"Neighbor Implant #{other_fdi}",
+                        nominal_mm=d_surf,
+                        closest_anat=pb - u_ab * rb,
+                        closest_dev=pa + u_ab * ra,
+                        method="closed_form_capsule_segment",
+                    )
+                if d_surf < 3.0:
                     imp.verification_warnings.append(
-                        f"Inter-implant clearance to #{other_fdi} is {d_min:.2f} mm (< 3.0 mm recommended)."
+                        f"Inter-implant clearance to #{other_fdi} is {d_surf:.2f} mm (< 3.0 mm recommended)."
                     )
 
             if min_imp_dist < float("inf"):
                 imp.min_neighbor_implant_distance_mm = round(min_imp_dist, 2)
+                if closest_neighbor_clr is not None:
+                    imp.clearances["neighbor_implant"] = closest_neighbor_clr.to_dict()
 
             # 2. Canal proximity via CanalTraceData if available
             is_mandible = is_mandibular_fdi(fdi)
             if is_mandible and canals:
                 side_key = "Right" if int(str(fdi)[0]) == 4 else "Left"
                 canal_trace = canals.get(side_key) or next(iter(canals.values()), None)
-                if canal_trace is not None:
-                    prox = CanalTracerLogic.evaluate_canal_proximity(
-                        surf_pts,
-                        canal_trace,
-                        safety_margin_mm=imp.safety_apical_mm,
-                        query_radius_mm=0.0,
+                if canal_trace is not None and len(canal_trace.control_points_ras) > 0:
+                    c_pts = np.asarray(canal_trace.control_points_ras, dtype=np.float64)
+                    c_rad = np.asarray(canal_trace.radii_mm, dtype=np.float64)
+                    s_dist, s_closest = self.distance_points_to_capsule_surface(
+                        c_pts, p_crest, p_apex, r_top, r_bot
                     )
-                    imp.canal_clearance_mm = prox.min_surface_distance_mm
-                    if prox.is_violation:
-                        imp.verification_warnings.append(prox.warning_message)
+                    if len(c_rad) == len(s_dist):
+                        surf_to_canal = s_dist - c_rad
+                    else:
+                        surf_to_canal = s_dist - float(canal_trace.mean_radius_mm)
+                    min_idx = int(np.argmin(surf_to_canal))
+                    min_c_dist = float(surf_to_canal[min_idx])
+                    imp.canal_clearance_mm = round(min_c_dist, 2)
+                    clr = _make_clearance(
+                        structure_id="inferior_alveolar_canal",
+                        structure_label="Inferior Alveolar Canal",
+                        nominal_mm=min_c_dist,
+                        closest_anat=c_pts[min_idx],
+                        closest_dev=s_closest[min_idx],
+                        method="capsule_sdf",
+                    )
+                    imp.clearances["inferior_alveolar_canal"] = clr.to_dict()
+                    eff_chk = clr.effective_clearance_mm if clr.effective_clearance_mm is not None else min_c_dist
+                    if eff_chk < imp.safety_apical_mm:
+                        imp.verification_warnings.append(
+                            f"Mandibular canal clearance is {min_c_dist:.2f} mm (< {imp.safety_apical_mm:.1f} mm safety)."
+                        )
 
-            # 3. Volume & segmentation mask checks (peri-implant gray values, bone containment, sinus/canal mask distance)
+            # 3. Volume & segmentation mask checks (capsule surface containment, bone perforation, teeth, sinus, canals)
             if volume is not None:
                 core_vals = volume.sample_world_points(surf_pts, order=1, cval=-1000.0)
                 outer_pts = self.sample_cylinder_surface_points(
                     p_crest,
                     p_apex,
-                    radius_top_mm=0.5 * imp.platform_diameter_mm + 1.0,
-                    radius_bottom_mm=0.5 * imp.apical_diameter_mm + 1.0,
+                    radius_top_mm=r_top + 1.0,
+                    radius_bottom_mm=r_bot + 1.0,
                 )
                 outer_vals = volume.sample_world_points(outer_pts, order=1, cval=-1000.0)
                 imp.mean_gray_approx = round(float(np.mean(core_vals)), 1)
@@ -383,47 +616,129 @@ class ImplantPlannerLogic:
                     inside_frac = float(np.mean(sampled_labels == jaw_id))
                     imp.inside_bone_fraction = round(inside_frac, 3)
                     if inside_frac < 0.70:
+                        imp.cortical_perforation = True
                         imp.verification_warnings.append(
-                            f"Implant #{fdi} has only {inside_frac * 100.0:.0f}% surface containment inside segmented jawbone."
+                            f"Implant #{fdi} has only {inside_frac * 100.0:.0f}% surface containment inside segmented jawbone (cortical perforation risk)."
                         )
 
-                    # Sinus or canal mask distance if not already computed
+                    # Local ROI cropping around capsule bounding box for fast exact multi-structure distance
+                    pad_mm = 12.0
+                    min_bb = np.minimum(p_crest, p_apex) - (max(r_top, r_bot) + pad_mm)
+                    max_bb = np.maximum(p_crest, p_apex) + (max(r_top, r_bot) + pad_mm)
+                    corners_xyz = np.array(
+                        [[min_bb[0], min_bb[1], min_bb[2]], [max_bb[0], max_bb[1], max_bb[2]]],
+                        dtype=np.float64,
+                    )
+                    ijk = volume.world_to_voxel(corners_xyz)
+                    nz_m, ny_m, nx_m = mask.shape
+                    x0, x1 = max(0, int(np.floor(np.min(ijk[:, 0])))), min(nx_m, int(np.ceil(np.max(ijk[:, 0]))) + 1)
+                    y0, y1 = max(0, int(np.floor(np.min(ijk[:, 1])))), min(ny_m, int(np.ceil(np.max(ijk[:, 1]))) + 1)
+                    z0, z1 = max(0, int(np.floor(np.min(ijk[:, 2])))), min(nz_m, int(np.ceil(np.max(ijk[:, 2]))) + 1)
+                    sub_mask = mask[z0:z1, y0:y1, x0:x1]
+
+                    def _closest_structure_to_capsule(target_ids: Sequence[int]) -> Tuple[Optional[float], Optional[np.ndarray], Optional[np.ndarray], Optional[int]]:
+                        hit = np.isin(sub_mask, list(target_ids))
+                        if not np.any(hit):
+                            return None, None, None, None
+                        lz, ly, lx = np.where(hit)
+                        if len(lz) > 4000:
+                            step = max(1, len(lz) // 4000)
+                            lz, ly, lx = lz[::step], ly[::step], lx[::step]
+                        lbl_vals = sub_mask[lz, ly, lx]
+                        w_pts = volume.voxel_to_world(
+                            np.column_stack([lx + x0, ly + y0, lz + z0])
+                        )
+                        dists, dev_pts = self.distance_points_to_capsule_surface(
+                            w_pts, p_crest, p_apex, r_top, r_bot
+                        )
+                        k_best = int(np.argmin(dists))
+                        return float(dists[k_best]), w_pts[k_best], dev_pts[k_best], int(lbl_vals[k_best])
+
+                    # Neighboring teeth collision (always exclude target FDI tooth/pulp if somehow still segmented)
+                    self_tooth_ids = {int(fdi), int(fdi) + 100}
+                    if is_5class:
+                        other_tooth_ids = [3, 4]
+                    else:
+                        other_tooth_ids = [
+                            tid
+                            for tid in list(TOOTH_ID_TO_FDI.keys()) + list(PULP_ID_TO_FDI.keys())
+                            if tid not in self_tooth_ids
+                        ]
+                    t_dist, t_anat, t_dev, t_lbl = _closest_structure_to_capsule(other_tooth_ids)
+                    if t_dist is not None:
+                        imp.adjacent_tooth_clearance_mm = round(t_dist, 2)
+                        imp.nearest_tooth_fdi = (
+                            TOOTH_ID_TO_FDI.get(t_lbl)
+                            or PULP_ID_TO_FDI.get(t_lbl)
+                            or (str(t_lbl) if t_lbl is not None else None)
+                        )
+                        t_clr = _make_clearance(
+                            structure_id="adjacent_tooth",
+                            structure_label=f"Adjacent Tooth #{imp.nearest_tooth_fdi or 'Unknown'}",
+                            nominal_mm=t_dist,
+                            closest_anat=t_anat,
+                            closest_dev=t_dev,
+                            method="capsule_sdf",
+                        )
+                        imp.clearances["adjacent_tooth"] = t_clr.to_dict()
+                        eff_t = t_clr.effective_clearance_mm if t_clr.effective_clearance_mm is not None else t_dist
+                        if eff_t < imp.safety_radial_mm:
+                            imp.verification_warnings.append(
+                                f"Adjacent tooth #{imp.nearest_tooth_fdi} clearance is {t_dist:.2f} mm (< {imp.safety_radial_mm:.1f} mm radial safety)."
+                            )
+
+                    # Sinus distance
                     if not is_mandible and not is_5class:
-                        sinus_id = RIGHT_SINUS_ID if int(str(fdi)[0]) == 1 else LEFT_SINUS_ID
-                        if (mask == sinus_id).any():
-                            sz, sy, sx = np.where(mask == sinus_id)
-                            sinus_w = volume.voxel_to_world(np.column_stack([sx[::4], sy[::4], sz[::4]]))
-                            if len(sinus_w) > 0:
-                                d_sinus = float(
-                                    np.min(np.linalg.norm(surf_pts[:, None, :] - sinus_w[None, :, :], axis=2))
+                        sinus_ids = [RIGHT_SINUS_ID if int(str(fdi)[0]) == 1 else LEFT_SINUS_ID]
+                        s_dist, s_anat, s_dev, _ = _closest_structure_to_capsule(sinus_ids)
+                        if s_dist is not None:
+                            imp.sinus_clearance_mm = round(s_dist, 2)
+                            s_clr = _make_clearance(
+                                structure_id="maxillary_sinus",
+                                structure_label="Maxillary Sinus",
+                                nominal_mm=s_dist,
+                                closest_anat=s_anat,
+                                closest_dev=s_dev,
+                                method="capsule_sdf",
+                            )
+                            imp.clearances["maxillary_sinus"] = s_clr.to_dict()
+                            eff_s = s_clr.effective_clearance_mm if s_clr.effective_clearance_mm is not None else s_dist
+                            if eff_s < imp.safety_apical_mm:
+                                imp.verification_warnings.append(
+                                    f"Maxillary sinus clearance is {s_dist:.2f} mm (< {imp.safety_apical_mm:.1f} mm)."
                                 )
-                                imp.sinus_clearance_mm = round(d_sinus, 2)
-                                if d_sinus < imp.safety_apical_mm:
-                                    imp.verification_warnings.append(
-                                        f"Maxillary sinus clearance is {d_sinus:.2f} mm (< {imp.safety_apical_mm:.1f} mm)."
-                                    )
+
+                    # IAN / incisive / lingual canals from mask when trace wasn't passed
                     elif is_mandible and imp.canal_clearance_mm is None:
                         cid_list = (
                             [DENTALSEGMENTATOR_CANAL_ID]
                             if is_5class
-                            else [RIGHT_IAN_ID, LEFT_IAN_ID, DENTALSEGMENTATOR_CANAL_ID]
+                            else [
+                                RIGHT_IAN_ID,
+                                LEFT_IAN_ID,
+                                DENTALSEGMENTATOR_CANAL_ID,
+                                RIGHT_INCISIVE_CANAL_ID,
+                                LEFT_INCISIVE_CANAL_ID,
+                                LINGUAL_CANAL_ID,
+                            ]
                         )
-                        for cid in cid_list:
-                            if (mask == cid).any():
-                                cz, cy, cx = np.where(mask == cid)
-                                step = max(1, len(cx) // 500)
-                                canal_w = volume.voxel_to_world(
-                                    np.column_stack([cx[::step], cy[::step], cz[::step]])
+                        c_dist, c_anat, c_dev, _ = _closest_structure_to_capsule(cid_list)
+                        if c_dist is not None:
+                            imp.canal_clearance_mm = round(c_dist, 2)
+                            c_clr = _make_clearance(
+                                structure_id="inferior_alveolar_canal",
+                                structure_label="Inferior Alveolar / Accessory Canal",
+                                nominal_mm=c_dist,
+                                closest_anat=c_anat,
+                                closest_dev=c_dev,
+                                method="capsule_sdf",
+                            )
+                            imp.clearances["inferior_alveolar_canal"] = c_clr.to_dict()
+                            eff_c = c_clr.effective_clearance_mm if c_clr.effective_clearance_mm is not None else c_dist
+                            if eff_c < imp.safety_apical_mm:
+                                imp.verification_warnings.append(
+                                    f"Mandibular canal clearance is {c_dist:.2f} mm (< {imp.safety_apical_mm:.1f} mm)."
                                 )
-                                d_canal = float(
-                                    np.min(np.linalg.norm(surf_pts[:, None, :] - canal_w[None, :, :], axis=2))
-                                )
-                                imp.canal_clearance_mm = round(d_canal, 2)
-                                if d_canal < imp.safety_apical_mm:
-                                    imp.verification_warnings.append(
-                                        f"Mandibular canal clearance is {d_canal:.2f} mm (< {imp.safety_apical_mm:.1f} mm)."
-                                    )
-                                break
 
             imp.is_verified_safe = len(imp.verification_warnings) == 0
 
@@ -574,19 +889,26 @@ class ImplantPlannerLogic:
             ld.SetVisibility2D(True)
             ld.SetVisibility3D(True)
 
-        # 2. 3D Cylinder PolyData Model + Safety Zone Shell
+        # 2. Vectorized 3D Capsule/Cylinder PolyData Model + Safety Zone Shell
         def _verts_faces_to_polydata(verts: np.ndarray, faces: np.ndarray) -> Any:
-            pts_vtk = vtk.vtkPoints()
-            for v in verts:
-                pts_vtk.InsertNextPoint(float(v[0]), float(v[1]), float(v[2]))
-            polys = vtk.vtkCellArray()
-            for f in faces:
-                tri = vtk.vtkTriangle()
-                tri.GetPointIds().SetId(0, int(f[0]))
-                tri.GetPointIds().SetId(1, int(f[1]))
-                tri.GetPointIds().SetId(2, int(f[2]))
-                polys.InsertNextCell(tri)
+            v_arr = np.ascontiguousarray(verts, dtype=np.float64)
+            f_arr = np.ascontiguousarray(faces, dtype=np.int64)
             poly = vtk.vtkPolyData()
+            pts_vtk = vtk.vtkPoints()
+            polys = vtk.vtkCellArray()
+            if numpy_to_vtk is not None:
+                pts_vtk.SetData(numpy_to_vtk(v_arr, deep=True))
+                conn = numpy_to_vtk(f_arr.ravel(), deep=True)
+                polys.SetData(3, conn)
+            else:
+                for v in v_arr:
+                    pts_vtk.InsertNextPoint(float(v[0]), float(v[1]), float(v[2]))
+                for f in f_arr:
+                    tri = vtk.vtkTriangle()
+                    tri.GetPointIds().SetId(0, int(f[0]))
+                    tri.GetPointIds().SetId(1, int(f[1]))
+                    tri.GetPointIds().SetId(2, int(f[2]))
+                    polys.InsertNextCell(tri)
             poly.SetPoints(pts_vtk)
             poly.SetPolys(polys)
             return poly

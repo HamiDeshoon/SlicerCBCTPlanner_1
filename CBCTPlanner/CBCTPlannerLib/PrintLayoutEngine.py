@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import html
 import io
+import json
 import logging
 import math
 from pathlib import Path
@@ -48,6 +49,16 @@ except ImportError:
     ImageDraw = None
     ImageFont = None
 
+from .core.contracts import (
+    SOURCE_ESTIMATED,
+    SOURCE_MANUALLY_CORRECTED,
+    SOURCE_MEASURED,
+    SOURCE_NOT_AVAILABLE,
+    StructuredMeasurementEntry,
+    StructuredReportEnvelope,
+    UNIT_HU,
+    UNIT_MM,
+)
 from .core.diagnostics import calibration_stamp, summarize_span_worst_case
 from .core.measurements import reanchor_h_start_to_w0, withheld_badge
 from .core_print_render import (
@@ -57,6 +68,7 @@ from .core_print_render import (
     render_3d_mip_card,
     render_cross_section,
     render_panoramic_strip,
+    select_periodic_depth_key,
     unavailable_tile,
 )
 
@@ -305,9 +317,11 @@ class PrintLayoutEngine:
                             if "h_start_uv" not in ov and getattr(cs, "crest_uv", None) is not None:
                                 basal_pt = ov.get("h_end_uv") or getattr(cs, "basal_uv", None)
                                 if basal_pt is not None:
-                                    cs.crest_uv = reanchor_h_start_to_w0(cs.crest_uv, basal_pt, w0_l, w0_r)
+                                    cs.crest_uv = reanchor_h_start_to_w0(
+                                        cs.crest_uv, basal_pt, w0_l, w0_r, coronal_offset_mm=0.0
+                                    )
                                 else:
-                                    cs.crest_uv = (0.5 * (w0_l[0] + w0_r[0]), float(cs.crest_uv[1]))
+                                    cs.crest_uv = (0.5 * (w0_l[0] + w0_r[0]), 0.5 * (w0_l[1] + w0_r[1]))
                         if "h_start_uv" in ov:
                             cs.crest_uv = ov["h_start_uv"]
                         if "h_end_uv" in ov:
@@ -319,11 +333,9 @@ class PrintLayoutEngine:
                             meas.crest_width_mm = float(ov["w0_mm"])
                 pil_tile = None
                 if cs is not None:
-                    is_key_slice = (
-                        (s_idx == 0)
-                        or (s_idx == n_slices // 2)
-                        or (abs(float(arc_mm) - center_arc) < 0.05)
-                        or (abs(float(arc_mm) - float(arcs.get(target_fdi, arc_mm))) < 0.05)
+                    is_center_slice = abs(float(arc_mm) - center_arc) < 0.05
+                    period_depths = select_periodic_depth_key(
+                        s_idx, n_slices, is_center=is_center_slice, stride=4
                     )
                     render = render_cross_section(
                         cs,
@@ -333,8 +345,9 @@ class PrintLayoutEngine:
                         show_implant_guides=not grayscale,
                         monochrome=grayscale,
                         show_footer=False,
-                        inline_line_labels=is_key_slice,
+                        inline_line_labels=True,
                         custom_overlays=(ov.get("custom_overlays") if ov else None),
+                        depth_key_depths=period_depths,
                     )
                     if render.available and render.image is not None:
                         pil_tile = render.image
@@ -392,18 +405,26 @@ class PrintLayoutEngine:
                 for i, s in enumerate(specs)
                 if (int(s.fdi) in missing_fdis_set or abs(float(s.offset_mm)) < 0.05)
             ]
-            pano_uri = pano_b64 or self._pano_strip_uri(
-                arc_values,
-                [f"#{s.fdi}" for s in specs],
-                engine=engine,
-                is_mandible=is_mandible,
-                highlight_indices=hi_indices,
-                monochrome=grayscale,
-            )
+            pano_img = None
+            if pano_b64:
+                pano_uri = pano_b64
+            else:
+                pano_img, pano_uri = self._pano_strip_image_and_uri(
+                    arc_values,
+                    [f"#{s.fdi}" for s in specs],
+                    engine=engine,
+                    is_mandible=is_mandible,
+                    highlight_indices=hi_indices,
+                    monochrome=grayscale,
+                )
             if not pano_uri:
                 pano_uri = _unavailable_data_uri("Panoramic")
 
-            vr_uri = vr_b64 or self._vr_capture(engine=engine, quadrant=q)
+            vr_img = None
+            if vr_b64:
+                vr_uri = vr_b64
+            else:
+                vr_img, vr_uri = self._vr_capture_image_and_uri(engine=engine, quadrant=q)
             if not vr_uri:
                 vr_uri = _unavailable_data_uri("VR")
 
@@ -414,7 +435,9 @@ class PrintLayoutEngine:
                     "jaw_label": jaw_label,
                     "slices": specs,
                     "pano_b64": pano_uri,
+                    "pano_image": pano_img,
                     "vr_b64": vr_uri,
+                    "vr_image": vr_img,
                     "span_summary": summarize_span_worst_case(
                         [m for m, _cs, _f, _a in measured if m is not None]
                     ),
@@ -473,6 +496,75 @@ class PrintLayoutEngine:
             append_images=pages[1:],
         )
         pages[0].save(png_file, "PNG")
+        report_file = out_path / f"{clean_name}_8x10_Report.json"
+        ov_map = measurement_overrides or {}
+        entries: List[StructuredMeasurementEntry] = []
+        edit_hist: List[Dict[str, Any]] = []
+        for fdi_k, ov_v in sorted(ov_map.items()):
+            edit_hist.append({"fdi": int(fdi_k), "override_keys": sorted(ov_v.keys())})
+        for spec in all_specs:
+            fdi_str = str(spec.fdi)
+            is_manual = int(spec.fdi) in ov_map
+            h_src = (
+                SOURCE_MANUALLY_CORRECTED
+                if is_manual
+                else (
+                    SOURCE_NOT_AVAILABLE
+                    if spec.height_mm is None
+                    else (SOURCE_ESTIMATED if spec.height_estimated else SOURCE_MEASURED)
+                )
+            )
+            entries.append(
+                StructuredMeasurementEntry(
+                    name="bone_height_h",
+                    value=spec.height_mm,
+                    unit=UNIT_MM,
+                    source_type=h_src,
+                    method="cross_section_t_junction_caliper",
+                    structure="mandible" if spec.is_mandible else "maxilla",
+                    fdi=fdi_str,
+                    withheld_reason=spec.withheld_reason if spec.height_mm is None else None,
+                    manual_edit=is_manual,
+                )
+            )
+            w0_src = (
+                SOURCE_MANUALLY_CORRECTED
+                if (is_manual and "w0_mm" in ov_map.get(int(spec.fdi), {}))
+                else (SOURCE_NOT_AVAILABLE if spec.crest_width_mm is None else SOURCE_MEASURED)
+            )
+            entries.append(
+                StructuredMeasurementEntry(
+                    name="crest_width_w0",
+                    value=spec.crest_width_mm,
+                    unit=UNIT_MM,
+                    source_type=w0_src,
+                    method="cross_section_buccolingual_caliper",
+                    structure="mandible" if spec.is_mandible else "maxilla",
+                    fdi=fdi_str,
+                    withheld_reason=spec.withheld_reason if spec.crest_width_mm is None else None,
+                    manual_edit=is_manual and "w0_mm" in ov_map.get(int(spec.fdi), {}),
+                )
+            )
+            if spec.mean_hu is not None:
+                entries.append(
+                    StructuredMeasurementEntry(
+                        name="peri_site_density",
+                        value=spec.mean_hu,
+                        unit=UNIT_HU,
+                        source_type=SOURCE_ESTIMATED,
+                        method="cbct_gray_value_mean",
+                        structure="mandible" if spec.is_mandible else "maxilla",
+                        fdi=fdi_str,
+                        caveats=["CBCT gray values are not calibrated HU"],
+                    )
+                )
+        envelope = StructuredReportEnvelope(
+            measurements=entries,
+            manual_edit_history=edit_hist,
+            notes=[str(n) for rec in page_records for n in (rec.get("clinical_notes") or [])],
+        )
+        report_file.write_text(json.dumps(envelope.to_dict(), indent=2), encoding="utf-8")
+        self.last_json_file = report_file
         self.last_html_file = html_file
         self.last_pdf_file = pdf_file
         self.last_png_file = png_file
@@ -521,7 +613,7 @@ class PrintLayoutEngine:
                 logger.exception("Could not resolve the arch position of FDI %s", fdi)
         return arcs
 
-    def _pano_strip_uri(
+    def _pano_strip_image_and_uri(
         self,
         arcs: Sequence[float],
         labels: Sequence[Any],
@@ -529,8 +621,8 @@ class PrintLayoutEngine:
         is_mandible: bool = True,
         highlight_indices: Optional[Sequence[int]] = None,
         monochrome: bool = False,
-    ) -> Optional[str]:
-        """Render the panoramic strip from `PanoramicVolume`, or synthesize it in-process from `engine`."""
+    ) -> Tuple[Optional[Any], Optional[str]]:
+        """Render panoramic strip returning `(pil_image_or_None, data_uri_or_None)` (OPT-03)."""
         pNode = None
         if self.logic is not None and hasattr(self.logic, "getParameterNode"):
             try:
@@ -577,7 +669,7 @@ class PrintLayoutEngine:
                         preserve_aspect=True,
                     )
                     if render.available and render.image is not None:
-                        return _image_to_data_uri(render.image)
+                        return render.image, _image_to_data_uri(render.image)
             except Exception:
                 logger.exception("Panoramic strip rendering from node failed")
 
@@ -633,19 +725,40 @@ class PrintLayoutEngine:
                         preserve_aspect=True,
                     )
                     if render.available and render.image is not None:
-                        return _image_to_data_uri(render.image)
+                        return render.image, _image_to_data_uri(render.image)
             except Exception:
                 logger.exception("In-process panoramic synthesis for print layout failed")
-        return None
+        return None, None
 
-    def _vr_capture(self, engine: Any = None, quadrant: int = 4) -> Optional[str]:
+    def _pano_strip_uri(
+        self,
+        arcs: Sequence[float],
+        labels: Sequence[Any],
+        engine: Any = None,
+        is_mandible: bool = True,
+        highlight_indices: Optional[Sequence[int]] = None,
+        monochrome: bool = False,
+    ) -> Optional[str]:
+        """Render the panoramic strip from `PanoramicVolume`, or synthesize it in-process from `engine`."""
+        return self._pano_strip_image_and_uri(
+            arcs=arcs,
+            labels=labels,
+            engine=engine,
+            is_mandible=is_mandible,
+            highlight_indices=highlight_indices,
+            monochrome=monochrome,
+        )[1]
+
+    def _vr_capture_image_and_uri(
+        self, engine: Any = None, quadrant: int = 4
+    ) -> Tuple[Optional[Any], Optional[str]]:
         if self.logic is not None:
             capture = getattr(self.logic, "capture_3d_view_png_base64", None)
             if callable(capture):
                 try:
                     uri = capture(view_index=0)
                     if uri:
-                        return uri
+                        return None, uri
                 except Exception:
                     logger.exception("3D VR capture failed")
 
@@ -665,10 +778,13 @@ class PrintLayoutEngine:
                     show_title=True,
                 )
                 if render.available and render.image is not None:
-                    return _image_to_data_uri(render.image)
+                    return render.image, _image_to_data_uri(render.image)
             except Exception:
                 logger.debug("Fallback MIP projection card failed", exc_info=True)
-        return None
+        return None, None
+
+    def _vr_capture(self, engine: Any = None, quadrant: int = 4) -> Optional[str]:
+        return self._vr_capture_image_and_uri(engine=engine, quadrant=quadrant)[1]
 
     @staticmethod
     def _combine_html_pages(pages: List[str]) -> str:
@@ -751,10 +867,10 @@ class PrintLayoutEngine:
                 outline=line_col,
                 width=1,
             )
-        pano = _data_uri_to_image(record["pano_b64"])
+        pano = record.get("pano_image") or _data_uri_to_image(record["pano_b64"])
         if pano is not None:
             _paste_contain(page, pano, (margin + 4, pano_top + 4, pano_w - 8, pano_h - 8), bg=panel)
-        vr = _data_uri_to_image(record.get("vr_b64") or "")
+        vr = record.get("vr_image") or _data_uri_to_image(record.get("vr_b64") or "")
         if vr is not None:
             _paste_contain(
                 page,

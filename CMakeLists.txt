@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.16.3...3.19.7 FATAL_ERROR)
 
 project(SlicerCBCTPlanner)
 
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/CBCTPlanner/Resources/VERSION" _cbct_version_lines LIMIT_COUNT 1)
+list(GET _cbct_version_lines 0 _cbct_version_raw)
+string(STRIP "${_cbct_version_raw}" EXTENSION_VERSION)
+
 #-----------------------------------------------------------------------------
 # Extension meta-information
 set(EXTENSION_HOMEPAGE "https://github.com/HamiDeshoon/SlicerCBCTPlanner")

@@ -125,6 +125,9 @@ AUTOMATED_DENTAL_TOOLS_MODULES: Tuple[str, ...] = (
     "AutoCrop3D",
     "BatchDentalSegmentator",
     "MRI2CBCT",
+    "DOCShapeAXI",
+    "CLI-C",
+    "VFACE",
 )
 
 

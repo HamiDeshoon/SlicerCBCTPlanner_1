@@ -4,10 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slicer-cbct-planner"
-version = "2.0.0"
+dynamic = ["version"]
 description = "3D Slicer Dental CBCT Planning Extension (Curved Planar Reformat, Multi-Slice Lightbox, Canal & Implant Planning)"
 readme = "README.md"
 requires-python = ">=3.9"
+
+[tool.setuptools]
+py-modules = ["CBCTPlanner", "cli_batch"]
+package-dir = {"" = "CBCTPlanner"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["CBCTPlanner"]
+include = ["CBCTPlannerLib*"]
+
+[tool.setuptools.dynamic]
+version = {file = "CBCTPlanner/Resources/VERSION"}
 
 [tool.ruff]
 target-version = "py39"

@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+import zlib
 import numpy as np
 
 try:
@@ -35,7 +36,7 @@ except ImportError:
     vtk_to_numpy = None
 
 from .Utils import BoundedLRUCache
-from .core.arch_detector import project_point_to_polyline_arc_mm
+from .core.arch_detector import compute_parallel_transport_frames, project_point_to_polyline_arc_mm
 from .core.volume_loader import CBCTVolume
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,52 @@ class PanoramicCurveLogic:
     """Handles dental arch curve visualization, bounded frame caching, and in-process panoramic CPR."""
 
     MAX_CPR_FRAME_SPACING_MM: float = 1.5
+    _SLAB_BASIS_CACHE: BoundedLRUCache[
+        Tuple[Any, ...], Tuple[np.ndarray, np.ndarray, np.ndarray, int]
+    ] = BoundedLRUCache(max_entries=16)
+    _SLAB_PROJECTION_CACHE: BoundedLRUCache[Tuple[Any, ...], np.ndarray] = BoundedLRUCache(
+        max_entries=8
+    )
+
+    @classmethod
+    def clear_panoramic_caches(cls) -> None:
+        """Clear shared slab geometry and projected panoramic LRU caches."""
+        cls._SLAB_BASIS_CACHE.clear()
+        cls._SLAB_PROJECTION_CACHE.clear()
+
+    @staticmethod
+    def _array_crc32_key(arr: np.ndarray) -> Tuple[Tuple[int, ...], str, int]:
+        contig = np.ascontiguousarray(arr)
+        return tuple(int(s) for s in contig.shape), str(contig.dtype), int(zlib.crc32(memoryview(contig)))
+
+    @classmethod
+    def _slab_geometry_key(
+        cls,
+        cbct_volume: CBCTVolume,
+        pts_arch: np.ndarray,
+        normals: np.ndarray,
+        binormals: np.ndarray,
+        slab_thickness_mm: float,
+        height_mm: float,
+        spacing_mm: float,
+        buccolingual_offset_mm: float,
+        flip_vertical: bool,
+    ) -> Tuple[Any, ...]:
+        aff = np.ascontiguousarray(cbct_volume.affine, dtype=np.float64)
+        pts_c = np.ascontiguousarray(pts_arch, dtype=np.float64)
+        norm_c = np.ascontiguousarray(normals, dtype=np.float64)
+        bino_c = np.ascontiguousarray(binormals, dtype=np.float64)
+        return (
+            zlib.crc32(memoryview(aff)),
+            cls._array_crc32_key(pts_c),
+            cls._array_crc32_key(norm_c),
+            cls._array_crc32_key(bino_c),
+            round(float(slab_thickness_mm), 4),
+            round(float(height_mm), 4),
+            round(float(spacing_mm), 4),
+            round(float(buccolingual_offset_mm), 4),
+            bool(flip_vertical),
+        )
 
     def __init__(self, max_cache_entries: int = 8) -> None:
         self.max_frame_spacing_mm: float = self.MAX_CPR_FRAME_SPACING_MM
@@ -356,24 +403,10 @@ class PanoramicCurveLogic:
         up_norm = float(np.linalg.norm(up))
         up = up / up_norm if up_norm > 1e-8 else np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
-        raw_tangents = self._smooth_series(np.gradient(pts, axis=0))
-        tangents = raw_tangents - np.outer(raw_tangents @ up, up)
-        t_norms = np.linalg.norm(tangents, axis=1, keepdims=True)
-        t_norms[t_norms < 1e-8] = 1.0
-        tangents = tangents / t_norms
-
-        normals = np.cross(tangents, up)
-        n_norms = np.linalg.norm(normals, axis=1, keepdims=True)
-        n_norms[n_norms < 1e-8] = 1.0
-        normals = normals / n_norms
-
-        binormals = np.cross(normals, tangents)
-        b_norms = np.linalg.norm(binormals, axis=1, keepdims=True)
-        b_norms[b_norms < 1e-8] = 1.0
-        binormals = binormals / b_norms
-
-        flip = (binormals @ up) < 0
-        binormals[flip] *= -1.0
+        pts_for_frames = self._smooth_series(pts)
+        tangents, normals, binormals = compute_parallel_transport_frames(
+            pts_for_frames, occlusal_normal=up, ras_convention=True
+        )
 
         result = (pts, target_s, tangents, normals, binormals)
         self._frame_cache[cache_key] = result
@@ -621,15 +654,29 @@ class PanoramicCurveLogic:
         coords[1] += base_vox[:, :, 1]
         np.multiply(disp_vox[None, :, 0], u, out=coords[2])
         coords[2] += base_vox[:, :, 0]
+        nz, ny, nx = cbct_volume.image.shape
+        in_fov = (
+            (coords[0] >= -0.5)
+            & (coords[0] <= nz - 0.5)
+            & (coords[1] >= -0.5)
+            & (coords[1] <= ny - 0.5)
+            & (coords[2] >= -0.5)
+            & (coords[2] <= nx - 0.5)
+        )
+        np.clip(coords[0], 0.0, max(0.0, nz - 1.0 - 1e-5), out=coords[0])
+        np.clip(coords[1], 0.0, max(0.0, ny - 1.0 - 1e-5), out=coords[1])
+        np.clip(coords[2], 0.0, max(0.0, nx - 1.0 - 1e-5), out=coords[2])
         sampled = ndimage.map_coordinates(
             cbct_volume.image,
             coords,
             order=1,
-            mode="constant",
-            cval=-1000.0,
+            mode="nearest",
             prefilter=False,
         )
-        return np.asarray(sampled)
+        sampled_arr = np.asarray(sampled, dtype=np.float32)
+        if not np.all(in_fov):
+            sampled_arr[~in_fov] = -1000.0
+        return sampled_arr
 
     @classmethod
     def sample_panoramic_slab_array(
@@ -655,8 +702,9 @@ class PanoramicCurveLogic:
           - row `j` (`0 .. dim_y - 1`) increases Superiorly along `+B`
           - col `k` (`0 .. dim_z - 1`) progresses from Patient Right (`arc_mm = 0`) to Patient Left (`arc_mm = L`).
         """
-        # B5: Right-handed displacement axis disp_x = -N; flip applied once in shared geometry
-        base_surface, disp_x_cols, u_offsets, n_layers, _, _ = cls._build_slab_geometry(
+        mode = projection_mode.strip().upper()
+        geom_key = cls._slab_geometry_key(
+            cbct_volume=cbct_volume,
             pts_arch=pts_arch,
             normals=normals,
             binormals=binormals,
@@ -666,16 +714,50 @@ class PanoramicCurveLogic:
             buccolingual_offset_mm=buccolingual_offset_mm,
             flip_vertical=flip_vertical,
         )
-        mode = projection_mode.strip().upper()
-        base_vox, disp_vox = cls._slab_voxel_basis(cbct_volume, base_surface, disp_x_cols)
+        vol_key = cls._array_crc32_key(cbct_volume.image)
+        proj_key = (vol_key, geom_key, mode)
+        cached_proj = cls._SLAB_PROJECTION_CACHE.get(proj_key)
+        if cached_proj is not None:
+            return cached_proj.copy()
+
+        cached_basis = cls._SLAB_BASIS_CACHE.get(geom_key)
+        if cached_basis is not None:
+            base_vox, disp_vox, u_offsets, n_layers = cached_basis
+        else:
+            # B5: Right-handed displacement axis disp_x = -N; flip applied once in shared geometry
+            base_surface, disp_x_cols, u_offsets, n_layers, _, _ = cls._build_slab_geometry(
+                pts_arch=pts_arch,
+                normals=normals,
+                binormals=binormals,
+                slab_thickness_mm=slab_thickness_mm,
+                height_mm=height_mm,
+                spacing_mm=spacing_mm,
+                buccolingual_offset_mm=buccolingual_offset_mm,
+                flip_vertical=flip_vertical,
+            )
+            base_vox, disp_vox = cls._slab_voxel_basis(cbct_volume, base_surface, disp_x_cols)
+            cls._SLAB_BASIS_CACHE[geom_key] = (base_vox, disp_vox, u_offsets, n_layers)
+
         dim_y, dim_z = base_vox.shape[:2]
         accum: Optional[np.ndarray] = None
         try:
             from scipy import ndimage  # type: ignore
 
             # Pre-allocate reusable float32 coordinate & output buffers (eliminates per-layer allocs)
+            nz, ny, nx = cbct_volume.image.shape
+            max_z = np.float32(max(0.0, float(nz) - 1.0 - 1e-5))
+            max_y = np.float32(max(0.0, float(ny) - 1.0 - 1e-5))
+            max_x = np.float32(max(0.0, float(nx) - 1.0 - 1e-5))
+            lim_z = np.float32(float(nz) - 0.5)
+            lim_y = np.float32(float(ny) - 0.5)
+            lim_x = np.float32(float(nx) - 0.5)
+            half_neg = np.float32(-0.5)
+            zero_f = np.float32(0.0)
+
             coords = np.empty((3, dim_y, dim_z), dtype=np.float32)
             layer_buf = np.empty((dim_y, dim_z), dtype=np.float32)
+            in_fov = np.empty((dim_y, dim_z), dtype=bool)
+            tmp_cmp = np.empty((dim_y, dim_z), dtype=bool)
             base_z = np.ascontiguousarray(base_vox[:, :, 2], dtype=np.float32)
             base_y = np.ascontiguousarray(base_vox[:, :, 1], dtype=np.float32)
             base_x = np.ascontiguousarray(base_vox[:, :, 0], dtype=np.float32)
@@ -691,15 +773,32 @@ class PanoramicCurveLogic:
                 coords[1] += base_y
                 np.multiply(disp_x, u_f, out=coords[2])
                 coords[2] += base_x
+
+                np.greater_equal(coords[0], half_neg, out=in_fov)
+                np.less_equal(coords[0], lim_z, out=tmp_cmp)
+                in_fov &= tmp_cmp
+                np.greater_equal(coords[1], half_neg, out=tmp_cmp)
+                in_fov &= tmp_cmp
+                np.less_equal(coords[1], lim_y, out=tmp_cmp)
+                in_fov &= tmp_cmp
+                np.greater_equal(coords[2], half_neg, out=tmp_cmp)
+                in_fov &= tmp_cmp
+                np.less_equal(coords[2], lim_x, out=tmp_cmp)
+                in_fov &= tmp_cmp
+
+                np.clip(coords[0], zero_f, max_z, out=coords[0])
+                np.clip(coords[1], zero_f, max_y, out=coords[1])
+                np.clip(coords[2], zero_f, max_x, out=coords[2])
                 ndimage.map_coordinates(
                     cbct_volume.image,
                     coords,
                     output=layer_buf,
                     order=1,
-                    mode="constant",
-                    cval=-1000.0,
+                    mode="nearest",
                     prefilter=False,
                 )
+                if not np.all(in_fov):
+                    layer_buf[~in_fov] = -1000.0
                 if accum is None:
                     accum = layer_buf.copy()
                 elif mode == "MIP":
@@ -721,7 +820,9 @@ class PanoramicCurveLogic:
                     accum += sampled
 
         assert accum is not None
-        return cls._finalize_projection(accum, mode, n_layers)
+        out = cls._finalize_projection(accum, mode, n_layers)
+        cls._SLAB_PROJECTION_CACHE[proj_key] = out.copy()
+        return out
 
     @staticmethod
     def _crop_panoramic_vertical_padding(

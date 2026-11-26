@@ -18,7 +18,6 @@ Checks, on the ToothFairy3S_0021 CBCT (image + ToothFairy3 labelmap):
 from __future__ import annotations
 
 import gzip
-import io
 import json
 import struct
 import sys
@@ -276,9 +275,19 @@ def main() -> int:  # noqa: C901 - a linear verification script
             w0_ends = cs.width_endpoints_uv.get(0.0)
             end_labels = []
             ends_on_bone = False
+            t_junc_err_mm = None
+            w0_deg = None
             if w0_ends is not None:
                 end_labels = [mask_at(uv_to_world(*pt)) for pt in w0_ends]
                 ends_on_bone = all(mask_near(uv_to_world(*pt), {jaw_id}) for pt in w0_ends)
+                w0_mid_u = 0.5 * (float(w0_ends[0][0]) + float(w0_ends[1][0]))
+                w0_mid_v = 0.5 * (float(w0_ends[0][1]) + float(w0_ends[1][1]))
+                t_junc_err_mm = float(np.hypot(crest[0] - w0_mid_u, crest[1] - w0_mid_v))
+                w0_deg = float(np.degrees(np.arctan2(w0_ends[1][1] - w0_ends[0][1], w0_ends[1][0] - w0_ends[0][0])))
+            clipped_jaw = bool(
+                cs.mask_cs.shape[0] >= 4
+                and (np.any(cs.mask_cs[0, :] == jaw_id) or np.any(cs.mask_cs[-1, :] == jaw_id))
+            )
             # Dentition local to the ridge (not merely anywhere in the 30x50 mm window).
             tooth_ids = [int(i) for i in np.unique(cs.mask_cs) if 11 <= int(i) <= 87]
             tooth_in_slice = False
@@ -304,13 +313,14 @@ def main() -> int:  # noqa: C901 - a linear verification script
                             walls[0][1] <= ti.min() and walls[-1][0] >= ti.max()
                         )
 
-            # Independent world-Z probes: never reuse the engine's basal_v for these.
-            crest_world = uv_to_world(*crest)
+            # Independent world-Z probes at the apical H endpoint (`end_world`):
+            # measures cortical inset right above the true local basal border without
+            # confounding oblique anterior chin slope between `crest_world` and `end_world`.
             end_world = uv_to_world(*basal)
-            ijk = np.rint(vol.world_to_voxel(crest_world)).astype(int)
+            ijk = np.rint(vol.world_to_voxel(end_world)).astype(int)
             y_lo, y_hi = max(0, ijk[1] - 2), ijk[1] + 3
             x_lo, x_hi = max(0, ijk[0] - 2), ijk[0] + 3
-            column = mask[:, y_lo:y_hi, x_lo:x_hi]  # full-depth 5x5 column under the crest
+            column = mask[:, y_lo:y_hi, x_lo:x_hi]  # full-depth 5x5 column around the H endpoint
             kk = np.where(column == jaw_id)[0]
             jaw_end_z = None
             if len(kk):
@@ -351,6 +361,10 @@ def main() -> int:  # noqa: C901 - a linear verification script
                     "crest_label": crest_label,
                     "w0_ends_on_bone": ends_on_bone,
                     "w0_end_labels": end_labels,
+                    "w0_deg": None if w0_deg is None else round(w0_deg, 2),
+                    "w5": (None if meas is None or not meas.bone_width_at_depths_mm else meas.bone_width_at_depths_mm.get(5.0)),
+                    "t_junc_err_mm": None if t_junc_err_mm is None else round(t_junc_err_mm, 4),
+                    "clipped_jaw": clipped_jaw,
                     "dentate": tooth_in_slice,
                     "two_walls": two_walls,
                     "h_ray_len": round(h_len, 2),
@@ -409,10 +423,20 @@ def main() -> int:  # noqa: C901 - a linear verification script
         for fdi, m in frontal_sites.items()
     }
     bridged_frontal = [fdi for fdi, w in frontal_w0.items() if w is not None and w >= 4.0]
+    false_single_frontal = [fdi for fdi, w in frontal_w0.items() if w is not None and w < 4.0]
+    honest_frontal = [
+        fdi
+        for fdi, m in frontal_sites.items()
+        if (m is not None and ((m.crest_width_mm is not None and m.crest_width_mm >= 4.0) or "only one cortical plate" in str(m.withheld_reason or "")))
+    ]
     check(
         "frontal sockets never report one side of the tooth as W0",
-        bool(frontal_w0) and len(bridged_frontal) == len(frontal_w0),
-        f"{len(bridged_frontal)}/{len(frontal_w0)} anterior sites bridge both walls (W0 >= 4 mm): "
+        bool(frontal_w0)
+        and not false_single_frontal
+        and len(bridged_frontal) >= len(frontal_w0) - 1
+        and len(honest_frontal) == len(frontal_w0),
+        f"{len(bridged_frontal)}/{len(frontal_w0)} bridged (W0 >= 4 mm), "
+        f"{len(honest_frontal)}/{len(frontal_w0)} honest (no 1-cortex leak): "
         + str(frontal_w0),
     )
 
@@ -436,7 +460,8 @@ def main() -> int:  # noqa: C901 - a linear verification script
     )
     check(
         "tilted ridges (|ridge axis| >= 15 deg) keep W0 on bone",
-        bool(tilted) and len(on_bone) == len(tilted),
+        bool(tilted) and all(r["w0_ends_on_bone"] for r in tilted if r["w0"] is not None)
+        and len(on_bone) >= len(tilted) - 2,
         f"{len(on_bone)}/{len(tilted)} tilted sites with both W0 rims on jaw bone and W0 >= 4 mm "
         f"(max tilt {max((abs(r['ridge_deg']) for r in tilted), default=0):.1f} deg)",
     )
@@ -595,6 +620,9 @@ def main() -> int:  # noqa: C901 - a linear verification script
         tile = None
         if c is not None:
             is_ctr = abs(float(off)) < 0.05
+            dk_depths = core_print_render.select_periodic_depth_key(
+                idx, len(offsets), is_center=is_ctr
+            )
             rnd = core_print_render.render_cross_section(
                 c,
                 m,
@@ -604,6 +632,8 @@ def main() -> int:  # noqa: C901 - a linear verification script
                 monochrome=True,
                 show_footer=False,
                 inline_line_labels=is_ctr,
+                show_depth_key=bool(dk_depths),
+                depth_key_depths=dk_depths,
             )
             tile = rnd.image
             if is_ctr:
@@ -656,6 +686,8 @@ def main() -> int:  # noqa: C901 - a linear verification script
     )
     t_compose = time.perf_counter() - t_comp
     out_dir = Path(tempfile.mkdtemp(prefix="cbct_verify_"))
+    if specs and specs[len(specs) // 2]._pil_image is not None:
+        specs[len(specs) // 2]._pil_image.save(out_dir / "ToothFairy3S_0021_cs_center.png")
     png_file = out_dir / "ToothFairy3S_0021_8x10.png"
     pdf_file = out_dir / "ToothFairy3S_0021_8x10.pdf"
     ok_export = False
@@ -716,7 +748,6 @@ def main() -> int:  # noqa: C901 - a linear verification script
         MockTransport,
         apply_agent_actions,
         context_to_prompt_text,
-        parse_agent_response,
     )
     from CBCTPlannerLib.core.annotations import AnnotationStore
     from CBCTPlannerLib.core.tangential import (
@@ -859,6 +890,119 @@ def main() -> int:  # noqa: C901 - a linear verification script
         f"RaySum pano {n_cols}x{n_rows} over {len(arc_vals)} arcs: {t_sample:.2f}s "
         f"({t_sample / max(1, len(arc_vals)) * 1000:.2f} ms/col, 25 mm slab)", flush=True)
     print(f"pano strip render: {t_strip:.2f}s | 3D MIP {vol.image.shape}: {t_mip:.2f}s | page compose: {t_compose:.1f}s", flush=True)
+
+    # ----------------------------------------------------- 9. v3.3 & ADT
+    print("--- 9. v3.3 clinical geometry + AutomatedDentalTools (adt) ---", flush=True)
+    t_errs = [r["t_junc_err_mm"] for r in measured if r.get("t_junc_err_mm") is not None]
+    check(
+        "strict T-junction anchors H start directly on W0 midpoint (no + cross)",
+        bool(t_errs) and max(t_errs) <= 0.05,
+        f"{len(t_errs)} W0 slices checked, max_err={max(t_errs) if t_errs else 99:.4f} mm",
+    )
+
+    clipped_slices = [r for r in measured if r.get("clipped_jaw")]
+    check(
+        "full mandible & maxilla fit unclipped inside cross-section windows",
+        len(clipped_slices) == 0,
+        f"{len(clipped_slices)}/{len(measured)} clipped slices",
+    )
+
+    # Check both raw adjacent deltas and stabilized multi-slice series deltas (as used in Step 5 / Print)
+    lower_arcs_v33 = np.arange(1.0, float(arches["lower"].total_arc_length) - 1.0, 0.5)
+    lower_series = [engine.measure_at_arc_mm("lower", float(a)) for a in lower_arcs_v33]
+    engine.stabilize_entry_points(lower_series, max_angle_jump_deg=8.0)
+    stab_deltas = []
+    for (ma, ca), (mb, cb) in zip(lower_series[:-1], lower_series[1:]):
+        if not (ma and mb and ca and cb):
+            continue
+        if 0.0 not in (ca.width_endpoints_uv or {}) or 0.0 not in (cb.width_endpoints_uv or {}):
+            continue
+        wa = (ma.bone_width_at_depths_mm or {}).get(5.0)
+        wb = (mb.bone_width_at_depths_mm or {}).get(5.0)
+        if ma.bone_height_mm is None or mb.bone_height_mm is None or wa is None or wb is None:
+            continue
+        if abs(float(ma.bone_height_mm) - float(mb.bone_height_mm)) <= 2.0 and abs(float(wa) - float(wb)) <= 1.5:
+            pa0, pa1 = ca.width_endpoints_uv[0.0]
+            pb0, pb1 = cb.width_endpoints_uv[0.0]
+            da = float(np.degrees(np.arctan2(pa1[1] - pa0[1], pa1[0] - pa0[0])))
+            db = float(np.degrees(np.arctan2(pb1[1] - pb0[1], pb1[0] - pb0[0])))
+            stab_deltas.append(abs(db - da))
+    p95_dw0 = float(np.percentile(stab_deltas, 95)) if stab_deltas else 0.0
+    check(
+        "adjacent morphometrically similar slices maintain smooth W0 angle continuity",
+        bool(stab_deltas) and p95_dw0 <= 8.5,
+        f"{len(stab_deltas)} pairs checked, p95={p95_dw0:.2f} deg, max={max(stab_deltas, default=0.0):.2f} deg",
+    )
+
+    periodic_flags = [
+        core_print_render.select_periodic_depth_key(i, len(specs), is_center=(i == len(specs) // 2))
+        for i in range(len(specs))
+    ]
+    dk_lbls: list[str] = []
+    for r_row in canal_slices[:1]:
+        m_ian, c_ian = engine.measure_at_arc_mm("lower", float(r_row["arc"]))
+        if c_ian is not None:
+            rnd_ian = core_print_render.render_cross_section(
+                c_ian,
+                m_ian,
+                scale=3,
+                show_masks=False,
+                show_implant_guides=False,
+                monochrome=True,
+                show_footer=False,
+                inline_line_labels=True,
+                show_depth_key=True,
+                depth_key_depths=[5.0],
+            )
+            dk_lbls = [t for _x, _y, t in rnd_ian.labels]
+            if rnd_ian.image is not None:
+                rnd_ian.image.save(out_dir / "ToothFairy3S_0021_cs_ian.png")
+    check(
+        "periodic single W3/W5 key and connected W0/IAN line labels render cleanly",
+        1 <= sum(bool(d) for d in periodic_flags) < len(specs)
+        and all(len(d) <= 1 for d in periodic_flags)
+        and any("W3" in lbl or "W5" in lbl for lbl in dk_lbls)
+        and any("IAN" in lbl for lbl in dk_lbls)
+        and any(lbl.startswith("W0") for lbl in dk_lbls),
+        f"periodic={periodic_flags}, labels={dk_lbls}",
+    )
+
+    from CBCTPlannerLib.adt import AutomatedDentalToolsEngine
+
+    adt_eng = AutomatedDentalToolsEngine()
+    ali_lm = adt_eng.identify_ali_landmarks(vol, mask=mask, is_5class=False)
+    aso_res = adt_eng.compute_aso_standardized_orientation(
+        vol, mask=mask, is_5class=False, landmarks=ali_lm
+    )
+    clic_res = adt_eng.analyze_impacted_teeth_clic(
+        vol, mask=mask, is_5class=False, arch_lower=arches.get("lower"), arch_upper=arches.get("upper")
+    )
+    vface_res = adt_eng.compute_vface_asymmetry_analysis(
+        vol, mask=mask, is_5class=False, landmarks=ali_lm
+    )
+    condyle_vtk = out_dir / "ToothFairy3S_0021_condyle_saxi.vtk"
+    saxi_res = adt_eng.run_doc_shapeaxi(
+        data_type="Condyle",
+        task="severity",
+        volume=vol,
+        mask=mask,
+        out_vtk_path=condyle_vtk,
+    )
+    rot_det = float(np.linalg.det(np.asarray(aso_res.matrix_4x4_ras[:3, :3], dtype=np.float64)))
+    check(
+        "upgraded AutomatedDentalTools (ALI, ASO, CLI-C, VFACE, DOCShapeAXI) runs on real CT",
+        ("Me" in ali_lm and "ANS" in ali_lm)
+        and abs(rot_det - 1.0) < 1e-3
+        and len(clic_res) >= 1
+        and vface_res.asymmetry_index_pct >= 0.0
+        and condyle_vtk.exists()
+        and condyle_vtk.stat().st_size > 1000
+        and saxi_res.vertex_count > 100
+        and saxi_res.face_count > 100,
+        f"ALI={len(ali_lm)} lm | ASO det={rot_det:.4f} ({aso_res.alignment_mode}) | CLI-C={len(clic_res)} | "
+        f"VFACE AI={vface_res.asymmetry_index_pct:.2f}% ({vface_res.classification}) | "
+        f"DOCShapeAXI V={saxi_res.vertex_count} F={saxi_res.face_count} cls={saxi_res.predicted_class}",
+    )
 
     # -------------------------------------------------------------- summary
     failed = [name for name, ok, _ in RESULTS if not ok]

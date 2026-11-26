@@ -1,9 +1,9 @@
-# Code Modernization Assessment & Business Rules: `SlicerCBCTPlanner_1` → v3.2+
+# Code Modernization Assessment & Business Rules: `SlicerCBCTPlanner_1` → v3.3.0
 
 ## 1. Executive Assessment (`/modernize-assess`)
-- **System**: `SlicerCBCTPlanner_1` (3D Slicer Scripted Loadable Extension in Python 3.9+ / VTK / Qt / CTK / NumPy / SciPy / PyTorch).
-- **Codebase Inventory**: **52 Python modules** (28 in `CBCTPlannerLib/`: 15 top-level + 13 in `CBCTPlannerLib/core/`) + **17 test modules** (**242 unit tests**, 8 wizard steps / 8 step chips, 22 active `CBCTPlanner/*` QSettings keys as of 2026-11-25).
-- **Modernization Method**: **Uplift + Feature Expansion** — preserve all behavioral guarantees (B1–B22, O1–O9, F1–F20) while fixing critical Slicer runtime/rendering defects and adding clinical subsystems (`RiseMarEngine`, `AutomatedDentalToolsEngine`, `SlicerDentalSegmentator` Vivid 3D/VR, `RaySum` panoramic, transparent RGBA exports, Interactive Pre-Print Editor, edentulous `jawbone_crest` arch fitting).
+- **System**: `SlicerCBCTPlanner_1` v3.3.0 (`CBCTPlanner/Resources/VERSION`, 3D Slicer Scripted Loadable Extension in Python 3.9+ / VTK / Qt / CTK / NumPy / SciPy).
+- **Codebase Inventory**: **40 module Python files** (`2` top-level `CBCTPlanner.py`, `cli_batch.py`; `16` in `CBCTPlannerLib/` including `EndodonticEngine.py`; `15` in `CBCTPlannerLib/core/` including `contracts.py`, `case_state.py`; `7` in `CBCTPlannerLib/adt/`) + **24 test modules** (**265 unit tests**, 8 wizard steps / 8 step chips, verified in both host Python 3.12 and Slicer 5.12.3 Python as of 2026-11-26).
+- **Modernization Method**: **Uplift + Feature Expansion** — preserve all behavioral guarantees (B1–B22, O1–O9, F1–F20) while enforcing CMake packaging completeness (`test_packaging_completeness.py`), shared units/provenance (`core/contracts.py`), parallel-transport arch frames & half-voxel pano boundary clamping, topology-aware multi-root `EndodonticEngine`, closed-form capsule `ImplantPlanner` with multi-structure SDF & uncertainty reporting, `OPT-01`/`OPT-03` caches, `adt` native suite, and structured JSON reports.
 
 ---
 
@@ -140,20 +140,28 @@
 | `tests/test_print_layout.py` | 14 | Pano/VR RGBA, legend corner relocation, BL-14 notes strip, measurement overrides |
 | `tests/test_orientation.py` | 12 | RAS standardisation, anatomical auto-fix |
 | `tests/test_arch_fit.py` | 13 | Arch detection, dentate/edentulous/jawbone-extended curve fitting, shared Z-smoothness |
+| `tests/test_arch_pano_edge_cases.py` | 4 | Parallel-transport hemi-arch/S-curve frames, FDI outlier rejection, anisotropic jawbone fit, pano half-voxel edge clamp |
 | `tests/test_tangential_view.py` | 11 | Ridge-parallel sampling, crest drop, RGBA render |
 | `tests/test_autofit_widget.py` | 8 | Workspace role profiles, 8 step chips |
 | `tests/test_cbct_planner_v4_fixes.py` | 8 | v4 regression fixes |
 | `tests/test_slicer_glue.py` | 5 | Widget / parameter-node glue |
 | `tests/test_v3_upgrades.py` | 5 | v3 upgrade paths |
+| `tests/test_contracts_cache_opt.py` | 3 | Provenance contracts, `case_state` JSONL/override round-trips, `OPT-01` pano CRC32 cache invalidation |
+| `tests/test_endodontic_engine.py` | 2 | Multi-root 2-root/3-root topology graphs, bifurcations, EDT radii, curvature, conservative missing pulp, access corridor |
+| `tests/test_implant_uncertainty.py` | 2 | Closed-form capsule distances, adjacent tooth/IAN/sinus/cortical perforation, explicit uncertainty priors |
 | `tests/test_orientation_and_cross_sections.py` | 4 | Orientation + section geometry |
+| `tests/test_packaging_completeness.py` | 3 | Authoritative `VERSION`, 100% CMake script/resource enumeration, clean isolated staged install check |
 | `tests/test_static_attrs.py` | 4 | Static attribute audit (no dangling `self.*`, no silent `except: pass`) |
+| `tests/test_transforms_and_reports.py` | 2 | Tilted LPS-to-RAS canonicalization, structured JSON report provenance & unit contracts |
 | `tests/test_v32_preprint_and_arch.py` | 4 | Inline labels, custom overlays, coronal-offset re-anchoring, Pre-Print JSONL, jaw-wise odontogram + 5/6/7 expansion |
-| **Total** | **242** | Verified on 2026-11-25 (`0` failures, `0` skipped; `ruff check CBCTPlanner tests` clean) |
+| `tests/test_v33_adt_and_clinical_geometry.py` | 7 | Strict T-junction, unclipped jaw bounds, smooth W0 continuity, periodic W3/W5 key, `adt` ALI/ASO/CLI-C/VFACE/DOCShapeAXI |
+| **Total** | **265** | Verified on 2026-11-26 in both host Python (`24.2s`) & Slicer 5.12.3 `PythonSlicer.exe` (`28.4s`) (`0` failures, `0` skipped; `ruff` clean) |
 
-Run: `python -m unittest discover -s tests`
+Run: `python -m unittest discover -s tests` (or `"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" -m unittest discover -s tests`)
 
-Headless Slicer harnesses verified on Windows **3D Slicer 5.12.3** (2026-11-25):
-`"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" analysis/slicercbctplanner_1/verify_real_ct.py` (**27/27 PASS**) and
+Headless Slicer harnesses verified on Windows **3D Slicer 5.12.3** (2026-11-26):
+`"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" analysis/slicercbctplanner_1/verify_real_ct.py` (**32/32 PASS**, `205` lower rows),
+`"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" tests/bench_suite.py` (benchmark timings), and
 `python analysis/mcp_slicer_check/verify_mcp_slicer.py` (**11/11 PASS**).
 
 ---

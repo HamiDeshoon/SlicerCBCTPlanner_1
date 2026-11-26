@@ -1,7 +1,7 @@
 {
-  "session_id": "slicer-cbct-planner-v3.2-hardening",
-  "updated_at": "2026-11-25T14:35:00+03:30",
-  "active_milestone": "Post-v3.2 hardening + jaw-wise odontogram / missing-span expansion / full-jaw curves / full-screen cross-section viewer complete (uncommitted awaiting user review): 242 unit tests OK, verify_real_ct 27/27 PASS, verify_mcp_slicer 11/11 PASS, ruff clean",
+  "session_id": "slicer-cbct-planner-v3.3-hardening",
+  "updated_at": "2026-11-26T02:05:00+03:30",
+  "active_milestone": "v3.3.0 hardening & architecture modernization complete (uncommitted awaiting user review): 265 unit tests OK (host + Slicer 5.12.3), clean staged install verified, verify_real_ct 32/32 PASS, verify_mcp_slicer 11/11 PASS, ruff clean",
   "decisions": [
     {
       "topic": "Print File & Measured Image Bug Fixes",
@@ -162,16 +162,20 @@
     "Doc-vs-code audit pass on 552d2a89: verified 219 unit tests (1 skipped), 51 .py modules (28 CBCTPlannerLib / 13 core), 8 step chips, 22 active QSettings keys; fixed 7 doc contradictions and logged BL-17 (API URL bugs) and BL-18 (H from W0 midline)",
     "Post-v3.2 hardening: W3/W5 legend corner auto-move off bone & scale bar; Interactive Pre-Print Editor H/W0 auto-populate + last_cross_sections + coronal-offset-preserving W0 drag + ParameterNode MeasurementOverrides JSON + JSONL export + Apply Edits & Print fix",
     "Edentulous jawbone_crest arch verification added on ToothFairy3S_0021 (teeth zeroed, 4/5 valid cross-sections); BL-12 single-cortex W0 withhold (WITHHELD_W0_SINGLE_CORTEX) with deeper-caliper rescue; BL-14 Clinical Notes & Review Flags strip on 8x10 PNG/PDF/HTML; BL-15/BL-17 bare-host/retry hardening",
-    "Verified 2026-11-25: ruff clean, 242 unit tests OK, verify_real_ct 27/27 PASS, verify_mcp_slicer 11/11 PASS; shared occlusal blend (max_dz=1.34mm), full-jaw posterior bone extension on missing 45/46/47, jaw-wise odontogram, 5/6/7 click auto-expansion, Full Screen cross-section viewer & compact card layout"
+    "Verified 2026-11-25: ruff clean, 242 unit tests OK, verify_real_ct 27/27 PASS, verify_mcp_slicer 11/11 PASS; shared occlusal blend (max_dz=1.34mm), full-jaw posterior bone extension on missing 45/46/47, jaw-wise odontogram, 5/6/7 click auto-expansion, Full Screen cross-section viewer & compact card layout",
+    "Verified 2026-11-26 v3.3.0 upgrade: Fixed P0 CBCTPlanner/CMakeLists.txt (added WorkflowUIHelpers, adt/*, core/*, EndodonticEngine, VERSION), unified single version source CBCTPlanner/Resources/VERSION (3.3.0) across Utils/pyproject.toml/CMakeLists, verified isolated staged install + setuptools metadata",
+    "Added core/contracts.py (mm/deg/HU + normalized provenance taxonomy), core/case_state.py, OPT-01 CRC32-keyed LRU pano slab cache (353.95 ms -> 1.18 ms warm), OPT-03 direct pano/VR PIL composition, tests/bench_suite.py",
+    "Upgraded core/arch_detector.py with parallel-transport (Bishop) frames and sparse-arch FDI outlier rejection, PanoramicCurveLogic with half-voxel edge clamp & PT frames, core/measurements.py socket_rims thin-buccal-plate fix (32/32 PASS on verify_real_ct)",
+    "Implemented multi-root topology EndodonticEngine.py (EDT radii, 26-neighbor Dijkstra tree, bifurcations, curvature, wall thickness, access corridor optimization) bridged into CanalTracer + Step 6 UI",
+    "Upgraded ImplantPlanner.py with closed-form capsule distances, vectorized VTK PolyData, multi-structure SDF checks (teeth, canal, sinus, cortical perforation), and UncertaintyClearance; added structured JSON reports to PrintLayoutEngine & export_treatment_plan_files; verified 265/265 host+Slicer tests, 32/32 verify_real_ct, 11/11 verify_mcp_slicer"
   ],
   "next_tasks": [
-    "Await user confirmation before committing/pushing post-v3.2 hardening changes",
+    "Await user confirmation before committing/pushing v3.3.0 hardening changes",
     "BL-13: apply agent implant diameter/length edits via a plan override column",
     "BL-01: smooth W0/W3/W5 along the arch (1-site Gaussian)",
     "BL-05: dynamic half_v_mm for tall anterior mandibles",
     "BL-06: PDL gap tolerance validation on real molar CT",
     "BL-16: vendored mcp-slicer copy with SLICER_WEB_SERVER_URL so the port is configurable",
-    "OPT-03: pass PIL.Image/ndarray directly when composing the 8x10 film",
     "OPT-04: scipy.ndimage.label flood-fill in finalize_transparent_png_bytes"
   ]
 }

@@ -18,7 +18,17 @@ except ImportError:
 K = TypeVar("K")
 V = TypeVar("V")
 
-SOFTWARE_VERSION = "2.0.0"
+def _load_software_version() -> str:
+    version_path = Path(__file__).resolve().parent.parent / "Resources" / "VERSION"
+    if not version_path.is_file():
+        raise FileNotFoundError(f"Missing authoritative version file: {version_path}")
+    text = version_path.read_text(encoding="utf-8").strip()
+    if not text:
+        raise ValueError(f"Empty version file: {version_path}")
+    return text
+
+
+SOFTWARE_VERSION = _load_software_version()
 CLINICAL_DISCLAIMER_TEXT = (
     "NOT FOR DIAGNOSTIC USE — PLANNING AID ONLY. "
     "All CBCT gray-value density figures and Misch classifications are approximate (uncalibrated HU)."

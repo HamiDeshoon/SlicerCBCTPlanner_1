@@ -724,6 +724,82 @@ class MeasurementEngine:
             np.array([0.0, 0.0, 1.0], dtype=np.float64),
         )
 
+    def _jaw_v_bounds_at_frame(
+        self,
+        P: np.ndarray,
+        N: np.ndarray,
+        B: np.ndarray,
+        *,
+        is_mandible: bool,
+        base_half_v_mm: float = 25.0,
+        max_half_v_mm: float = 55.0,
+        step_mm: float = 0.25,
+        margin_mm: float = 4.5,
+    ) -> Tuple[float, float]:
+        """Compute `(v_min, v_max)` bounds along binormal `B` so the full mandible/maxilla fits unclipped."""
+        v_lo = -float(base_half_v_mm)
+        v_hi = float(base_half_v_mm)
+        jaw_id = self._jaw_id(is_mandible)
+        slc = self.localizer._get_label_slices().get(int(jaw_id))
+        if slc is None or self.mask is None or self.volume is None:
+            return v_lo, v_hi
+
+        sz, sy, sx = self.volume.spacing
+        vox = self.volume.world_to_voxel(P)
+        vx, vy = int(round(vox[0])), int(round(vox[1]))
+        rx = max(4, int(round(16.0 / max(1e-3, sx))))
+        ry = max(4, int(round(16.0 / max(1e-3, sy))))
+        z0, z1 = int(slc[0].start or 0), int(slc[0].stop or self.mask.shape[0])
+        y0 = max(int(slc[1].start or 0), vy - ry)
+        y1 = min(int(slc[1].stop or self.mask.shape[1]), vy + ry + 1)
+        x0 = max(int(slc[2].start or 0), vx - rx)
+        x1 = min(int(slc[2].stop or self.mask.shape[2]), vx + rx + 1)
+        if z1 <= z0 or y1 <= y0 or x1 <= x0:
+            return v_lo, v_hi
+
+        # Do not expand dynamically if the jaw label spans the entire scan FOV from border to border
+        # (e.g. pathological full-volume masks that must still trip height/width plausibility gates).
+        slc_z0, slc_z1 = int(slc[0].start or 0), int(slc[0].stop or self.mask.shape[0])
+        slc_y0, slc_y1 = int(slc[1].start or 0), int(slc[1].stop or self.mask.shape[1])
+        if (slc_z1 - slc_z0) >= self.mask.shape[0] - 2 and (slc_y1 - slc_y0) >= self.mask.shape[1] - 2:
+            return v_lo, v_hi
+
+        sub = self.mask[z0:z1, y0:y1, x0:x1] == int(jaw_id)
+        if not np.any(sub):
+            return v_lo, v_hi
+        lz, ly, lx = np.where(sub)
+        step = max(1, len(lz) // 4000)
+        vox_pts = np.column_stack([lx[::step] + x0, ly[::step] + y0, lz[::step] + z0])
+        world_pts = self.volume.voxel_to_world(vox_pts)
+        rel = world_pts - np.asarray(P, dtype=np.float64)[None, :]
+        u_vals = rel @ np.asarray(N, dtype=np.float64)
+        in_plane = np.abs(u_vals) <= 15.0
+        if int(np.count_nonzero(in_plane)) < 6:
+            return v_lo, v_hi
+        v_vals = rel[in_plane] @ np.asarray(B, dtype=np.float64)
+        jaw_min_v = float(np.min(v_vals)) - float(margin_mm)
+        jaw_max_v = float(np.max(v_vals)) + float(margin_mm)
+
+        def _snap_neg(val: float) -> float:
+            mag = min(float(max_half_v_mm), max(float(base_half_v_mm), abs(min(0.0, val))))
+            return -float(math.ceil(mag / max(1e-3, step_mm)) * step_mm)
+
+        def _snap_pos(val: float) -> float:
+            mag = min(float(max_half_v_mm), max(float(base_half_v_mm), max(0.0, val)))
+            return float(math.ceil(mag / max(1e-3, step_mm)) * step_mm)
+
+        if is_mandible:
+            if jaw_min_v < v_lo:
+                v_lo = _snap_neg(jaw_min_v)
+            if jaw_max_v > v_hi:
+                v_hi = _snap_pos(jaw_max_v)
+        else:
+            if jaw_max_v > v_hi:
+                v_hi = _snap_pos(jaw_max_v)
+            if jaw_min_v < v_lo:
+                v_lo = _snap_neg(jaw_min_v)
+        return v_lo, v_hi
+
     def _resample_arch_cross_section(
         self,
         site_center_mm: np.ndarray,
@@ -734,10 +810,13 @@ class MeasurementEngine:
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Resample label mask and image intensity on a 2D cross-section grid perpendicular to arch tangent."""
         P, T, N, B = self._get_cross_section_frame(site_center_mm, is_mandible)
+        v_lo, v_hi = self._jaw_v_bounds_at_frame(
+            P, N, B, is_mandible=is_mandible, base_half_v_mm=half_v_mm, step_mm=step_mm
+        )
         n_u = int(round(2.0 * half_u_mm / step_mm)) + 1
-        n_v = int(round(2.0 * half_v_mm / step_mm)) + 1
+        n_v = int(round((v_hi - v_lo) / step_mm)) + 1
         u_coords = np.linspace(-half_u_mm, half_u_mm, n_u)
-        v_coords = np.linspace(-half_v_mm, half_v_mm, n_v)
+        v_coords = np.linspace(v_lo, v_hi, n_v)
 
         uu, vv = np.meshgrid(u_coords, v_coords)  # shape (n_v, n_u)
         world_grid = P[None, None, :] + uu[:, :, None] * N[None, None, :] + vv[:, :, None] * B[None, None, :]
@@ -1056,14 +1135,23 @@ class MeasurementEngine:
         peak_v = float(np.max(smooth_v[central])) if is_mandible else float(np.min(smooth_v[central]))
 
         # Check for same-jaw tooth voxels in the coronal socket band around the bone crest.
+        # Prefer tooth columns within +/-1.75 mm of `peak_v` so tilted roots deeper down do not
+        # drag u_t_min / u_t_max horizontally past the coronal crest rim.
         if is_mandible:
+            v_band_crest = (v_coords >= peak_v - 1.75) & (v_coords <= peak_v + 1.5)
             v_band = (v_coords >= peak_v - 4.5) & (v_coords <= peak_v + 1.5)
         else:
+            v_band_crest = (v_coords <= peak_v + 1.75) & (v_coords >= peak_v - 1.5)
             v_band = (v_coords <= peak_v + 4.5) & (v_coords >= peak_v - 1.5)
-        t_band = np.asarray(tooth_mask, dtype=bool) & np.outer(v_band, np.abs(u_coords) <= 7.0)
+        u_central_mask = np.abs(u_coords) <= 7.0
+        t_band = np.asarray(tooth_mask, dtype=bool) & np.outer(v_band, u_central_mask)
         if not t_band.any():
             return None
-        _tr, t_cols = np.where(t_band)
+        t_band_coronal = np.asarray(tooth_mask, dtype=bool) & np.outer(v_band_crest, u_central_mask)
+        # Prefer the coronal band near `peak_v` when tilted teeth span widely, but never clip a narrow
+        # canine/premolar socket below `u_t_vals` of the socket neck.
+        t_src = t_band_coronal if int(np.count_nonzero(t_band_coronal)) >= 6 else t_band
+        _tr, t_cols = np.where(t_src)
         u_t_vals = u_coords[t_cols]
         u_t_min = float(np.min(u_t_vals))
         u_t_max = float(np.max(u_t_vals))
@@ -1255,10 +1343,23 @@ class MeasurementEngine:
                         u_crest = float(surf_u[best_idx] + delta * du)
                         v_crest = float(y1 - 0.25 * (y0 - y2) * delta)
 
-        # Height axis = principal axis of the primary alveolar ridge (`ridge_mask`).
-        # Using full `ridge_mask` keeps socket ridges symmetric and avoids artificial corner skew
-        # from short depth crops; preferring the major eigenvector when elongated avoids 45 deg flips.
-        rows_p, cols_p = np.where(ridge_mask)
+        # Height axis = principal axis of the alveolar portion of `ridge_mask`.
+        # Restricting PCA to within 18 mm apical to `v_crest` keeps basal flaring / mental tubercle
+        # from swinging W0/H angle steeply between adjacent slices; falls back to full `ridge_mask`.
+        if is_mandible:
+            alv_band = (v_coords >= float(v_crest) - 18.0) & (v_coords <= float(v_crest) + 3.0)
+        else:
+            alv_band = (v_coords <= float(v_crest) + 18.0) & (v_coords >= float(v_crest) - 3.0)
+        pca_src = (
+            bone_mask & alv_band[:, None]
+            if (bone_mask is not None and int(np.count_nonzero(bone_mask & alv_band[:, None])) >= 14)
+            else (
+                ridge_mask & alv_band[:, None]
+                if int(np.count_nonzero(ridge_mask & alv_band[:, None])) >= 14
+                else ridge_mask
+            )
+        )
+        rows_p, cols_p = np.where(pca_src)
         ridge_angle_deg: Optional[float] = None
         d_apical = default_apical
         d_bl = default_bl
@@ -1287,7 +1388,7 @@ class MeasurementEngine:
                         if is_mandible
                         else math.atan2(float(axis[0]), float(axis[1]))
                     )
-                    clamped_deg = float(np.clip(raw_deg, -35.0, 35.0))
+                    clamped_deg = float(np.clip(raw_deg, -45.0, 45.0))
                     ridge_angle_deg = round(clamped_deg, 1)
                     rad = math.radians(clamped_deg)
                     d_apical = (
@@ -1302,6 +1403,58 @@ class MeasurementEngine:
     # ------------------------------------------------------------------
     # Anatomy-Aware Available Bone Height (Part 1.2 & Part 3.3)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _endosteal_cortex_inset_mm(
+        img_cs: Optional[np.ndarray],
+        ray_u: np.ndarray,
+        ray_v: np.ndarray,
+        s_vals: np.ndarray,
+        last_idx: int,
+        u_coords: np.ndarray,
+        v_coords: np.ndarray,
+        full_h: float,
+    ) -> float:
+        """Locate the internal endosteal border of the basal/maxillary cortex when HU contrast exists."""
+        if img_cs is None or img_cs.shape != (len(v_coords), len(u_coords)) or full_h < 6.0:
+            return JAW_END_CORTEX_INSET_MM
+        try:
+            u_min, u_max = float(u_coords[0]), float(u_coords[-1])
+            v_min, v_max = float(v_coords[0]), float(v_coords[-1])
+            s_sub = s_vals[: last_idx + 1]
+            if s_sub.size < 10:
+                return JAW_END_CORTEX_INSET_MM
+            cf = np.clip((ray_u[: last_idx + 1] - u_min) / max(1e-6, u_max - u_min) * (len(u_coords) - 1), 0.0, len(u_coords) - 1.0)
+            rf = np.clip((ray_v[: last_idx + 1] - v_min) / max(1e-6, v_max - v_min) * (len(v_coords) - 1), 0.0, len(v_coords) - 1.0)
+            from scipy import ndimage  # type: ignore
+
+            hu_prof = ndimage.map_coordinates(
+                np.asarray(img_cs, dtype=np.float32),
+                np.vstack([rf, cf]),
+                order=1,
+                mode="nearest",
+            )
+            rim_mask = (s_sub >= max(0.0, full_h - 4.0)) & (s_sub <= full_h)
+            marrow_mask = (s_sub >= 0.35 * full_h) & (s_sub <= max(0.45 * full_h, full_h - 4.0))
+            if not rim_mask.any() or not marrow_mask.any():
+                return JAW_END_CORTEX_INSET_MM
+            rim_peak = float(np.max(hu_prof[rim_mask]))
+            marrow_med = float(np.median(hu_prof[marrow_mask]))
+            # Only refine on scans with genuine hyperdense cortex vs trabecular interior (>= 180 HU contrast).
+            if rim_peak < 350.0 or (rim_peak - marrow_med) < 180.0:
+                return JAW_END_CORTEX_INSET_MM
+            thresh = marrow_med + 0.55 * (rim_peak - marrow_med)
+            rim_indices = np.flatnonzero(rim_mask)
+            # Walk inward (apical -> coronal) from peak rim to find the inner endosteal border.
+            peak_rel = int(np.argmax(hu_prof[rim_indices]))
+            peak_idx = int(rim_indices[peak_rel])
+            for k in range(peak_idx, max(-1, peak_idx - int(round(2.6 / max(0.1, float(s_sub[1] - s_sub[0]))))), -1):
+                if float(hu_prof[k]) <= thresh:
+                    inset = float(full_h) - float(s_sub[k])
+                    return float(np.clip(inset, JAW_END_CORTEX_INSET_MM, 2.4))
+        except Exception:
+            logger.debug("Endosteal cortical border refinement fell back to inset", exc_info=True)
+        return JAW_END_CORTEX_INSET_MM
+
     def _compute_bone_height_in_cs(
         self,
         u_coords: np.ndarray,
@@ -1318,6 +1471,7 @@ class MeasurementEngine:
         crest_uv: Optional[Tuple[float, float]],
         d_apical: Tuple[float, float],
         local_vital_mask_2d: Optional[np.ndarray] = None,
+        img_cs: Optional[np.ndarray] = None,
     ) -> Tuple[
         Optional[float], Optional[float], Optional[Tuple[float, float]], Optional[Tuple[float, float]], str
     ]:
@@ -1426,8 +1580,13 @@ class MeasurementEngine:
                         PROVENANCE_LABEL_DERIVED,
                     )
 
-        # Stop at the internal border of the basal cortex, never flush with the periosteal surface.
-        inset_h = max(0.0, float(full_h) - JAW_END_CORTEX_INSET_MM)
+        # Stop at the internal (endosteal) border of the basal/maxillary cortex, never flush with periosteum.
+        eff_inset = (
+            self._endosteal_cortex_inset_mm(img_cs, ray_u, ray_v, s_vals, last_idx, u_coords, v_coords, full_h)
+            if in_bone.any()
+            else JAW_END_CORTEX_INSET_MM
+        )
+        inset_h = max(0.0, float(full_h) - eff_inset)
         basal_uv = (u0 + inset_h * au, v0 + inset_h * av)
         return (
             round(inset_h, 2),
@@ -1671,76 +1830,6 @@ class MeasurementEngine:
                 return None
             return pt_l, pt_r
 
-        for depth in depths_mm:
-            fdepth = float(depth)
-            if fdepth == 0.0 and socket_rims is not None:
-                # Dentate socket with both lingual & buccal rims: measure each wall's outer edge
-                # 0.5 mm apical to its own crest rim and link outer-lingual to outer-buccal.
-                l_rim, r_rim = socket_rims
-                v_l_s = l_rim[1] - 0.5 if is_mandible else l_rim[1] + 0.5
-                v_r_s = r_rim[1] - 0.5 if is_mandible else r_rim[1] + 0.5
-                c_l = _measure_caliper(
-                    l_rim[0], v_l_s, 0.0, -1.0 if is_mandible else 1.0, 1.0, 0.0, allow_bridge=False
-                )
-                c_r = _measure_caliper(
-                    r_rim[0], v_r_s, 0.0, -1.0 if is_mandible else 1.0, 1.0, 0.0, allow_bridge=False
-                )
-                if c_l is not None and c_r is not None and c_r[1][0] > c_l[0][0]:
-                    pt_l, pt_r = c_l[0], c_r[1]
-                    if pt_l[0] > u_min + _CS_BORDER_TOL_MM and pt_r[0] < u_max - _CS_BORDER_TOL_MM:
-                        segments[fdepth] = (float(pt_l[0]), float(pt_r[0]))
-                        endpoints_uv[fdepth] = (pt_l, pt_r)
-                        continue
-
-            if fdepth == 0.0:
-                # W0 must span BOTH cortical walls. A single crestal height reports whichever
-                # plate the plane happens to catch, which on frontal teeth (thin buccal plate,
-                # rims at different heights) collapses W0 to one side of the tooth. Sample the
-                # crestal band and keep the WIDEST bridged span that still starts at the crest.
-                best: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None
-                best_w = 0.0
-                for eff_d in (0.5, 1.0, 1.5):
-                    cx = u0 + eff_d * au
-                    cy = v0 + eff_d * av
-                    if cy < v_min - 0.5 or cy > v_max + 0.5:
-                        continue
-                    cands: List[Optional[Tuple[Tuple[float, float], Tuple[float, float]]]] = [
-                        _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
-                    ]
-                    # On flat-topped tilted ridges a tilted d_bl clips into air above the crest;
-                    # compare against a horizontal crestal caliper at the same height.
-                    if abs(bv) > 0.05:
-                        cands.append(
-                            _measure_caliper(
-                                u0,
-                                cy,
-                                0.0,
-                                -1.0 if is_mandible else 1.0,
-                                1.0,
-                                0.0,
-                                allow_bridge=True,
-                            )
-                        )
-                    for cand in cands:
-                        if cand is None:
-                            continue
-                        w_c = math.hypot(cand[1][0] - cand[0][0], cand[1][1] - cand[0][1])
-                        if w_c > best_w:
-                            best, best_w = cand, w_c
-                if best is not None:
-                    segments[fdepth] = (float(best[0][0]), float(best[1][0]))
-                    endpoints_uv[fdepth] = best
-                continue
-
-            cx = u0 + fdepth * au
-            cy = v0 + fdepth * av
-            if cy < v_min - 0.5 or cy > v_max + 0.5:
-                continue
-            res = _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
-            if res is not None:
-                segments[fdepth] = (float(res[0][0]), float(res[1][0]))
-                endpoints_uv[fdepth] = res
-
         def _span_bone_runs(seg: Tuple[Tuple[float, float], Tuple[float, float]]) -> int:
             """Count separate cortical runs crossed by a caliper span (1 == a single plate)."""
             (x0, y0), (x1, y1) = seg
@@ -1755,6 +1844,112 @@ class MeasurementEngine:
                 return 0
             edges = np.diff(np.concatenate(([0], flags, [0])))
             return int(np.count_nonzero(edges == 1))
+
+        solid_tapered_crest = False
+        for depth in depths_mm:
+            fdepth = float(depth)
+            if fdepth == 0.0 and socket_rims is not None:
+                # Dentate socket with both lingual & buccal rims: measure each wall's outer edge
+                # 0.5 mm apical to its own crest rim and link outer-lingual to outer-buccal.
+                l_rim, r_rim = socket_rims
+                v_l_s = l_rim[1] - 0.5 if is_mandible else l_rim[1] + 0.5
+                v_r_s = r_rim[1] - 0.5 if is_mandible else r_rim[1] + 0.5
+                c_l = _measure_caliper(
+                    l_rim[0], v_l_s, 0.0, -1.0 if is_mandible else 1.0, 1.0, 0.0, allow_bridge=False
+                )
+                c_r = _measure_caliper(
+                    r_rim[0], v_r_s, 0.0, -1.0 if is_mandible else 1.0, 1.0, 0.0, allow_bridge=False
+                )
+                pt_l = c_l[0] if c_l is not None else l_rim
+                pt_r = c_r[1] if c_r is not None else r_rim
+                if (
+                    (c_l is not None or c_r is not None)
+                    and pt_r[0] > pt_l[0]
+                    and pt_l[0] <= l_rim[0] + 0.75
+                    and pt_r[0] >= r_rim[0] - 0.75
+                ):
+                    if pt_l[0] > u_min + _CS_BORDER_TOL_MM and pt_r[0] < u_max - _CS_BORDER_TOL_MM:
+                        segments[fdepth] = (float(pt_l[0]), float(pt_r[0]))
+                        endpoints_uv[fdepth] = (pt_l, pt_r)
+                        continue
+
+            if fdepth == 0.0:
+                # Sample right on the crest first (`eff_d = 0.25 mm`) so W0 + H T-junction stays
+                # anchored at the anatomical crest, falling back to deeper steps only when broken/single.
+                # If a solid tapered ridge peak is 2.0-3.0 mm wide near eff_d <= 0.5 mm and widens into
+                # a >= 4.0 mm single contiguous ridge 3.0 mm apically, keep W0 at eff_d = 0.5 mm so
+                # sloped ridges do not lose crestal bone height under strict T-junction anchoring.
+                deeper_solid_w = 0.0
+                if tooth_f32 is None:
+                    d3_cand = _measure_caliper(
+                        u0 + 3.0 * au, v0 + 3.0 * av, au, av, bu, bv, allow_bridge=False
+                    )
+                    if d3_cand is not None and _span_bone_runs(d3_cand) == 1:
+                        deeper_solid_w = math.hypot(d3_cand[1][0] - d3_cand[0][0], d3_cand[1][1] - d3_cand[0][1])
+
+                best: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None
+                best_w = 0.0
+                for eff_d in (0.25, 0.5, 1.0, 1.5):
+                    cx = u0 + eff_d * au
+                    cy = v0 + eff_d * av
+                    if cy < v_min - 0.5 or cy > v_max + 0.5:
+                        continue
+                    c_primary = _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
+                    lvl_best: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = c_primary
+                    lvl_w = (
+                        math.hypot(c_primary[1][0] - c_primary[0][0], c_primary[1][1] - c_primary[0][1])
+                        if c_primary is not None
+                        else 0.0
+                    )
+                    # Try horizontal crestal caliper when tilted d_bl is missing/<3 mm, OR on
+                    # dentate sockets where d_bl clipped one socket wall (< 4.5 mm) while horizontal
+                    # bridges cleanly across both socket walls (+1.5 mm wider).
+                    if abs(bv) > 0.05 and (
+                        lvl_best is None
+                        or lvl_w < 3.0
+                        or (tooth_f32 is not None and lvl_w < 4.5)
+                    ):
+                        c_horiz = _measure_caliper(
+                            u0,
+                            cy,
+                            0.0,
+                            -1.0 if is_mandible else 1.0,
+                            1.0,
+                            0.0,
+                            allow_bridge=True,
+                        )
+                        if c_horiz is not None:
+                            w_h = math.hypot(c_horiz[1][0] - c_horiz[0][0], c_horiz[1][1] - c_horiz[0][1])
+                            if w_h > lvl_w and (lvl_w < 3.0 or w_h >= lvl_w + 1.5):
+                                lvl_best, lvl_w = c_horiz, w_h
+                    if lvl_best is not None and lvl_w > best_w:
+                        best, best_w = lvl_best, lvl_w
+                    if lvl_best is not None and lvl_w >= 4.6:
+                        best, best_w = lvl_best, lvl_w
+                        break
+                    if (
+                        eff_d >= 0.5
+                        and lvl_best is not None
+                        and 2.0 <= lvl_w < 3.0
+                        and deeper_solid_w >= 4.0
+                        and _span_bone_runs(lvl_best) == 1
+                    ):
+                        best, best_w = lvl_best, lvl_w
+                        solid_tapered_crest = True
+                        break
+                if best is not None:
+                    segments[fdepth] = (float(best[0][0]), float(best[1][0]))
+                    endpoints_uv[fdepth] = best
+                continue
+
+            cx = u0 + fdepth * au
+            cy = v0 + fdepth * av
+            if cy < v_min - 0.5 or cy > v_max + 0.5:
+                continue
+            res = _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
+            if res is not None:
+                segments[fdepth] = (float(res[0][0]), float(res[1][0]))
+                endpoints_uv[fdepth] = res
 
         def _wall_crest_at(col_u: float) -> Optional[float]:
             """Coronal-most bone v within the crestal band of a column (that wall's own rim)."""
@@ -1806,9 +2001,10 @@ class MeasurementEngine:
                     break
 
         # BL-12: after all rescue attempts, if W0 still cuts only a single cortical plate
-        # (< 3.0 mm and <= 1 cortical run), withhold W0 rather than reporting a 1-3 mm plate.
+        # (< 3.0 mm and <= 1 cortical run, without a wider >= 4.0 mm solid ridge body beneath),
+        # withhold W0 rather than reporting a 1-3 mm plate.
         w0 = endpoints_uv.get(0.0)
-        if w0 is not None:
+        if w0 is not None and not solid_tapered_crest:
             w0_len = math.hypot(w0[1][0] - w0[0][0], w0[1][1] - w0[0][1])
             if w0_len < 3.0 and _span_bone_runs(w0) <= 1:
                 endpoints_uv.pop(0.0, None)
@@ -1995,15 +2191,9 @@ class MeasurementEngine:
                 w0_l, w0_r = segs_uv[0.0]
                 w0_mid_u = 0.5 * (float(w0_l[0]) + float(w0_r[0]))
                 w0_mid_v = 0.5 * (float(w0_l[1]) + float(w0_r[1]))
-                # Back-project along -d_apical from w0_mid to crest_v so the H ray literally crosses
-                # W0 at its exact midpoint even on steeply tilted ridges.
-                au, av = float(d_apical[0]), float(d_apical[1])
-                if abs(av) > 1e-4:
-                    dt = (w0_mid_v - float(crest_uv[1])) / av
-                    dt = max(0.0, min(2.5, dt))
-                    crest_uv = (w0_mid_u - dt * au, w0_mid_v - dt * av)
-                else:
-                    crest_uv = (w0_mid_u, float(crest_uv[1]))
+                # Enforce strict T-junction: H starts directly at W0 midpoint and proceeds strictly
+                # apically along d_apical with zero coronal overhang past W0 (T shape, never '+').
+                crest_uv = (w0_mid_u, w0_mid_v)
                 cs.crest_uv = crest_uv
                 cs.crest_v = crest_uv[1]
                 cs.height_u = crest_uv[0]
@@ -2028,7 +2218,7 @@ class MeasurementEngine:
         else:
             cs.sinus_floor_uv = vital_contour_uv
 
-        # 6. Available bone height (W0 midline -> ipsilateral vital boundary or basal cortex; NEVER root apex!)
+        # 6. Available bone height (W0 midline -> ipsilateral vital boundary or endosteal basal cortex; NEVER root apex!)
         bone_height_mm, vital_dist_mm, basal_uv, vital_boundary_uv, height_prov = (
             self._compute_bone_height_in_cs(
                 u_coords,
@@ -2044,6 +2234,7 @@ class MeasurementEngine:
                 crest_uv=crest_uv,
                 d_apical=d_apical,
                 local_vital_mask_2d=local_vital_2d,
+                img_cs=img_cs,
             )
         )
         cs.vital_boundary_uv = vital_boundary_uv
@@ -2239,14 +2430,31 @@ class MeasurementEngine:
         )
 
     def _resample_frame_data(
-        self, frame: Any, *, half_u_mm: float = 15.0, half_v_mm: float = 25.0, step_mm: float = 0.25
+        self,
+        frame: Any,
+        *,
+        half_u_mm: float = 15.0,
+        half_v_mm: float = 25.0,
+        step_mm: float = 0.25,
+        is_mandible: Optional[bool] = None,
     ) -> CrossSectionData:
         """Resample label mask and image once on a cross-section at an explicit arch frame."""
         P, T, N, B = frame
+        if is_mandible is not None:
+            v_lo, v_hi = self._jaw_v_bounds_at_frame(
+                np.asarray(P, dtype=np.float64),
+                np.asarray(N, dtype=np.float64),
+                np.asarray(B, dtype=np.float64),
+                is_mandible=bool(is_mandible),
+                base_half_v_mm=half_v_mm,
+                step_mm=step_mm,
+            )
+        else:
+            v_lo, v_hi = -float(half_v_mm), float(half_v_mm)
         n_u = int(round(2.0 * half_u_mm / step_mm)) + 1
-        n_v = int(round(2.0 * half_v_mm / step_mm)) + 1
+        n_v = int(round((v_hi - v_lo) / step_mm)) + 1
         u_coords = np.linspace(-half_u_mm, half_u_mm, n_u)
-        v_coords = np.linspace(-half_v_mm, half_v_mm, n_v)
+        v_coords = np.linspace(v_lo, v_hi, n_v)
         uu, vv = np.meshgrid(u_coords, v_coords)
         world_grid = (
             np.asarray(P)[None, None, :]
@@ -2291,8 +2499,11 @@ class MeasurementEngine:
             self.last_withheld_reason = WITHHELD_NO_ARCH
             return None, None
         frame = arch.get_frame_at_mm(float(arc_mm))
-        cs = self._resample_frame_data((frame.point, frame.tangent, frame.normal, frame.binormal))
         is_mandible = jaw_key == "lower"
+        cs = self._resample_frame_data(
+            (frame.point, frame.tangent, frame.normal, frame.binormal),
+            is_mandible=is_mandible,
+        )
         cs.is_mandible = is_mandible
 
         fdi = norm_hint or ""
@@ -2335,35 +2546,228 @@ class MeasurementEngine:
         return meas, cs
 
     # ------------------------------------------------------------------
-    # Entry (crest) continuity across a slice series
+    # Entry (crest) & W0 angle continuity across a slice series
     # ------------------------------------------------------------------
+    @staticmethod
+    def _jaw_slices_similar(cs_a: CrossSectionData, cs_b: CrossSectionData) -> bool:
+        """True when two adjacent cross-sections depict similar jawbone morphology."""
+        w_eps_a = getattr(cs_a, "width_endpoints_uv", None) or {}
+        w_eps_b = getattr(cs_b, "width_endpoints_uv", None) or {}
+        if 0.0 not in w_eps_a or 0.0 not in w_eps_b:
+            return False
+        mask_a = getattr(cs_a, "mask_cs", None)
+        mask_b = getattr(cs_b, "mask_cs", None)
+        is_mand_a = bool(getattr(cs_a, "is_mandible", True))
+        is_mand_b = bool(getattr(cs_b, "is_mandible", True))
+        if is_mand_a != is_mand_b:
+            return False
+        if (
+            mask_a is not None
+            and mask_b is not None
+            and getattr(mask_a, "shape", None) == getattr(mask_b, "shape", None)
+            and bool(np.any(mask_a))
+            and bool(np.any(mask_b))
+        ):
+            use_5 = infer_mask_is_5class(mask_a)
+            jaw_id = get_jaw_label_id(is_mand_a, is_5class=use_5)
+            ja = mask_a == jaw_id
+            jb = mask_b == jaw_id
+            u_cnt = int(np.count_nonzero(ja | jb))
+            if u_cnt > 0:
+                iou = float(np.count_nonzero(ja & jb)) / float(u_cnt)
+                return iou >= 0.58
+        # Shape-invariant geometry check (covers jaw-aware dynamic v_bounds differing by a few rows)
+        a0, a1 = w_eps_a[0.0]
+        b0, b1 = w_eps_b[0.0]
+        wa = math.hypot(a1[0] - a0[0], a1[1] - a0[1])
+        wb = math.hypot(b1[0] - b0[0], b1[1] - b0[1])
+        mid_va = 0.5 * (float(a0[1]) + float(a1[1]))
+        mid_vb = 0.5 * (float(b0[1]) + float(b1[1]))
+        h_a = getattr(cs_a, "measurements", {}).get("available_bone_height")
+        h_b = getattr(cs_b, "measurements", {}).get("available_bone_height")
+        if h_a is not None and h_b is not None and h_a.value_mm is not None and h_b.value_mm is not None:
+            if abs(float(h_a.value_mm) - float(h_b.value_mm)) > 2.5:
+                return False
+        return abs(wa - wb) <= 3.0 and abs(mid_va - mid_vb) <= 3.0
+
+    def _smooth_adjacent_w0_angles(
+        self,
+        series: List[Tuple[Optional[ImplantSiteMeasurement], CrossSectionData]],
+        *,
+        max_angle_jump_deg: float = 8.0,
+    ) -> None:
+        """Suppress jagged slice-to-slice W0 angle swings across similar adjacent jaw cross-sections."""
+        if len(series) < 2:
+            return
+        angles: Dict[int, float] = {}
+        for idx, (_m, cs) in enumerate(series):
+            w_eps = getattr(cs, "width_endpoints_uv", None) or {}
+            if 0.0 not in w_eps:
+                continue
+            p0, p1 = w_eps[0.0]
+            dx = float(p1[0]) - float(p0[0])
+            dy = float(p1[1]) - float(p0[1])
+            if dx < 0.0:
+                dx, dy = -dx, -dy
+            if math.hypot(dx, dy) >= 1.5:
+                angles[idx] = float(np.clip(math.degrees(math.atan2(dy, dx)), -45.0, 45.0))
+        if len(angles) < 2:
+            return
+
+        smoothed = dict(angles)
+        # Step 1: Smooth isolated 3-slice angle spikes when both neighbors agree cleanly.
+        for idx in sorted(angles.keys()):
+            if (idx - 1) in angles and (idx + 1) in angles:
+                cs_prev, cs_cur, cs_next = series[idx - 1][1], series[idx][1], series[idx + 1][1]
+                if self._jaw_slices_similar(cs_prev, cs_cur) and self._jaw_slices_similar(cs_cur, cs_next):
+                    smoothed[idx] = 0.25 * angles[idx - 1] + 0.50 * angles[idx] + 0.25 * angles[idx + 1]
+
+        # Step 2: Enforce adjacent pairwise delta <= max_angle_jump_deg across similar consecutive slices
+        # using bidirectional relaxation so neither direction retains a step cliff.
+        max_step = max(1.0, float(max_angle_jump_deg))
+        keys_asc = sorted(smoothed.keys())
+        for _pass in range(2):
+            for idx in keys_asc[1:]:
+                if (idx - 1) in smoothed and self._jaw_slices_similar(series[idx - 1][1], series[idx][1]):
+                    diff = smoothed[idx] - smoothed[idx - 1]
+                    if abs(diff) > max_step:
+                        smoothed[idx] = smoothed[idx - 1] + math.copysign(max_step, diff)
+            for idx in reversed(keys_asc[:-1]):
+                if (idx + 1) in smoothed and self._jaw_slices_similar(series[idx][1], series[idx + 1][1]):
+                    diff = smoothed[idx] - smoothed[idx + 1]
+                    if abs(diff) > max_step:
+                        smoothed[idx] = smoothed[idx + 1] + math.copysign(max_step, diff)
+
+        for idx, new_deg in smoothed.items():
+            old_deg = angles.get(idx)
+            if old_deg is None or abs(new_deg - old_deg) < 0.75:
+                continue
+            meas, cs = series[idx]
+            w_eps = getattr(cs, "width_endpoints_uv", None) or {}
+            if 0.0 not in w_eps or cs.frame is None:
+                continue
+            p0, p1 = w_eps[0.0]
+            mid_u = 0.5 * (float(p0[0]) + float(p1[0]))
+            mid_v = 0.5 * (float(p0[1]) + float(p1[1]))
+            half_w = 0.5 * math.hypot(float(p1[0]) - float(p0[0]), float(p1[1]) - float(p0[1]))
+            rad = math.radians(new_deg)
+            c_bu, c_bv = math.cos(rad), math.sin(rad)
+            is_mand = bool(getattr(cs, "is_mandible", True))
+
+            new_p0: Optional[Tuple[float, float]] = None
+            new_p1: Optional[Tuple[float, float]] = None
+            # Re-trace cortical bone boundaries along smoothed W0 direction when mask_cs exists.
+            mask_cs = getattr(cs, "mask_cs", None)
+            u_coords = getattr(cs, "u_coords", None)
+            v_coords = getattr(cs, "v_coords", None)
+            if mask_cs is not None and u_coords is not None and v_coords is not None and np.any(mask_cs):
+                use_5 = self.is_dental_segmentator_5class or infer_mask_is_5class(mask_cs)
+                jaw_id = get_jaw_label_id(is_mand, is_5class=use_5)
+                jaw_mask = mask_cs == jaw_id
+                if jaw_mask.any():
+                    du = abs(float(u_coords[1] - u_coords[0])) if len(u_coords) > 1 else 0.25
+                    dv = abs(float(v_coords[1] - v_coords[0])) if len(v_coords) > 1 else 0.25
+                    step = min(du, dv, 0.25)
+                    max_half = 0.5 * float(u_coords[-1] - u_coords[0])
+                    s_grid = np.arange(-max_half, max_half + step, step, dtype=np.float64)
+                    t_id = None
+                    if meas is not None and getattr(meas, "tooth_fdi", None):
+                        t_lbl = get_tooth_label(str(meas.tooth_fdi))
+                        if t_lbl is not None:
+                            t_id = int(t_lbl.id)
+                    same_t = _same_jaw_tooth_mask(mask_cs, is_mand, use_5, tooth_id=t_id)
+                    raw_env = _ridge_envelope_mask(mask_cs, u_coords, v_coords, jaw_id, t_id, is_mand, tooth_mask=same_t)
+                    b_comp = jaw_mask & _extract_primary_ridge_component(raw_env, u_coords, v_coords)
+                    if b_comp.any():
+                        prof = self._sample_band_profile(
+                            b_comp.astype(np.float32), u_coords, v_coords, mid_u, mid_v, s_grid, 0.0, -1.0 if is_mand else 1.0, c_bu, c_bv, step
+                        )
+                        t_prof = (
+                            self._sample_band_profile(
+                                same_t.astype(np.float32), u_coords, v_coords, mid_u, mid_v, s_grid, 0.0, -1.0 if is_mand else 1.0, c_bu, c_bv, step
+                            )
+                            if same_t.any()
+                            else None
+                        )
+                        span = self._select_ridge_run_indices(prof, t_prof, s_grid, step)
+                        if span is not None:
+                            s_l, s_r = self._refine_run_endpoints(prof, s_grid, span[0], span[1], step)
+                            cand_l = (mid_u + s_l * c_bu, mid_v + s_l * c_bv)
+                            cand_r = (mid_u + s_r * c_bu, mid_v + s_r * c_bv)
+                            if (
+                                math.hypot(cand_r[0] - cand_l[0], cand_r[1] - cand_l[1]) >= 3.0
+                                and cand_l[0] > float(u_coords[0]) + _CS_BORDER_TOL_MM
+                                and cand_r[0] < float(u_coords[-1]) - _CS_BORDER_TOL_MM
+                            ):
+                                new_p0, new_p1 = cand_l, cand_r
+            if new_p0 is None or new_p1 is None:
+                new_p0 = (mid_u - half_w * c_bu, mid_v - half_w * c_bv)
+                new_p1 = (mid_u + half_w * c_bu, mid_v + half_w * c_bv)
+
+            cs.width_endpoints_uv[0.0] = (new_p0, new_p1)
+            if getattr(cs, "width_segments", None) is not None:
+                cs.width_segments[0.0] = (float(new_p0[0]), float(new_p1[0]))
+            P, _T, N, B = cs.frame
+            w_sw = _uv_to_world(P, N, B, new_p0[0], new_p0[1])
+            w_ew = _uv_to_world(P, N, B, new_p1[0], new_p1[1])
+            w_val = round(float(np.linalg.norm(np.asarray(w_ew) - np.asarray(w_sw))), 2)
+            records = getattr(cs, "measurements", None) or {}
+            w0_rec = records.get("width_0")
+            if w0_rec is not None:
+                w0_rec.start_uv_mm = new_p0
+                w0_rec.end_uv_mm = new_p1
+                w0_rec.start_world_mm = w_sw
+                w0_rec.end_world_mm = w_ew
+                w0_rec.value_mm = w_val
+            if meas is not None:
+                meas.crest_width_mm = w_val
+                if getattr(meas, "bone_width_at_depths_mm", None) is not None:
+                    meas.bone_width_at_depths_mm[0.0] = w_val
+            cs.ridge_axis_angle_deg = round(new_deg if is_mand else -new_deg, 1)
+
+            # Maintain strict T-junction: re-anchor H start onto smoothed W0 midpoint.
+            w_mid = (0.5 * (new_p0[0] + new_p1[0]), 0.5 * (new_p0[1] + new_p1[1]))
+            h_rec = records.get("available_bone_height")
+            if h_rec is not None and h_rec.is_available and h_rec.end_world_mm is not None:
+                cs.crest_uv = w_mid
+                cs.crest_v = w_mid[1]
+                cs.height_u = w_mid[0]
+                h_start_w = _uv_to_world(P, N, B, w_mid[0], w_mid[1])
+                h_rec.start_uv_mm = w_mid
+                h_rec.start_world_mm = h_start_w
+                h_val = round(float(np.linalg.norm(np.asarray(h_rec.end_world_mm) - np.asarray(h_start_w))), 2)
+                h_rec.value_mm = h_val
+                if meas is not None:
+                    meas.bone_height_mm = h_val
+
     def stabilize_entry_points(
         self,
         items: Sequence[Tuple[Optional[ImplantSiteMeasurement], Optional[CrossSectionData]]],
         *,
         max_jump_mm: float = MAX_ENTRY_JUMP_MM,
+        max_angle_jump_deg: float = 8.0,
     ) -> None:
-        """Interpolate entry (crest) points that jump between adjacent slices.
+        """Interpolate entry (crest) points and smooth W0 angles across similar adjacent slices.
 
         Each slice is resampled independently, so one noisy cut can move the osteotomy entry
-        (and therefore the height caliper) several millimetres sideways. Crests that differ
-        from both neighbours by more than ``max_jump_mm`` are replaced by the midpoint of
-        those neighbours, and the available-bone-height record is recomputed from the moved
-        crest so the drawn line still equals the printed value.
+        or tilt W0 between adjacent cuts of the same jaw segment. Crests that differ from
+        both neighbours by more than ``max_jump_mm`` are replaced by neighbour midpoints, and
+        concordant adjacent W0 angles are clamped to ``<= max_angle_jump_deg`` while keeping a
+        strict T-junction between H and W0.
         """
         series = [
             (meas, cs) for meas, cs in items if cs is not None and getattr(cs, "crest_uv", None) is not None
         ]
-        if len(series) < 3 or float(max_jump_mm) <= 0.0:
-            return
-        crests = [np.asarray(cs.crest_uv, dtype=np.float64) for _meas, cs in series]
-        adjusted = [crest.copy() for crest in crests]
-        for index in range(1, len(crests) - 1):
-            neighbour_mid = 0.5 * (crests[index - 1] + crests[index + 1])
-            if float(np.linalg.norm(crests[index] - neighbour_mid)) > float(max_jump_mm):
-                adjusted[index] = neighbour_mid
-        for (meas, cs), new_crest in zip(series, adjusted):
-            self._move_crest(cs, meas, new_crest, is_5class=self.is_dental_segmentator_5class)
+        if len(series) >= 3 and float(max_jump_mm) > 0.0:
+            crests = [np.asarray(cs.crest_uv, dtype=np.float64) for _meas, cs in series]
+            adjusted = [crest.copy() for crest in crests]
+            for index in range(1, len(crests) - 1):
+                neighbour_mid = 0.5 * (crests[index - 1] + crests[index + 1])
+                if float(np.linalg.norm(crests[index] - neighbour_mid)) > float(max_jump_mm):
+                    adjusted[index] = neighbour_mid
+            for (meas, cs), new_crest in zip(series, adjusted):
+                self._move_crest(cs, meas, new_crest, is_5class=self.is_dental_segmentator_5class)
+        self._smooth_adjacent_w0_angles(series, max_angle_jump_deg=max_angle_jump_deg)
 
     @staticmethod
     def _move_crest(

@@ -460,3 +460,45 @@ def verify_orientation(
     if not report.notes:
         report.notes.append("Orientation is consistent with RAS.")
     return report
+
+
+def landmark_guided_aso_frame(
+    mask_zyx: np.ndarray,
+    affine: np.ndarray,
+    *,
+    is_5class: bool = False,
+) -> Optional[Tuple[np.ndarray, np.ndarray, float]]:
+    """Compute rigid `(occlusal_normal_ras, center_ras, tilt_deg)` from jawbone/tooth landmarks (ASO)."""
+    matrix = np.asarray(affine, dtype=np.float64)
+    if np.asarray(mask_zyx).ndim != 3 or matrix.shape != (4, 4):
+        return None
+    from .labels import get_jaw_label_id
+    from .volume_loader import CBCTVolume
+
+    # Wrap mask as zero-copy volume without needing image intensities
+    vol = CBCTVolume(
+        image=np.zeros_like(mask_zyx, dtype=np.float32),
+        spacing=(
+            float(np.linalg.norm(matrix[:3, 2])),
+            float(np.linalg.norm(matrix[:3, 1])),
+            float(np.linalg.norm(matrix[:3, 0])),
+        ),
+        origin=tuple(float(v) for v in matrix[:3, 3]),
+        direction=np.eye(3, dtype=np.float64),
+        affine=matrix,
+    )
+    from ..adt.ali import identify_ali_landmarks
+    from ..adt.aso import compute_aso_standardized_orientation
+
+    jaw_pts_exist = np.any(np.isin(mask_zyx, [get_jaw_label_id(True, is_5class=is_5class), get_jaw_label_id(False, is_5class=is_5class)]))
+    if not jaw_pts_exist and not np.any(mask_zyx > 0):
+        return None
+    lms = identify_ali_landmarks(vol, mask=mask_zyx, is_5class=is_5class, include_per_tooth_landmarks=False)
+    if len(lms) < 3:
+        return None
+    aso = compute_aso_standardized_orientation(vol, mask=mask_zyx, is_5class=is_5class, landmarks=lms)
+    z_vec = np.asarray(aso.occlusal_normal_ras, dtype=np.float64)
+    center = np.asarray(aso.reference_center_ras, dtype=np.float64)
+    tilt = float(np.degrees(np.arccos(np.clip(abs(float(z_vec[2])), 0.0, 1.0))))
+    return z_vec, center, round(tilt, 2)
+

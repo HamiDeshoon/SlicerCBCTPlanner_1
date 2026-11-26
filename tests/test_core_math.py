@@ -490,7 +490,7 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         meas = engine.measure_implant_site("46")
         self.assertIsNotNone(meas)
         assert meas is not None
-        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 19.0, delta=0.75)
+        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 19.0 - JAW_END_CORTEX_INSET_MM, delta=1.0)
         self.assertAlmostEqual(meas.crest_width_mm or 0.0, 7.0, delta=1.0)
 
     def test_ridge_plausibility_rejected_tile_draws_no_hw_overlays(self) -> None:

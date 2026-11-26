@@ -21,6 +21,7 @@ from .AutomatedDentalToolsEngine import (
     ALILandmarkResult,
     ASOOrientationResult,
     AutomatedDentalToolsEngine,
+    DOCShapeAXIResult as DOCShapeAXIResult,
     ImpactedToothCLICResult,
     VFACEAsymmetryResult,
 )
@@ -43,6 +44,14 @@ from .CheckpointInference import (
 from .CrossSectionNavigator import (
     CursorSettings,
     CrossSectionNavigator,
+)
+from .EndodonticEngine import (
+    AccessCavityPlan,
+    CanalBifurcation,
+    EndoToothAnalysis,
+    EndoToothROI,
+    EndodonticEngine,
+    RootCanalBranch,
 )
 from .ImplantPlanner import (
     ImplantLibraryEntry,
@@ -131,6 +140,12 @@ __all__ = [
     "CheckpointSpec",
     "CrossSectionNavigator",
     "CursorSettings",
+    "AccessCavityPlan",
+    "CanalBifurcation",
+    "EndoToothAnalysis",
+    "EndoToothROI",
+    "EndodonticEngine",
+    "RootCanalBranch",
     "DEFAULT_METAL_THRESHOLD_HU",
     "DEFAULT_RISEMAR_WEIGHTS_PATH",
     "validate_risemar_weights_path",
