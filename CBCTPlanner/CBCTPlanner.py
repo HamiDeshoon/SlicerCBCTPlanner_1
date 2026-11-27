@@ -6892,20 +6892,27 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             )
             return 0
         updated = 0
-        for index in range(segmentation.GetNumberOfSegments()):
-            segment_id = segmentation.GetNthSegmentID(index)
-            if preloaded_arrays is not None:
-                seg_arr = preloaded_arrays.get(segment_id)
-            else:
-                seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(
-                    segmentationNode, segment_id, sourceVolumeNode
+        modify_token = (
+            segmentationNode.StartModify() if hasattr(segmentationNode, "StartModify") else None
+        )
+        try:
+            for index in range(segmentation.GetNumberOfSegments()):
+                segment_id = segmentation.GetNthSegmentID(index)
+                if preloaded_arrays is not None:
+                    seg_arr = preloaded_arrays.get(segment_id)
+                else:
+                    seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(
+                        segmentationNode, segment_id, sourceVolumeNode
+                    )
+                if seg_arr is None:
+                    continue
+                slicer.util.updateSegmentBinaryLabelmapFromArray(
+                    func(np.asarray(seg_arr)), segmentationNode, segment_id, targetVolumeNode
                 )
-            if seg_arr is None:
-                continue
-            slicer.util.updateSegmentBinaryLabelmapFromArray(
-                func(np.asarray(seg_arr)), segmentationNode, segment_id, targetVolumeNode
-            )
-            updated += 1
+                updated += 1
+        finally:
+            if modify_token is not None and hasattr(segmentationNode, "EndModify"):
+                segmentationNode.EndModify(modify_token)
         return updated
 
     def standardize_orientation(
@@ -6929,8 +6936,10 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         from CBCTPlannerLib.core.orientation import (
             OrientationReport,
             _obliquity_deg,
+            apply_ops,
             axcodes_from_affine,
             canonicalize_to_ras,
+            flip_array_only,
             inverted_axes_from_report,
             resample_mask_to_grid,
             resample_to_ras,
@@ -6972,22 +6981,71 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             result = resample_to_ras(arr, affine)
             resampled = True
 
-        # In-place rewriting changes the volume geometry. Snapshot every segment in
-        # the *source* geometry first, otherwise Slicer would read the old labelmap
-        # through the new reference volume and the permutation/resampling would be
-        # applied twice or sample the wrong voxels.
-        preloaded_arrays: Optional[dict[str, np.ndarray]] = None
-        if mode == "in_place" and segmentationNode is not None:
-            preloaded_arrays = {}
+        # Snapshot and transform every segment in RAM BEFORE rewriting geometry so both
+        # RAS canonicalization and any anatomical flip write each segment at most ONCE.
+        transformed_arrays: Optional[dict[str, np.ndarray]] = None
+        if segmentationNode is not None:
+            transformed_arrays = {}
             segmentation = segmentationNode.GetSegmentation()
             if segmentation is not None and hasattr(slicer.util, "arrayFromSegmentBinaryLabelmap"):
+                target_shape = result.image_zyx.shape
                 for index in range(segmentation.GetNumberOfSegments()):
                     segment_id = segmentation.GetNthSegmentID(index)
                     seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(
                         segmentationNode, segment_id, volumeNode
                     )
-                    if seg_arr is not None:
-                        preloaded_arrays[segment_id] = np.asarray(seg_arr).copy()
+                    if seg_arr is None:
+                        continue
+                    src = np.asarray(seg_arr)
+                    transformed_arrays[segment_id] = (
+                        resample_mask_to_grid(src, affine, result.affine, target_shape)
+                        if resampled
+                        else apply_ops(src, result.ops)
+                    )
+
+        report = OrientationReport(
+            notes=[
+                f"{'Resampled' if resampled else 'Canonicalized'} "
+                f"{axcodes_from_affine(affine)} -> {axcodes_from_affine(result.affine)} "
+                f"({len(transformed_arrays or {})} segment(s) re-encoded)."
+            ]
+        )
+
+        # Verify orientation and compose any inverted-axis flips in RAM BEFORE touching MRML nodes.
+        mask: Optional[np.ndarray] = None
+        is_5class = False
+        bad_axes: Tuple[str, ...] = ()
+        if segmentationNode is not None:
+            if transformed_arrays:
+                self._preloaded_mask_cache = (segmentationNode, transformed_arrays, result.image_zyx.shape)
+            try:
+                mask, is_5class = self._extract_combined_label_mask(volumeNode, segmentationNode)
+            finally:
+                self._preloaded_mask_cache = None
+            if mask is not None:
+                report = verify_orientation(mask, result.affine, is_5class=is_5class)
+                bad_axes = inverted_axes_from_report(report)
+                if auto_fix_anatomy and bad_axes:
+                    result.image_zyx = flip_array_only(result.image_zyx, result.affine, bad_axes)
+                    if transformed_arrays:
+                        for seg_id, seg_a in list(transformed_arrays.items()):
+                            transformed_arrays[seg_id] = flip_array_only(seg_a, result.affine, bad_axes)
+                    mask_fixed = flip_array_only(mask, result.affine, bad_axes)
+                    report = verify_orientation(mask_fixed, result.affine, is_5class=is_5class)
+                    report.notes.insert(
+                        0,
+                        f"Auto-corrected inverted anatomy along {', '.join(bad_axes)} (visible in Axial/Sagittal/Coronal).",
+                    )
+                report.notes.insert(
+                    0,
+                    f"{'Resampled' if resampled else 'Canonicalized'} "
+                    f"{axcodes_from_affine(affine)} -> "
+                    f"{axcodes_from_affine(result.affine)} ({len(transformed_arrays or {})} segment(s) re-encoded).",
+                )
+            else:
+                report.notes.append("No label mask available; orientation could not be verified.")
+        else:
+            report.notes.append("No segmentation supplied; orientation could not be verified.")
 
         target_volume = volumeNode
         if mode == "clone":
@@ -7003,64 +7061,38 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
             return None, OrientationReport(notes=[f"Unknown mode {mode!r}; use 'clone' or 'in_place'."])
 
         if hasattr(target_volume, "SetAttribute"):
-            target_volume.SetAttribute("CBCTPlanner.Orientation", "RAS")
+            target_volume.SetAttribute(
+                "CBCTPlanner.Orientation",
+                f"RAS_fixed_{'_'.join(bad_axes)}" if (auto_fix_anatomy and bad_axes) else "RAS",
+            )
 
         updated_segments = 0
         if segmentationNode is not None:
-            from CBCTPlannerLib.core.orientation import apply_ops
-
-            if resampled:
-                target_shape = result.image_zyx.shape
-                segment_func = lambda seg_arr: resample_mask_to_grid(  # noqa: E731
-                    seg_arr, affine, result.affine, target_shape
-                )
-            else:
-                segment_func = lambda seg_arr: apply_ops(seg_arr, result.ops)  # noqa: E731
             updated_segments = self._apply_segment_ops(
                 segmentationNode,
                 volumeNode,
                 target_volume,
-                segment_func,
-                preloaded_arrays=preloaded_arrays,
+                lambda seg_arr: seg_arr,
+                preloaded_arrays=transformed_arrays,
             )
             if hasattr(segmentationNode, "SetReferenceImageGeometryParameterFromVolumeNode"):
                 segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(target_volume)
             if hasattr(segmentationNode, "SetAttribute"):
                 segmentationNode.SetAttribute("CBCTPlanner.Orientation", "RAS")
+            if bad_axes and auto_fix_anatomy:
+                try:
+                    seg = segmentationNode.GetSegmentation()
+                    if seg is not None and seg.ContainsRepresentation("Closed surface"):
+                        segmentationNode.CreateClosedSurfaceRepresentation()
+                except Exception:
+                    logger.debug("Could not refresh closed surface after orientation standardize", exc_info=True)
 
-        report = OrientationReport(
-            notes=[
+        if len(report.notes) == 1 and "segment(s) re-encoded" in report.notes[0]:
+            report.notes[0] = (
                 f"{'Resampled' if resampled else 'Canonicalized'} "
                 f"{axcodes_from_affine(affine)} -> {axcodes_from_affine(result.affine)} "
                 f"({updated_segments} segment(s) re-encoded)."
-            ]
-        )
-        if segmentationNode is not None:
-            mask, is_5class = self._extract_combined_label_mask(target_volume, segmentationNode)
-            if mask is not None:
-                report = verify_orientation(mask, result.affine, is_5class=is_5class)
-                bad_axes = inverted_axes_from_report(report)
-                if auto_fix_anatomy and bad_axes:
-                    self.flip_orientation_axis(target_volume, segmentationNode, bad_axes)
-                    mask_fixed, is_5class_fixed = self._extract_combined_label_mask(
-                        target_volume, segmentationNode
-                    )
-                    if mask_fixed is not None:
-                        report = verify_orientation(mask_fixed, result.affine, is_5class=is_5class_fixed)
-                    report.notes.insert(
-                        0,
-                        f"Auto-corrected inverted anatomy along {', '.join(bad_axes)} (visible in Axial/Sagittal/Coronal).",
-                    )
-                report.notes.insert(
-                    0,
-                    f"{'Resampled' if resampled else 'Canonicalized'} "
-                    f"{axcodes_from_affine(affine)} -> "
-                    f"{axcodes_from_affine(result.affine)} ({updated_segments} segment(s) re-encoded).",
-                )
-            else:
-                report.notes.append("No label mask available; orientation could not be verified.")
-        else:
-            report.notes.append("No segmentation supplied; orientation could not be verified.")
+            )
         if resampled:
             report.notes.append(
                 "Oblique input was linearly interpolated onto the RAS grid; "
@@ -7718,9 +7750,17 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
         if not seg_ids:
             return None, False
 
-        vol_arr = slicer.util.arrayFromVolume(volumeNode)
-        combined = np.zeros(vol_arr.shape, dtype=np.uint16)
-        precedence_buf = np.zeros(vol_arr.shape, dtype=np.uint8)
+        cached_pack = getattr(self, "_preloaded_mask_cache", None)
+        preloaded_map = None
+        target_shape = None
+        if cached_pack is not None and cached_pack[0] is segmentationNode:
+            preloaded_map = cached_pack[1]
+            target_shape = cached_pack[2]
+        if target_shape is None:
+            vol_arr = slicer.util.arrayFromVolume(volumeNode)
+            target_shape = vol_arr.shape
+        combined = np.zeros(target_shape, dtype=np.uint16)
+        precedence_buf = np.zeros(target_shape, dtype=np.uint8)
         matched_records: List[Tuple[int, str, bool, int]] = []
         per_seg_matches: List[Tuple[str, int, int]] = []
 
@@ -7757,11 +7797,26 @@ class CBCTPlannerLogic(ScriptedLoadableModuleLogic):
                     label_val = UPPER_JAW_ID
 
             try:
-                seg_arr = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, sid, volumeNode)
+                seg_arr = (
+                    preloaded_map.get(sid)
+                    if preloaded_map is not None
+                    else slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, sid, volumeNode)
+                )
                 if seg_arr is not None and seg_arr.shape == combined.shape:
-                    write_mask = (seg_arr > 0) & (prec >= precedence_buf)
-                    combined[write_mask] = label_val
-                    precedence_buf[write_mask] = prec
+                    z_hits = np.flatnonzero(np.any(seg_arr, axis=(1, 2)))
+                    if z_hits.size == 0:
+                        continue
+                    z0, z1 = int(z_hits[0]), int(z_hits[-1]) + 1
+                    sub_z = seg_arr[z0:z1]
+                    y_hits = np.flatnonzero(np.any(sub_z, axis=(0, 2)))
+                    y0, y1 = int(y_hits[0]), int(y_hits[-1]) + 1
+                    x_hits = np.flatnonzero(np.any(sub_z[:, y0:y1, :], axis=(0, 1)))
+                    x0, x1 = int(x_hits[0]), int(x_hits[-1]) + 1
+                    roi = sub_z[:, y0:y1, x0:x1] > 0
+                    prec_sub = precedence_buf[z0:z1, y0:y1, x0:x1]
+                    write_mask = roi & (prec >= prec_sub)
+                    combined[z0:z1, y0:y1, x0:x1][write_mask] = label_val
+                    prec_sub[write_mask] = prec
                 elif seg_arr is not None:
                     # A geometry mismatch used to drop the segment silently, which surfaced later as
                     # "not measured". Name the segment and the geometry so the cause is actionable.

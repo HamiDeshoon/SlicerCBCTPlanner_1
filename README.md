@@ -145,13 +145,13 @@ Open items below are the remaining backlog after the v3.3 hardening pass (`BL-12
 
 ## Running Tests
 ```bash
-python -m unittest discover -s tests -v      # 265 tests across 24 modules (0 failures)
+python -m unittest discover -s tests -v      # 270 tests across 25 modules (0 failures)
 ```
 
 Three headless harnesses and benchmark scripts verify 3D Slicer 5.12.3 integration:
 
 ```bash
-# same 265 unit tests inside 3D Slicer's own Python (with VTK, SimpleITK, scikit-image)
+# same 270 unit tests inside 3D Slicer's own Python (with VTK, SimpleITK, scikit-image)
 "D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" -m unittest discover -s tests
 
 # measurement + edentulous/shared/partial jaw + BL-12 + 8x10 BL-14 + tangential + agent + v3.3/adt checks (32 checks)

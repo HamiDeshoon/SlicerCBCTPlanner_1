@@ -2,7 +2,7 @@
 
 ## 1. Executive Assessment (`/modernize-assess`)
 - **System**: `SlicerCBCTPlanner_1` v3.3.0 (`CBCTPlanner/Resources/VERSION`, 3D Slicer Scripted Loadable Extension in Python 3.9+ / VTK / Qt / CTK / NumPy / SciPy).
-- **Codebase Inventory**: **40 module Python files** (`2` top-level `CBCTPlanner.py`, `cli_batch.py`; `16` in `CBCTPlannerLib/` including `EndodonticEngine.py`; `15` in `CBCTPlannerLib/core/` including `contracts.py`, `case_state.py`; `7` in `CBCTPlannerLib/adt/`) + **24 test modules** (**265 unit tests**, 8 wizard steps / 8 step chips, verified in both host Python 3.12 and Slicer 5.12.3 Python as of 2026-11-26).
+- **Codebase Inventory**: **40 module Python files** (`2` top-level `CBCTPlanner.py`, `cli_batch.py`; `16` in `CBCTPlannerLib/` including `EndodonticEngine.py`; `15` in `CBCTPlannerLib/core/` including `contracts.py`, `case_state.py`; `7` in `CBCTPlannerLib/adt/`) + **25 test modules** (**270 unit tests**, 8 wizard steps / 8 step chips, verified in both host Python 3.12 and Slicer 5.12.3 Python as of 2026-11-27).
 - **Modernization Method**: **Uplift + Feature Expansion** — preserve all behavioral guarantees (B1–B22, O1–O9, F1–F20) while enforcing CMake packaging completeness (`test_packaging_completeness.py`), shared units/provenance (`core/contracts.py`), parallel-transport arch frames & half-voxel pano boundary clamping, topology-aware multi-root `EndodonticEngine`, closed-form capsule `ImplantPlanner` with multi-structure SDF & uncertainty reporting, `OPT-01`/`OPT-03` caches, `adt` native suite, and structured JSON reports.
 
 ---
@@ -151,16 +151,17 @@
 | `tests/test_implant_uncertainty.py` | 2 | Closed-form capsule distances, adjacent tooth/IAN/sinus/cortical perforation, explicit uncertainty priors |
 | `tests/test_orientation_and_cross_sections.py` | 4 | Orientation + section geometry |
 | `tests/test_packaging_completeness.py` | 3 | Authoritative `VERSION`, 100% CMake script/resource enumeration, clean isolated staged install check |
+| `tests/test_planar_arch_alignment.py` | 4 | Roll-free sagittal-pitched plane alignment (`align_arch_to_sagittal_plane`), ectopic `#43` pruning, `fdi_centroids`/`principal_curve`/`jawbone_crest`/`shared` planarity, frame continuity |
 | `tests/test_static_attrs.py` | 4 | Static attribute audit (no dangling `self.*`, no silent `except: pass`) |
 | `tests/test_transforms_and_reports.py` | 2 | Tilted LPS-to-RAS canonicalization, structured JSON report provenance & unit contracts |
 | `tests/test_v32_preprint_and_arch.py` | 4 | Inline labels, custom overlays, coronal-offset re-anchoring, Pre-Print JSONL, jaw-wise odontogram + 5/6/7 expansion |
 | `tests/test_v33_adt_and_clinical_geometry.py` | 7 | Strict T-junction, unclipped jaw bounds, smooth W0 continuity, periodic W3/W5 key, `adt` ALI/ASO/CLI-C/VFACE/DOCShapeAXI |
-| **Total** | **265** | Verified on 2026-11-26 in both host Python (`24.2s`) & Slicer 5.12.3 `PythonSlicer.exe` (`28.4s`) (`0` failures, `0` skipped; `ruff` clean) |
+| **Total** | **270** | Verified on 2026-11-27 in both host Python (`58.6s`) & Slicer 5.12.3 `PythonSlicer.exe` (`98.9s`) (`0` failures, `0` skipped; `ruff` clean) |
 
 Run: `python -m unittest discover -s tests` (or `"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" -m unittest discover -s tests`)
 
-Headless Slicer harnesses verified on Windows **3D Slicer 5.12.3** (2026-11-26):
-`"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" analysis/slicercbctplanner_1/verify_real_ct.py` (**32/32 PASS**, `205` lower rows),
+Headless Slicer harnesses verified on Windows **3D Slicer 5.12.3** (2026-11-27):
+`"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" analysis/slicercbctplanner_1/verify_real_ct.py` (**32/32 PASS**, `203` lower rows),
 `"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" tests/bench_suite.py` (benchmark timings), and
 `python analysis/mcp_slicer_check/verify_mcp_slicer.py` (**11/11 PASS**).
 

@@ -1343,51 +1343,68 @@ class MeasurementEngine:
                         u_crest = float(surf_u[best_idx] + delta * du)
                         v_crest = float(y1 - 0.25 * (y0 - y2) * delta)
 
-        # Height axis = principal axis of the alveolar portion of `ridge_mask`.
-        # Restricting PCA to within 18 mm apical to `v_crest` keeps basal flaring / mental tubercle
-        # from swinging W0/H angle steeply between adjacent slices; falls back to full `ridge_mask`.
-        if is_mandible:
-            alv_band = (v_coords >= float(v_crest) - 18.0) & (v_coords <= float(v_crest) + 3.0)
-        else:
-            alv_band = (v_coords <= float(v_crest) + 18.0) & (v_coords >= float(v_crest) - 3.0)
-        pca_src = (
-            bone_mask & alv_band[:, None]
-            if (bone_mask is not None and int(np.count_nonzero(bone_mask & alv_band[:, None])) >= 14)
-            else (
-                ridge_mask & alv_band[:, None]
-                if int(np.count_nonzero(ridge_mask & alv_band[:, None])) >= 14
-                else ridge_mask
-            )
-        )
-        rows_p, cols_p = np.where(pca_src)
+        # Height axis = coronal midline bisector of the intact `ridge_mask` (`0..12 mm` apical
+        # to crest), rejecting basal flaring / external oblique shelves (> 1.45x crestal width).
+        # Using `ridge_mask` (with tooth root) avoids hollow single-plate socket walls skewing
+        # molars by 30-45 deg, while preserving uniformly tilted ridges (`test_20`).
         ridge_angle_deg: Optional[float] = None
         d_apical = default_apical
         d_bl = default_bl
-        if rows_p.size >= 8:
-            cloud = np.column_stack([u_coords[cols_p], v_coords[rows_p]]).astype(np.float64)
-            cloud -= cloud.mean(axis=0, keepdims=True)
-            cov = (cloud.T @ cloud) / float(max(1, cloud.shape[0]))
-            try:
-                eigvals, eigvecs = np.linalg.eigh(cov)
-                v_major = np.asarray(eigvecs[:, 1], dtype=np.float64)
-                if float(eigvals[1]) >= 1.4 * max(1e-6, float(eigvals[0])) and abs(float(v_major[1])) >= 0.57:
-                    axis = v_major
-                else:
-                    axis = max(
-                        (np.asarray(eigvecs[:, index], dtype=np.float64) for index in range(2)),
-                        key=lambda vec: abs(float(vec[1])),
-                    )
-                # Point the axis apically (mandible: -v, maxilla: +v).
-                if (is_mandible and axis[1] > 0.0) or ((not is_mandible) and axis[1] < 0.0):
-                    axis = -axis
-                norm = float(math.hypot(float(axis[0]), float(axis[1])))
-                if norm > 1e-6:
-                    axis = axis / norm
-                    raw_deg = math.degrees(
-                        math.atan2(float(axis[0]), -float(axis[1]))
-                        if is_mandible
-                        else math.atan2(float(axis[0]), float(axis[1]))
-                    )
+
+        dir_sign = -1.0 if is_mandible else 1.0
+        v_band_lo = float(v_crest) - 12.0 if is_mandible else float(v_crest) + 0.5
+        v_band_hi = float(v_crest) - 0.5 if is_mandible else float(v_crest) + 12.0
+        row_idxs = np.flatnonzero((v_coords >= v_band_lo) & (v_coords <= v_band_hi))
+        if row_idxs.size > 0 and not is_mandible:
+            row_idxs = row_idxs[::-1]  # process apically outward -> coronal-first for maxilla too
+        elif row_idxs.size > 0 and is_mandible:
+            row_idxs = row_idxs[::-1]  # high v (coronal) -> low v (apical)
+
+        mid_rows: List[Tuple[float, float, float, float, float]] = []
+        for r in row_idxs:
+            cols = np.flatnonzero(ridge_mask[int(r), :])
+            if cols.size < 2:
+                continue
+            u_l_row = float(u_coords[int(cols[0])])
+            u_r_row = float(u_coords[int(cols[-1])])
+            r_span = u_r_row - u_l_row
+            if r_span < 1.0:
+                continue
+            u_mid = 0.5 * (u_l_row + u_r_row)
+            mid_rows.append((u_mid, float(v_coords[int(r)]), r_span, u_l_row, u_r_row))
+
+        if len(mid_rows) >= 6:
+            crest_spans = [item[2] for item in mid_rows[: max(3, len(mid_rows) // 2)]]
+            med_span = float(np.median(crest_spans))
+            kept = [item for item in mid_rows if item[2] <= max(med_span * 1.45, med_span + 4.5)]
+            if len(kept) < 6:
+                kept = mid_rows
+            vs_arr = np.asarray([k[1] for k in kept], dtype=np.float64)
+            us_arr = np.asarray([k[0] for k in kept], dtype=np.float64)
+            ul_arr = np.asarray([k[3] for k in kept], dtype=np.float64)
+            ur_arr = np.asarray([k[4] for k in kept], dtype=np.float64)
+            v_span = float(np.max(vs_arr) - np.min(vs_arr))
+            if v_span >= 4.0:
+                # Coronal linear regression of u(s_apical) with bilateral wall agreement check:
+                # true tilted ridges (`test_20`) tilt BOTH walls in the same direction, whereas
+                # palatal vault / mylohyoid flares move only one wall while the other stays steep.
+                s_ap = dir_sign * (vs_arr - float(v_crest))
+                s_c = s_ap - float(np.mean(s_ap))
+                denom = float(np.dot(s_c, s_c))
+                if denom > 1e-6:
+                    slope_mid = float(np.dot(s_c, us_arr - float(np.mean(us_arr))) / denom)
+                    slope_l = float(np.dot(s_c, ul_arr - float(np.mean(ul_arr))) / denom)
+                    slope_r = float(np.dot(s_c, ur_arr - float(np.mean(ur_arr))) / denom)
+                    if slope_l * slope_r > 0.0:
+                        s_abs_min = min(abs(slope_l), abs(slope_r))
+                        s_abs_max = max(abs(slope_l), abs(slope_r))
+                        if s_abs_max <= 2.5 * max(0.08, s_abs_min):
+                            slope = slope_mid
+                        else:
+                            slope = math.copysign(min(abs(slope_mid), s_abs_min + 0.35 * (s_abs_max - s_abs_min)), slope_mid)
+                    else:
+                        slope = 0.35 * slope_mid
+                    raw_deg = math.degrees(math.atan2(slope, 1.0))
                     clamped_deg = float(np.clip(raw_deg, -45.0, 45.0))
                     ridge_angle_deg = round(clamped_deg, 1)
                     rad = math.radians(clamped_deg)
@@ -1395,8 +1412,51 @@ class MeasurementEngine:
                         (math.sin(rad), -math.cos(rad)) if is_mandible else (math.sin(rad), math.cos(rad))
                     )
                     d_bl = (math.cos(rad), math.sin(rad) if is_mandible else -math.sin(rad))
-            except Exception:  # pragma: no cover - degenerate covariance only
-                logger.debug("PCA height axis unavailable", exc_info=True)
+
+        if ridge_angle_deg is None:
+            if is_mandible:
+                alv_band = (v_coords >= float(v_crest) - 14.0) & (v_coords <= float(v_crest) + 3.0)
+            else:
+                alv_band = (v_coords <= float(v_crest) + 14.0) & (v_coords >= float(v_crest) - 3.0)
+            pca_src = (
+                ridge_mask & alv_band[:, None]
+                if int(np.count_nonzero(ridge_mask & alv_band[:, None])) >= 14
+                else ridge_mask
+            )
+            rows_p, cols_p = np.where(pca_src)
+            if rows_p.size >= 8:
+                cloud = np.column_stack([u_coords[cols_p], v_coords[rows_p]]).astype(np.float64)
+                cloud -= cloud.mean(axis=0, keepdims=True)
+                cov = (cloud.T @ cloud) / float(max(1, cloud.shape[0]))
+                try:
+                    eigvals, eigvecs = np.linalg.eigh(cov)
+                    v_major = np.asarray(eigvecs[:, 1], dtype=np.float64)
+                    if float(eigvals[1]) >= 1.4 * max(1e-6, float(eigvals[0])) and abs(float(v_major[1])) >= 0.57:
+                        axis = v_major
+                    else:
+                        axis = max(
+                            (np.asarray(eigvecs[:, index], dtype=np.float64) for index in range(2)),
+                            key=lambda vec: abs(float(vec[1])),
+                        )
+                    if (is_mandible and axis[1] > 0.0) or ((not is_mandible) and axis[1] < 0.0):
+                        axis = -axis
+                    norm = float(math.hypot(float(axis[0]), float(axis[1])))
+                    if norm > 1e-6:
+                        axis = axis / norm
+                        raw_deg = math.degrees(
+                            math.atan2(float(axis[0]), -float(axis[1]))
+                            if is_mandible
+                            else math.atan2(float(axis[0]), float(axis[1]))
+                        )
+                        clamped_deg = float(np.clip(raw_deg, -45.0, 45.0))
+                        ridge_angle_deg = round(clamped_deg, 1)
+                        rad = math.radians(clamped_deg)
+                        d_apical = (
+                            (math.sin(rad), -math.cos(rad)) if is_mandible else (math.sin(rad), math.cos(rad))
+                        )
+                        d_bl = (math.cos(rad), math.sin(rad) if is_mandible else -math.sin(rad))
+                except Exception:  # pragma: no cover - degenerate covariance only
+                    logger.debug("PCA height axis unavailable", exc_info=True)
 
         return (u_crest, v_crest), d_apical, d_bl, ridge_angle_deg, crest_profile_uv
 
@@ -1556,7 +1616,9 @@ class MeasurementEngine:
             perp = np.abs(du_v * (-av) + dv_v * au)
 
             cand_dists: List[float] = []
-            in_corridor = (along >= 0.0) & (perp <= 5.5)
+            # Implant-footprint safety corridor (±3.0 mm laterally) prevents distant foramina/sinus
+            # recesses from prematurely truncating H while keeping direct crossings strictly blocked.
+            in_corridor = (along >= 0.0) & (perp <= 3.0)
             if in_corridor.any():
                 cand_dists.append(float(max(0.0, np.min(along[in_corridor]))))
 
@@ -1681,16 +1743,23 @@ class MeasurementEngine:
             return None
         idx_fg = np.flatnonzero(fg)
         splits = np.where(np.diff(idx_fg) > 1)[0] + 1
-        runs = [r for r in np.split(idx_fg, splits) if r.size >= 2]
+        raw_runs = list(np.split(idx_fg, splits))
+        runs = [r for r in raw_runs if r.size >= 2]
+        # Preserve genuine sub-millimetre (1 px) cortical walls ONLY when tooth bridging can pair them
+        # across an in-socket root with another >=2 px bone run; never accept isolated 1 px noise.
+        if tooth_profile is not None and len(runs) >= 1 and len(raw_runs) > len(runs):
+            runs = [r for r in raw_runs if r.size >= 1]
         if not runs:
             return None
 
         zero_idx = int(np.argmin(np.abs(s_grid)))
         # Locate the anchor bone run containing or closest to s = 0 (within 6.5 mm when tooth-bridging
-        # is available, else within 4.0 mm).
+        # is available, else within 4.0 mm), preferring >=2 px walls.
         anchor_idx: Optional[int] = None
         best_dist = float("inf")
         for idx, run in enumerate(runs):
+            if run.size < 2 and tooth_profile is None:
+                continue
             if run[0] <= zero_idx <= run[-1]:
                 anchor_idx = idx
                 best_dist = 0.0
@@ -1699,6 +1768,8 @@ class MeasurementEngine:
             if d_to_zero < best_dist:
                 best_dist = d_to_zero
                 anchor_idx = idx
+        if anchor_idx is None:
+            return None
 
         max_anchor_dist = 6.5 if (tooth_profile is not None and len(runs) >= 2) else 4.0
         if anchor_idx is None or best_dist > max_anchor_dist:
@@ -1730,10 +1801,95 @@ class MeasurementEngine:
                 if not _tooth_bridges_gap(runs[right_idx], runs[right_idx + 1]):
                     break
                 right_idx += 1
-            if left_idx == right_idx and best_dist > 4.0:
+            if left_idx == right_idx and (best_dist > 4.0 or runs[left_idx].size < 2):
+                return None
+            if not any(r.size >= 2 for r in runs[left_idx : right_idx + 1]):
                 return None
 
         return int(runs[left_idx][0]), int(runs[right_idx][-1])
+
+    @staticmethod
+    def _refine_width_with_gray_edges(
+        img_cs: Optional[np.ndarray],
+        u_coords: np.ndarray,
+        v_coords: np.ndarray,
+        pt_l: Tuple[float, float],
+        pt_r: Tuple[float, float],
+        *,
+        max_shift_mm: float = 0.75,
+    ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        """Refine outer cortical endpoints to the falling half-max HU edge when real bone contrast exists."""
+        if img_cs is None or img_cs.shape != (len(v_coords), len(u_coords)):
+            return pt_l, pt_r
+        dx = float(pt_r[0]) - float(pt_l[0])
+        dy = float(pt_r[1]) - float(pt_l[1])
+        seg_len = math.hypot(dx, dy)
+        if seg_len < 2.5:
+            return pt_l, pt_r
+        ux, uy = dx / seg_len, dy / seg_len
+        du = abs(float(u_coords[1] - u_coords[0])) if len(u_coords) > 1 else 0.25
+        step = min(du, 0.25)
+        margin = 2.0
+        s_arr = np.arange(-margin, seg_len + margin + step, step, dtype=np.float64)
+        su = float(pt_l[0]) + s_arr * ux
+        sv = float(pt_l[1]) + s_arr * uy
+        u_min, u_max = float(u_coords[0]), float(u_coords[-1])
+        v_min, v_max = float(v_coords[0]), float(v_coords[-1])
+        if np.any((su < u_min) | (su > u_max) | (sv < v_min) | (sv > v_max)):
+            return pt_l, pt_r
+        try:
+            from scipy import ndimage  # type: ignore
+
+            cf = (su - u_min) / max(1e-6, u_max - u_min) * (len(u_coords) - 1)
+            rf = (sv - v_min) / max(1e-6, v_max - v_min) * (len(v_coords) - 1)
+            hu = ndimage.map_coordinates(np.asarray(img_cs, dtype=np.float32), np.vstack([rf, cf]), order=1, mode="nearest")
+        except Exception:
+            return pt_l, pt_r
+
+        ext_l = hu[s_arr <= -0.75]
+        ext_r = hu[s_arr >= seg_len + 0.75]
+        in_band = hu[(s_arr >= 0.0) & (s_arr <= seg_len)]
+        if ext_l.size < 2 or ext_r.size < 2 or in_band.size < 4:
+            return pt_l, pt_r
+        # Skip uniform/binary synthetic images (already exact at mask edge) or uncalibrated flat contrast.
+        if float(np.std(in_band)) < 15.0:
+            return pt_l, pt_r
+
+        def _shift_edge(anchor_s: float, outward_sign: float, ext_vals: np.ndarray, near_vals_mask: np.ndarray) -> float:
+            peak_vals = hu[near_vals_mask]
+            if peak_vals.size < 2:
+                return anchor_s
+            peak_hu = float(np.percentile(peak_vals, 90))
+            ext_hu = float(np.median(ext_vals))
+            if peak_hu < 350.0 or (peak_hu - ext_hu) < 180.0:
+                return anchor_s
+            thresh = ext_hu + 0.50 * (peak_hu - ext_hu)
+            # Search outward/inward within +-max_shift_mm around anchor_s
+            w_mask = np.abs(s_arr - anchor_s) <= max_shift_mm
+            idxs = np.flatnonzero(w_mask)
+            if idxs.size < 3:
+                return anchor_s
+            vals = hu[idxs]
+            if float(np.max(vals)) <= thresh or float(np.min(vals)) >= thresh:
+                return anchor_s
+            # Pick crossing closest to anchor_s where intensity falls outward
+            order_idx = idxs[::-1] if outward_sign < 0.0 else idxs
+            for k in range(len(order_idx) - 1):
+                i0, i1 = int(order_idx[k]), int(order_idx[k + 1])
+                v0_h, v1_h = float(hu[i0]), float(hu[i1])
+                if v0_h >= thresh > v1_h and abs(v0_h - v1_h) > 1e-3:
+                    frac = (v0_h - thresh) / (v0_h - v1_h)
+                    return float(s_arr[i0] + frac * (s_arr[i1] - s_arr[i0]))
+            return anchor_s
+
+        new_s_l = _shift_edge(0.0, -1.0, ext_l, (s_arr >= -0.25) & (s_arr <= min(2.0, 0.4 * seg_len)))
+        new_s_r = _shift_edge(seg_len, 1.0, ext_r, (s_arr >= max(0.0, seg_len - min(2.0, 0.4 * seg_len))) & (s_arr <= seg_len + 0.25))
+        if new_s_r - new_s_l < max(2.5, seg_len - 1.5):
+            return pt_l, pt_r
+        return (float(pt_l[0]) + new_s_l * ux, float(pt_l[1]) + new_s_l * uy), (
+            float(pt_l[0]) + new_s_r * ux,
+            float(pt_l[1]) + new_s_r * uy,
+        )
 
     @staticmethod
     def _compute_bone_widths_with_endpoints_in_cs(
@@ -1751,16 +1907,17 @@ class MeasurementEngine:
         d_bl: Optional[Tuple[float, float]] = None,
         tooth_mask: Optional[np.ndarray] = None,
         withheld_notes: Optional[List[str]] = None,
+        img_cs: Optional[np.ndarray] = None,
+        out_ortho_frame: Optional[Dict[str, Any]] = None,
     ) -> Tuple[
         Dict[float, Tuple[float, float]], Dict[float, Tuple[Tuple[float, float], Tuple[float, float]]]
     ]:
         """Detect buccal and lingual cortical boundaries on jaw-bone-only `bone_mask`.
 
-        Bridges across an in-socket tooth root/pulp when BOTH lingual and buccal jawbone walls
-        flank the socket (never across empty air or missing plates), and prevents large ridge
-        angles from clipping `W0` above flat crests or diving into tooth crowns.
-
-        Returns `(width_segments_u, width_endpoints_uv)`.
+        Ensures `W0` and all deeper widths (`W3`, `W5`, `W6`, `W9`) share ONE orthonormal
+        `(d_bl, d_apical)` frame so `W0 ⟂ H` and `W0 ∥ W3 ∥ W5` on every site, bridges
+        in-socket teeth cleanly across both cortical plates, and never reports a single
+        cortical socket wall beside a root as ridge width.
         """
         segments: Dict[float, Tuple[float, float]] = {}
         endpoints_uv: Dict[float, Tuple[Tuple[float, float], Tuple[float, float]]] = {}
@@ -1793,8 +1950,7 @@ class MeasurementEngine:
             else None
         )
 
-        # Pre-check dentate socket rims for W0 (depth == 0.0) so W0 connects outer lingual rim
-        # to outer buccal rim directly without tilting into air or diving into the tooth.
+        # Pre-check dentate socket rims for W0 (depth == 0.0)
         socket_rims: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None
         if tooth_f32 is not None and 0.0 in (float(d) for d in depths_mm):
             su_arr, sv_arr = MeasurementEngine._extract_coronal_bone_surface(
@@ -1845,114 +2001,30 @@ class MeasurementEngine:
             edges = np.diff(np.concatenate(([0], flags, [0])))
             return int(np.count_nonzero(edges == 1))
 
-        solid_tapered_crest = False
-        for depth in depths_mm:
-            fdepth = float(depth)
-            if fdepth == 0.0 and socket_rims is not None:
-                # Dentate socket with both lingual & buccal rims: measure each wall's outer edge
-                # 0.5 mm apical to its own crest rim and link outer-lingual to outer-buccal.
-                l_rim, r_rim = socket_rims
-                v_l_s = l_rim[1] - 0.5 if is_mandible else l_rim[1] + 0.5
-                v_r_s = r_rim[1] - 0.5 if is_mandible else r_rim[1] + 0.5
-                c_l = _measure_caliper(
-                    l_rim[0], v_l_s, 0.0, -1.0 if is_mandible else 1.0, 1.0, 0.0, allow_bridge=False
-                )
-                c_r = _measure_caliper(
-                    r_rim[0], v_r_s, 0.0, -1.0 if is_mandible else 1.0, 1.0, 0.0, allow_bridge=False
-                )
-                pt_l = c_l[0] if c_l is not None else l_rim
-                pt_r = c_r[1] if c_r is not None else r_rim
-                if (
-                    (c_l is not None or c_r is not None)
-                    and pt_r[0] > pt_l[0]
-                    and pt_l[0] <= l_rim[0] + 0.75
-                    and pt_r[0] >= r_rim[0] - 0.75
-                ):
-                    if pt_l[0] > u_min + _CS_BORDER_TOL_MM and pt_r[0] < u_max - _CS_BORDER_TOL_MM:
-                        segments[fdepth] = (float(pt_l[0]), float(pt_r[0]))
-                        endpoints_uv[fdepth] = (pt_l, pt_r)
-                        continue
-
-            if fdepth == 0.0:
-                # Sample right on the crest first (`eff_d = 0.25 mm`) so W0 + H T-junction stays
-                # anchored at the anatomical crest, falling back to deeper steps only when broken/single.
-                # If a solid tapered ridge peak is 2.0-3.0 mm wide near eff_d <= 0.5 mm and widens into
-                # a >= 4.0 mm single contiguous ridge 3.0 mm apically, keep W0 at eff_d = 0.5 mm so
-                # sloped ridges do not lose crestal bone height under strict T-junction anchoring.
-                deeper_solid_w = 0.0
-                if tooth_f32 is None:
-                    d3_cand = _measure_caliper(
-                        u0 + 3.0 * au, v0 + 3.0 * av, au, av, bu, bv, allow_bridge=False
-                    )
-                    if d3_cand is not None and _span_bone_runs(d3_cand) == 1:
-                        deeper_solid_w = math.hypot(d3_cand[1][0] - d3_cand[0][0], d3_cand[1][1] - d3_cand[0][1])
-
-                best: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None
-                best_w = 0.0
-                for eff_d in (0.25, 0.5, 1.0, 1.5):
-                    cx = u0 + eff_d * au
-                    cy = v0 + eff_d * av
-                    if cy < v_min - 0.5 or cy > v_max + 0.5:
-                        continue
-                    c_primary = _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
-                    lvl_best: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = c_primary
-                    lvl_w = (
-                        math.hypot(c_primary[1][0] - c_primary[0][0], c_primary[1][1] - c_primary[0][1])
-                        if c_primary is not None
-                        else 0.0
-                    )
-                    # Try horizontal crestal caliper when tilted d_bl is missing/<3 mm, OR on
-                    # dentate sockets where d_bl clipped one socket wall (< 4.5 mm) while horizontal
-                    # bridges cleanly across both socket walls (+1.5 mm wider).
-                    if abs(bv) > 0.05 and (
-                        lvl_best is None
-                        or lvl_w < 3.0
-                        or (tooth_f32 is not None and lvl_w < 4.5)
-                    ):
-                        c_horiz = _measure_caliper(
-                            u0,
-                            cy,
-                            0.0,
-                            -1.0 if is_mandible else 1.0,
-                            1.0,
-                            0.0,
-                            allow_bridge=True,
-                        )
-                        if c_horiz is not None:
-                            w_h = math.hypot(c_horiz[1][0] - c_horiz[0][0], c_horiz[1][1] - c_horiz[0][1])
-                            if w_h > lvl_w and (lvl_w < 3.0 or w_h >= lvl_w + 1.5):
-                                lvl_best, lvl_w = c_horiz, w_h
-                    if lvl_best is not None and lvl_w > best_w:
-                        best, best_w = lvl_best, lvl_w
-                    if lvl_best is not None and lvl_w >= 4.6:
-                        best, best_w = lvl_best, lvl_w
-                        break
-                    if (
-                        eff_d >= 0.5
-                        and lvl_best is not None
-                        and 2.0 <= lvl_w < 3.0
-                        and deeper_solid_w >= 4.0
-                        and _span_bone_runs(lvl_best) == 1
-                    ):
-                        best, best_w = lvl_best, lvl_w
-                        solid_tapered_crest = True
-                        break
-                if best is not None:
-                    segments[fdepth] = (float(best[0][0]), float(best[1][0]))
-                    endpoints_uv[fdepth] = best
-                continue
-
-            cx = u0 + fdepth * au
-            cy = v0 + fdepth * av
-            if cy < v_min - 0.5 or cy > v_max + 0.5:
-                continue
-            res = _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
-            if res is not None:
-                segments[fdepth] = (float(res[0][0]), float(res[1][0]))
-                endpoints_uv[fdepth] = res
+        def _is_single_socket_wall(seg: Tuple[Tuple[float, float], Tuple[float, float]]) -> bool:
+            """True when a short (<=4.5mm) 1-run segment stops right beside a segmented tooth root."""
+            if tooth_f32 is None or _span_bone_runs(seg) > 1:
+                return False
+            (x0, y0), (x1, y1) = seg
+            w_len = math.hypot(x1 - x0, y1 - y0)
+            if w_len >= 4.5:
+                return False
+            du_seg, dv_seg = (x1 - x0) / max(1e-6, w_len), (y1 - y0) / max(1e-6, w_len)
+            mid_y = 0.5 * (y0 + y1)
+            for sign, end_x, end_y in ((-1.0, x0, y0), (1.0, x1, y1)):
+                t_hits = 0
+                for d_p in (0.5, 1.0, 1.5, 2.0, 2.5):
+                    px_t = end_x + sign * d_p * du_seg
+                    py_t = end_y + sign * d_p * dv_seg
+                    ci_t = int(np.clip(np.round((px_t - u_min) / max(1e-6, u_max - u_min) * (len(u_coords) - 1)), 0, len(u_coords) - 1))
+                    ri_t = int(np.clip(np.round((py_t - v_min) / max(1e-6, v_max - v_min) * (len(v_coords) - 1)), 0, len(v_coords) - 1))
+                    if float(tooth_f32[ri_t, ci_t]) >= 0.5:
+                        t_hits += 1
+                if t_hits >= 2 and abs(mid_y - v0) <= 12.0:
+                    return True
+            return False
 
         def _wall_crest_at(col_u: float) -> Optional[float]:
-            """Coronal-most bone v within the crestal band of a column (that wall's own rim)."""
             if len(u_coords) == 0:
                 return None
             ci = int(np.argmin(np.abs(u_coords - col_u)))
@@ -1966,16 +2038,119 @@ class MeasurementEngine:
                 return None
             return float(v_coords[band[-1] if is_mandible else band[0]])
 
-        # Anterior sockets: the incisal crown's labial/lingual lobes leave an air gap that can stop
-        # the crestal bridge on ONE cortical plate, collapsing W0 to that plate's thickness ("one
-        # side of the tooth"). When a valid deeper caliper does span both walls, interpolate W0
-        # from one wall to the other, each at its own crest rim (the rims often differ in height).
-        w0 = endpoints_uv.get(0.0)
-        if w0 is not None:
-            w0_len = math.hypot(w0[1][0] - w0[0][0], w0[1][1] - w0[0][1])
-            if w0_len < 3.0 and _span_bone_runs(w0) <= 1:
-                for deeper in sorted(float(d) for d in endpoints_uv if float(d) > 0.0):
-                    cand = endpoints_uv[deeper]
+        # Phase 1: Determine W0 (depth == 0.0) along the coronal ridge-normal `d_bl` FIRST so W0
+        # stays perpendicular to `d_apical` even on steeply tilted jaws (`test_20`) and horizontal
+        # top slices never hijack tilted ridge axes. Fall back to `socket_rims` / `c_horiz` /
+        # deeper two-wall bridging only when `d_bl` cannot span both walls at the crest.
+        solid_tapered_crest = False
+        ordered_depths = [float(d) for d in depths_mm]
+        if 0.0 in ordered_depths:
+            w0_got: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None
+            deeper_solid_w = 0.0
+            if tooth_f32 is None:
+                d3_cand = _measure_caliper(
+                    u0 + 3.0 * au, v0 + 3.0 * av, au, av, bu, bv, allow_bridge=False
+                )
+                if d3_cand is not None and _span_bone_runs(d3_cand) == 1:
+                    deeper_solid_w = math.hypot(d3_cand[1][0] - d3_cand[0][0], d3_cand[1][1] - d3_cand[0][1])
+
+            best: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None
+            best_w = 0.0
+            saw_single_wall = False
+            for eff_d in (0.25, 0.5, 1.0, 1.5, 2.0):
+                cx = u0 + eff_d * au
+                cy = v0 + eff_d * av
+                if cy < v_min - 0.5 or cy > v_max + 0.5:
+                    continue
+                c_primary = _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
+                lvl_best = c_primary
+                lvl_w = (
+                    math.hypot(c_primary[1][0] - c_primary[0][0], c_primary[1][1] - c_primary[0][1])
+                    if c_primary is not None
+                    else 0.0
+                )
+                if lvl_best is not None and (_is_single_socket_wall(lvl_best) or lvl_w < 3.0):
+                    saw_single_wall = True
+                if lvl_best is not None and not _is_single_socket_wall(lvl_best) and lvl_w > best_w:
+                    best, best_w = lvl_best, lvl_w
+                if lvl_best is not None and not _is_single_socket_wall(lvl_best) and lvl_w >= (6.0 if abs(bv) >= 0.25 else 4.6):
+                    best, best_w = lvl_best, lvl_w
+                    break
+                if (
+                    tooth_f32 is None
+                    and eff_d >= 0.5
+                    and lvl_best is not None
+                    and 2.0 <= lvl_w < 3.0
+                    and deeper_solid_w >= 4.5
+                    and _span_bone_runs(lvl_best) == 1
+                ):
+                    best, best_w = lvl_best, lvl_w
+                    solid_tapered_crest = True
+                    break
+            w0_got = best
+
+            # Uneven-height dentate socket rims rescue when orthogonal `d_bl` could not bridge both walls
+            # or on extreme >=40 deg slants (`|d_bl_y| >= 0.65`) where perpendicular shaft width < 6 mm.
+            if (w0_got is None or best_w < 3.0 or (best_w < 6.0 and abs(bv) >= 0.65)) and socket_rims is not None:
+                l_rim, r_rim = socket_rims
+                rim_dx = float(r_rim[0]) - float(l_rim[0])
+                rim_dy = float(r_rim[1]) - float(l_rim[1])
+                rim_deg = abs(math.degrees(math.atan2(rim_dy, max(1e-6, rim_dx))))
+                if rim_deg <= 32.0:
+                    v_l_s = l_rim[1] - 0.5 if is_mandible else l_rim[1] + 0.5
+                    v_r_s = r_rim[1] - 0.5 if is_mandible else r_rim[1] + 0.5
+                    c_l = _measure_caliper(l_rim[0], v_l_s, au, av, bu, bv, allow_bridge=False)
+                    c_r = _measure_caliper(r_rim[0], v_r_s, au, av, bu, bv, allow_bridge=False)
+                    pt_l = c_l[0] if c_l is not None else l_rim
+                    pt_r = c_r[1] if c_r is not None else r_rim
+                    if (
+                        (c_l is not None or c_r is not None)
+                        and pt_r[0] > pt_l[0]
+                        and pt_l[0] <= l_rim[0] + 0.75
+                        and pt_r[0] >= r_rim[0] - 0.75
+                        and pt_l[0] > u_min + _CS_BORDER_TOL_MM
+                        and pt_r[0] < u_max - _CS_BORDER_TOL_MM
+                    ):
+                        rim_w = math.hypot(pt_r[0] - pt_l[0], pt_r[1] - pt_l[1])
+                        if rim_w >= 3.0 and (best_w < 3.0 or rim_w >= best_w + 1.5):
+                            w0_got = (pt_l, pt_r)
+                            best_w = rim_w
+
+            # Horizontal crestal fallback only if tilted `d_bl` and rims both failed to span >= 3 mm
+            if (w0_got is None or best_w < 3.0) and abs(bv) > 0.05 and not solid_tapered_crest:
+                for eff_d in (0.5, 1.0, 1.5):
+                    cy = v0 + eff_d * av
+                    if cy < v_min - 0.5 or cy > v_max + 0.5:
+                        continue
+                    c_horiz = _measure_caliper(
+                        u0, cy, 0.0, -1.0 if is_mandible else 1.0, 1.0, 0.0, allow_bridge=True
+                    )
+                    if c_horiz is not None:
+                        w_h = math.hypot(c_horiz[1][0] - c_horiz[0][0], c_horiz[1][1] - c_horiz[0][1])
+                        if _is_single_socket_wall(c_horiz) or w_h < 3.0:
+                            saw_single_wall = True
+                        elif w_h >= 3.0 and w_h > best_w:
+                            w0_got = c_horiz
+                            best_w = w_h
+                            break
+
+            # If W0 missed without encountering a single-wall dehiscence (or hit a short single run),
+            # rescue from a deeper two-wall bridge (`3..6 mm`)
+            if not solid_tapered_crest and (
+                (w0_got is None and not saw_single_wall)
+                or (
+                    w0_got is not None
+                    and math.hypot(w0_got[1][0] - w0_got[0][0], w0_got[1][1] - w0_got[0][1]) < 3.0
+                    and _span_bone_runs(w0_got) <= 1
+                )
+            ):
+                for rescue_d in (3.0, 4.5, 5.0, 6.0):
+                    cx_r, cy_r = u0 + rescue_d * au, v0 + rescue_d * av
+                    if cy_r < v_min - 0.5 or cy_r > v_max + 0.5:
+                        continue
+                    cand = _measure_caliper(cx_r, cy_r, au, av, bu, bv, allow_bridge=True)
+                    if cand is None:
+                        continue
                     c_len = math.hypot(cand[1][0] - cand[0][0], cand[1][1] - cand[0][1])
                     if c_len < 3.0 or _span_bone_runs(cand) < 2:
                         continue
@@ -1984,33 +2159,114 @@ class MeasurementEngine:
                     if v_l is None or v_r is None:
                         continue
                     interp = ((float(cand[0][0]), v_l), (float(cand[1][0]), v_r))
-                    i_len = math.hypot(
-                        interp[1][0] - interp[0][0], interp[1][1] - interp[0][1]
-                    )
-                    if i_len < 3.0:
-                        continue
-                    if (
-                        interp[0][0] <= u_min + _CS_BORDER_TOL_MM
-                        or interp[1][0] >= u_max - _CS_BORDER_TOL_MM
-                    ):
-                        continue
-                    if _span_bone_runs(interp) < 2:
-                        continue
-                    segments[0.0] = (interp[0][0], interp[1][0])
-                    endpoints_uv[0.0] = interp
-                    break
+                    i_len = math.hypot(interp[1][0] - interp[0][0], interp[1][1] - interp[0][1])
+                    if i_len >= 3.0 and interp[0][0] > u_min + _CS_BORDER_TOL_MM and interp[1][0] < u_max - _CS_BORDER_TOL_MM and _span_bone_runs(interp) >= 2:
+                        w0_got = interp
+                        break
 
-        # BL-12: after all rescue attempts, if W0 still cuts only a single cortical plate
-        # (< 3.0 mm and <= 1 cortical run, without a wider >= 4.0 mm solid ridge body beneath),
-        # withhold W0 rather than reporting a 1-3 mm plate.
-        w0 = endpoints_uv.get(0.0)
-        if w0 is not None and not solid_tapered_crest:
-            w0_len = math.hypot(w0[1][0] - w0[0][0], w0[1][1] - w0[0][1])
-            if w0_len < 3.0 and _span_bone_runs(w0) <= 1:
-                endpoints_uv.pop(0.0, None)
-                segments.pop(0.0, None)
-                if withheld_notes is not None:
-                    withheld_notes.append(WITHHELD_W0_SINGLE_CORTEX)
+            # Grayscale outer-cortex refinement followed by BL-12 < 3.0 mm single-plate guard
+            if w0_got is not None:
+                w0_got = MeasurementEngine._refine_width_with_gray_edges(
+                    img_cs, u_coords, v_coords, w0_got[0], w0_got[1]
+                )
+            if w0_got is not None and not solid_tapered_crest:
+                w0_len = math.hypot(w0_got[1][0] - w0_got[0][0], w0_got[1][1] - w0_got[0][1])
+                if w0_len < 3.0 or _is_single_socket_wall(w0_got):
+                    w0_got = None
+                    if withheld_notes is not None:
+                        withheld_notes.append(WITHHELD_W0_SINGLE_CORTEX)
+            elif w0_got is None and saw_single_wall and withheld_notes is not None:
+                withheld_notes.append(WITHHELD_W0_SINGLE_CORTEX)
+            if w0_got is not None:
+                segments[0.0] = (float(w0_got[0][0]), float(w0_got[1][0]))
+                endpoints_uv[0.0] = w0_got
+                # Synchronize the orthogonal caliper/height frame directly to the verified W0 chord
+                # whenever the chord agrees within 20 deg of the coronal shaft axis (keeping steeply
+                # slanted >22 deg shafts pointed cleanly down the ridge body).
+                w_dx = float(w0_got[1][0]) - float(w0_got[0][0])
+                w_dy = float(w0_got[1][1]) - float(w0_got[0][1])
+                w_l = math.hypot(w_dx, w_dy)
+                if w_l >= 2.0:
+                    w_deg_abs = abs(math.degrees(math.atan2(w_dy, max(1e-6, w_dx))))
+                    w_deg_signed = (
+                        math.degrees(math.atan2(w_dy, max(1e-6, w_dx)))
+                        if is_mandible
+                        else -math.degrees(math.atan2(w_dy, max(1e-6, w_dx)))
+                    )
+                    init_axis_deg = (
+                        math.degrees(math.atan2(au, -av))
+                        if is_mandible
+                        else math.degrees(math.atan2(au, av))
+                    )
+                    u0 = 0.5 * (float(w0_got[0][0]) + float(w0_got[1][0]))
+                    v0 = 0.5 * (float(w0_got[0][1]) + float(w0_got[1][1]))
+                    if out_ortho_frame is not None:
+                        out_ortho_frame["crest_uv"] = (u0, v0)
+                    if w_deg_abs <= 45.0 and abs(w_deg_signed - init_axis_deg) <= 10.0:
+                        bu, bv = w_dx / w_l, w_dy / w_l
+                        if is_mandible:
+                            au, av = bv, -bu
+                        else:
+                            au, av = -bv, bu
+                        if out_ortho_frame is not None:
+                            out_ortho_frame["d_apical"] = (au, av)
+                            out_ortho_frame["d_bl"] = (bu, bv)
+                            ang_val = math.degrees(math.atan2(au, -av)) if is_mandible else math.degrees(math.atan2(au, av))
+                            out_ortho_frame["ridge_angle_deg"] = round(float(np.clip(ang_val, -45.0, 45.0)), 1)
+                    elif abs(w_deg_signed - init_axis_deg) > 10.0 and not (abs(init_axis_deg) > 22.0 and w_deg_abs <= 12.0):
+                        # Enforce strict orthogonality W0 ⟂ H unless keeping a flat crest on a >22 deg slanted shaft.
+                        snapped = None
+                        for step_d in (0.0, 0.5, 1.0):
+                            cand_s = _measure_caliper(
+                                u0 + step_d * au, v0 + step_d * av, au, av, bu, bv, allow_bridge=True
+                            )
+                            if cand_s is not None and not _is_single_socket_wall(cand_s):
+                                s_len = math.hypot(cand_s[1][0] - cand_s[0][0], cand_s[1][1] - cand_s[0][1])
+                                if s_len >= 3.0 or solid_tapered_crest:
+                                    snapped = cand_s
+                                    break
+                        if snapped is not None:
+                            w0_got = snapped
+                            u0 = 0.5 * (float(w0_got[0][0]) + float(w0_got[1][0]))
+                            v0 = 0.5 * (float(w0_got[0][1]) + float(w0_got[1][1]))
+                        else:
+                            proj_half = 0.5 * abs(w_dx * bu + w_dy * bv)
+                            if proj_half >= (1.5 if not solid_tapered_crest else 0.75):
+                                w0_got = (
+                                    (u0 - proj_half * bu, v0 - proj_half * bv),
+                                    (u0 + proj_half * bu, v0 + proj_half * bv),
+                                )
+                        segments[0.0] = (float(w0_got[0][0]), float(w0_got[1][0]))
+                        endpoints_uv[0.0] = w0_got
+                        if out_ortho_frame is not None:
+                            out_ortho_frame["crest_uv"] = (u0, v0)
+
+        # Phase 2: Measure all deeper widths strictly parallel to W0 along (u0, v0) + depth * d_apical
+        for fdepth in ordered_depths:
+            if fdepth == 0.0:
+                continue
+            cx = u0 + fdepth * au
+            cy = v0 + fdepth * av
+            if cy < v_min - 0.5 or cy > v_max + 0.5:
+                continue
+            res = _measure_caliper(cx, cy, au, av, bu, bv, allow_bridge=True)
+            if res is not None and _is_single_socket_wall(res):
+                # Probe +/-0.5 mm apically before withholding a collapsed single-wall dentate cut
+                rescued = None
+                for delta_d in (-0.5, 0.5):
+                    alt = _measure_caliper(
+                        cx + delta_d * au, cy + delta_d * av, au, av, bu, bv, allow_bridge=True
+                    )
+                    if alt is not None and not _is_single_socket_wall(alt):
+                        rescued = alt
+                        break
+                res = rescued
+            if res is not None:
+                res = MeasurementEngine._refine_width_with_gray_edges(
+                    img_cs, u_coords, v_coords, res[0], res[1]
+                )
+                segments[fdepth] = (float(res[0][0]), float(res[1][0]))
+                endpoints_uv[fdepth] = res
 
         return segments, endpoints_uv
 
@@ -2138,6 +2394,7 @@ class MeasurementEngine:
         depths = [0.0, 3.0, 5.0, 6.0, 9.0]
         if width_ok:
             w0_notes: List[str] = []
+            ortho_frame: Dict[str, Any] = {}
             segs_u, segs_uv = self._compute_bone_widths_with_endpoints_in_cs(
                 u_coords,
                 v_coords,
@@ -2152,7 +2409,19 @@ class MeasurementEngine:
                 d_bl=d_bl,
                 tooth_mask=same_jaw_tooth,
                 withheld_notes=w0_notes,
+                img_cs=img_cs,
+                out_ortho_frame=ortho_frame,
             )
+            if ortho_frame:
+                crest_uv = ortho_frame.get("crest_uv", crest_uv)
+                d_apical = ortho_frame.get("d_apical", d_apical)
+                d_bl = ortho_frame.get("d_bl", d_bl)
+                if "ridge_angle_deg" in ortho_frame:
+                    cs.ridge_axis_angle_deg = ortho_frame["ridge_angle_deg"]
+                if crest_uv is not None:
+                    cs.crest_uv = crest_uv
+                    cs.crest_v = crest_uv[1]
+                    cs.height_u = crest_uv[0]
             cs.width_segments = segs_u
             cs.width_endpoints_uv = segs_uv
             widths: Dict[float, Optional[float]] = {}
@@ -2725,7 +2994,8 @@ class MeasurementEngine:
                     meas.bone_width_at_depths_mm[0.0] = w_val
             cs.ridge_axis_angle_deg = round(new_deg if is_mand else -new_deg, 1)
 
-            # Maintain strict T-junction: re-anchor H start onto smoothed W0 midpoint.
+            # Maintain strict T-junction: re-anchor H start onto smoothed W0 midpoint AND align
+            # H's apical ray perpendicular to smoothed W0 so width and height never go skew.
             w_mid = (0.5 * (new_p0[0] + new_p1[0]), 0.5 * (new_p0[1] + new_p1[1]))
             h_rec = records.get("available_bone_height")
             if h_rec is not None and h_rec.is_available and h_rec.end_world_mm is not None:
@@ -2735,6 +3005,58 @@ class MeasurementEngine:
                 h_start_w = _uv_to_world(P, N, B, w_mid[0], w_mid[1])
                 h_rec.start_uv_mm = w_mid
                 h_rec.start_world_mm = h_start_w
+                # Re-trace apical H along smoothed normal when mask_cs exists so H ⟂ W0 strictly.
+                new_end_uv = None
+                if mask_cs is not None and u_coords is not None and v_coords is not None and np.any(mask_cs):
+                    use_5_h = self.is_dental_segmentator_5class or infer_mask_is_5class(mask_cs)
+                    jaw_id_h = get_jaw_label_id(is_mand, is_5class=use_5_h)
+                    t_id_h = None
+                    if meas is not None and getattr(meas, "tooth_fdi", None):
+                        t_lbl_h = get_tooth_label(str(meas.tooth_fdi))
+                        if t_lbl_h is not None:
+                            t_id_h = int(t_lbl_h.id)
+                    same_t_h = _same_jaw_tooth_mask(mask_cs, is_mand, use_5_h, tooth_id=t_id_h)
+                    raw_env_h = _ridge_envelope_mask(mask_cs, u_coords, v_coords, jaw_id_h, t_id_h, is_mand, tooth_mask=same_t_h)
+                    r_mask_h = _extract_primary_ridge_component(raw_env_h, u_coords, v_coords)
+                    if r_mask_h.any():
+                        d_ap_sm = (c_bv, -c_bu) if is_mand else (-c_bv, c_bu)
+                        canal_2d_h = None
+                        if is_mand:
+                            c_ids = [DENTALSEGMENTATOR_CANAL_ID] if use_5_h else list(CANAL_IDS)
+                            if meas is not None and getattr(meas, "tooth_fdi", None):
+                                ipsi = get_ipsilateral_canal_ids(meas.tooth_fdi, is_5class=use_5_h)
+                                if ipsi:
+                                    c_ids = ipsi
+                            u_ok_h = (np.abs(u_coords) <= 11.0) | (np.abs(u_coords - w_mid[0]) <= 8.5)
+                            v_ok_h = v_coords <= w_mid[1] + 1.0
+                            c_loc = np.isin(mask_cs, c_ids) & np.outer(v_ok_h, u_ok_h)
+                            if c_loc.any():
+                                canal_2d_h = c_loc
+                        elif not use_5_h:
+                            s_ids = (
+                                get_ipsilateral_sinus_ids(meas.tooth_fdi, is_5class=False)
+                                if (meas is not None and getattr(meas, "tooth_fdi", None))
+                                else None
+                            )
+                            if s_ids:
+                                u_ok_h = (np.abs(u_coords) <= 11.0) | (np.abs(u_coords - w_mid[0]) <= 8.5)
+                                v_ok_h = v_coords >= w_mid[1] - 1.0
+                                s_loc = np.isin(mask_cs, s_ids) & np.outer(v_ok_h, u_ok_h)
+                                if s_loc.any():
+                                    canal_2d_h = s_loc
+                        sm_h, _, sm_basal, _, _ = self._compute_bone_height_in_cs(
+                            u_coords, v_coords, mask_cs, P, N, B, is_mand, jaw_id_h, None,
+                            ridge_mask=r_mask_h, crest_uv=w_mid, d_apical=d_ap_sm,
+                            local_vital_mask_2d=canal_2d_h, img_cs=getattr(cs, "img_cs", None),
+                        )
+                        if sm_h is not None and sm_basal is not None:
+                            new_end_uv = sm_basal
+                if new_end_uv is not None:
+                    h_end_w = _uv_to_world(P, N, B, new_end_uv[0], new_end_uv[1])
+                    cs.basal_uv = new_end_uv
+                    cs.basal_v = new_end_uv[1]
+                    h_rec.end_uv_mm = new_end_uv
+                    h_rec.end_world_mm = h_end_w
                 h_val = round(float(np.linalg.norm(np.asarray(h_rec.end_world_mm) - np.asarray(h_start_w))), 2)
                 h_rec.value_mm = h_val
                 if meas is not None:

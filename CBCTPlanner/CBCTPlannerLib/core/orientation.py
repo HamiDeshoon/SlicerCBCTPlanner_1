@@ -82,10 +82,10 @@ class OrientationReport:
 def apply_ops(arr_zyx: np.ndarray, ops: ArrayOps) -> np.ndarray:
     """Apply the same permutation/flips used for an image to a label array."""
     data = np.asarray(arr_zyx)
-    out = np.transpose(data, ops.perm)
-    for axis, should_flip in enumerate(ops.flip):
-        if should_flip:
-            out = np.flip(out, axis=axis)
+    out = data if ops.perm == (0, 1, 2) else np.transpose(data, ops.perm)
+    slices = tuple(slice(None, None, -1) if should_flip else slice(None) for should_flip in ops.flip)
+    if any(ops.flip):
+        out = out[slices]
     return np.ascontiguousarray(out)
 
 
@@ -181,6 +181,8 @@ def resample_to_ras(
     matrix = np.asarray(affine, dtype=np.float64)
     if image.ndim != 3 or matrix.shape != (4, 4):
         raise ValueError("image_zyx must be 3D and affine must be 4x4")
+    if _obliquity_deg(matrix) <= 1e-3:
+        return canonicalize_to_ras(image, matrix, max_oblique_deg=0.0)
     try:
         from scipy import ndimage  # type: ignore
     except ImportError as exc:  # pragma: no cover - SciPy ships with Slicer
@@ -210,18 +212,23 @@ def resample_to_ras(
     new_affine[:3, :3] = np.diag(spacing)
     new_affine[:3, 3] = origin
 
-    k_idx, j_idx, i_idx = np.indices(output_shape, dtype=np.float64)
-    world_out = np.stack([i_idx, j_idx, k_idx], axis=-1)
-    world_flat = world_out.reshape(-1, 3) * spacing[None, :] + origin[None, :]
-    inv = np.linalg.inv(matrix)
-    vox = (inv[:3, :3] @ world_flat.T).T + inv[:3, 3][None, :]
-    coords = np.vstack([vox[:, 2], vox[:, 1], vox[:, 0]])
+    # C-level affine_transform maps output (z, y, x) -> input (z, y, x) without full coordinate grids.
+    a_ijk = np.linalg.inv(matrix) @ new_affine
+    mat_zyx = a_ijk[np.ix_([2, 1, 0], [2, 1, 0])]
+    off_zyx = a_ijk[[2, 1, 0], 3]
     background = _background_value(image.dtype, cval)
-    sampled = ndimage.map_coordinates(
-        image, coords, order=order, mode="constant", cval=background, prefilter=order > 1
+    sampled = ndimage.affine_transform(
+        image,
+        mat_zyx,
+        offset=off_zyx,
+        output_shape=output_shape,
+        order=order,
+        mode="constant",
+        cval=background,
+        prefilter=order > 1,
     )
     return CanonResult(
-        image_zyx=np.asarray(sampled).reshape(output_shape).astype(image.dtype),
+        image_zyx=np.asarray(sampled).astype(image.dtype, copy=False),
         affine=new_affine,
         ops=ArrayOps(perm=(0, 1, 2), flip=(False, False, False)),
         max_obliquity_deg=_obliquity_deg(matrix),
@@ -240,23 +247,32 @@ def resample_mask_to_grid(
     source = np.asarray(source_affine, dtype=np.float64)
     target = np.asarray(target_affine, dtype=np.float64)
     shape = tuple(int(v) for v in target_shape_zyx)
-    k_idx, j_idx, i_idx = np.indices(shape, dtype=np.float64)
-    world = np.stack([i_idx, j_idx, k_idx], axis=-1).reshape(-1, 3)
-    world = (target[:3, :3] @ world.T).T + target[:3, 3][None, :]
-    inv = np.linalg.inv(source)
-    vox = (inv[:3, :3] @ world.T).T + inv[:3, 3][None, :]
+    if mask.shape == shape and np.allclose(source, target, atol=1e-5):
+        return np.ascontiguousarray(mask)
+    if _obliquity_deg(source) <= 1e-3 and _obliquity_deg(target) <= 1e-3:
+        ops = _axis_permutation_and_flips(source)
+        cand_shape = tuple(int(mask.shape[ops.perm[a]]) for a in range(3))
+        if cand_shape == shape:
+            cand_aff = _canonical_affine_with_shape(source, ops, mask.shape)
+            if np.allclose(cand_aff, target, atol=1e-4):
+                return apply_ops(mask, ops)
     try:
         from scipy import ndimage  # type: ignore
 
-        sampled = ndimage.map_coordinates(
+        a_ijk = np.linalg.inv(source) @ target
+        mat_zyx = a_ijk[np.ix_([2, 1, 0], [2, 1, 0])]
+        off_zyx = a_ijk[[2, 1, 0], 3]
+        sampled = ndimage.affine_transform(
             mask,
-            np.vstack([vox[:, 2], vox[:, 1], vox[:, 0]]),
+            mat_zyx,
+            offset=off_zyx,
+            output_shape=shape,
             order=0,
             mode="constant",
             cval=0,
             prefilter=False,
         )
-        return np.asarray(sampled).reshape(shape).astype(mask.dtype)
+        return np.asarray(sampled).astype(mask.dtype, copy=False)
     except ImportError:  # pragma: no cover
         return np.zeros(shape, dtype=mask.dtype)
 
@@ -305,10 +321,21 @@ def flip_array_only(
     else:
         axis_list = tuple(str(a).upper().strip() for a in axes)
 
-    out = np.asarray(image_zyx)
     matrix = np.asarray(affine, dtype=np.float64)
+    flip_flags = [False, False, False]
+    axis_map = {"LR": 0, "AP": 1, "SI": 2}
     for ax in axis_list:
-        out = flip_axis(out, matrix, ax)[0]
+        if ax not in axis_map:
+            raise ValueError(f"axis must be 'LR', 'AP' or 'SI', got {ax!r}")
+        target = axis_map[ax]
+        ijk_axis = int(np.argmax(np.abs(matrix[target, :3])))
+        arr_axis = 2 - ijk_axis
+        flip_flags[arr_axis] = not flip_flags[arr_axis]
+
+    out = np.asarray(image_zyx)
+    if any(flip_flags):
+        slices = tuple(slice(None, None, -1) if f else slice(None) for f in flip_flags)
+        out = out[slices]
     return np.ascontiguousarray(out)
 
 
@@ -426,8 +453,67 @@ def verify_orientation(
         upper_jaw = (get_jaw_label_id(False, is_5class=False),)
         lower_jaw = (get_jaw_label_id(True, is_5class=False),)
 
-    lower_z = _mask_centroid(mask, affine, lower_teeth + lower_jaw)
-    upper_z = _mask_centroid(mask, affine, upper_teeth + upper_jaw)
+    # Single-pass extraction: stride-sample large CT volumes first, falling back to full scan if sparse.
+    step = 2 if mask.size >= 500_000 else 1
+    sub = mask[::step, ::step, ::step] if step > 1 else mask
+    kz, ky, kx = np.nonzero(sub)
+    if step > 1 and kz.size < 64:
+        step = 1
+        kz, ky, kx = np.nonzero(mask)
+        vals = mask[kz, ky, kx]
+    else:
+        vals = sub[kz, ky, kx]
+
+    matrix = np.asarray(affine, dtype=np.float64)
+    if vals.size == 0:
+        report.notes.append("S-I: missing upper or lower jaw/teeth labels; cannot determine.")
+        report.notes.append("A-P: no tooth labels present; cannot determine.")
+        report.notes.append(
+            "L-R: 5-class labels carry no FDI side information; cannot determine."
+            if is_5class
+            else "L-R: FDI-labelled teeth missing; cannot determine."
+        )
+        return report
+
+    # Bitmask LUT over positive integer labels avoids 5x full-volume `np.isin` scans.
+    lut_max = max(
+        int(vals.max()),
+        *(upper_teeth + lower_teeth + upper_jaw + lower_jaw),
+        *(RIGHT_SIDE_TEETH_IDS + LEFT_SIDE_TEETH_IDS),
+    )
+    if int(vals.min()) >= 0 and lut_max <= 4096:
+        lut = np.zeros(lut_max + 1, dtype=np.uint8)
+        lut[list(lower_teeth + lower_jaw)] |= 1
+        lut[list(upper_teeth + upper_jaw)] |= 2
+        lut[list(upper_teeth + lower_teeth)] |= 4
+        if not is_5class:
+            lut[list(RIGHT_SIDE_TEETH_IDS)] |= 8
+            lut[list(LEFT_SIDE_TEETH_IDS)] |= 16
+        flags = lut[vals.astype(np.int64, copy=False)]
+        m_low = (flags & 1) != 0
+        m_up = (flags & 2) != 0
+        m_teeth = (flags & 4) != 0
+        m_right = (flags & 8) != 0
+        m_left = (flags & 16) != 0
+    else:
+        m_low = np.isin(vals, lower_teeth + lower_jaw)
+        m_up = np.isin(vals, upper_teeth + upper_jaw)
+        m_teeth = np.isin(vals, upper_teeth + lower_teeth)
+        m_right = np.isin(vals, tuple(RIGHT_SIDE_TEETH_IDS)) if not is_5class else np.zeros(vals.shape, dtype=bool)
+        m_left = np.isin(vals, tuple(LEFT_SIDE_TEETH_IDS)) if not is_5class else np.zeros(vals.shape, dtype=bool)
+
+    def _subset_centroid(sel: np.ndarray) -> Optional[np.ndarray]:
+        if not np.any(sel):
+            return None
+        scale = float(step)
+        mean = np.array(
+            [kx[sel].mean() * scale, ky[sel].mean() * scale, kz[sel].mean() * scale, 1.0],
+            dtype=np.float64,
+        )
+        return (matrix @ mean)[:3]
+
+    lower_z = _subset_centroid(m_low)
+    upper_z = _subset_centroid(m_up)
     if lower_z is not None and upper_z is not None:
         report.si_ok = bool(lower_z[2] < upper_z[2])
         if not report.si_ok:
@@ -435,11 +521,16 @@ def verify_orientation(
     else:
         report.notes.append("S-I: missing upper or lower jaw/teeth labels; cannot determine.")
 
-    cloud = _tooth_cloud(mask, affine, upper_teeth + lower_teeth)
-    if len(cloud) == 0:
+    if not np.any(m_teeth):
         report.notes.append("A-P: no tooth labels present; cannot determine.")
     else:
-        report.ap_ok = _ap_orientation(cloud[:, :2])
+        tx = kx[m_teeth].astype(np.float64) * float(step)
+        ty = ky[m_teeth].astype(np.float64) * float(step)
+        tz = kz[m_teeth].astype(np.float64) * float(step)
+        # Compute world XY directly from first 2 affine rows without full N x 4 intermediates.
+        wx = matrix[0, 0] * tx + matrix[0, 1] * ty + matrix[0, 2] * tz + matrix[0, 3]
+        wy = matrix[1, 0] * tx + matrix[1, 1] * ty + matrix[1, 2] * tz + matrix[1, 3]
+        report.ap_ok = _ap_orientation(np.column_stack([wx, wy]))
         if report.ap_ok is None:
             report.notes.append("A-P: tooth cloud too small or degenerate; cannot determine.")
         elif not report.ap_ok:
@@ -448,8 +539,8 @@ def verify_orientation(
     if is_5class:
         report.notes.append("L-R: 5-class labels carry no FDI side information; cannot determine.")
     else:
-        right = _mask_centroid(mask, affine, tuple(RIGHT_SIDE_TEETH_IDS))
-        left = _mask_centroid(mask, affine, tuple(LEFT_SIDE_TEETH_IDS))
+        right = _subset_centroid(m_right)
+        left = _subset_centroid(m_left)
         if right is not None and left is not None:
             report.lr_ok = bool(right[0] > left[0])
             if not report.lr_ok:

@@ -7,6 +7,7 @@ All optional dependencies (scipy, scikit-image) are loaded lazily on demand.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
@@ -547,11 +548,15 @@ class DentalArch:
         ordered_pts = [fdi_dict[fdi] for fdi in desired_order if fdi in fdi_dict]
         if len(ordered_pts) < 4:
             raise ValueError(f"Found only {len(ordered_pts)} teeth for {jaw_type} jaw; need at least 4.")
-        pruned = _prune_pathological_points(np.array(ordered_pts, dtype=np.float64))
+        ordered_arr, _, plane_params = align_arch_to_sagittal_plane(
+            np.array(ordered_pts, dtype=np.float64)
+        )
+        pruned = _prune_pathological_points(ordered_arr)
         if len(pruned) < 4:
             raise ValueError(
                 f"Only {len(pruned)} plausible teeth remain for {jaw_type} jaw; need at least 4."
             )
+        pruned, _, _ = align_arch_to_sagittal_plane(pruned, plane_params=plane_params)
         return cls(
             control_points=pruned,
             jaw_type=jaw_type,
@@ -723,6 +728,8 @@ def fit_dental_arch_from_points(
     elif (not ras_convention) and ordered[0, 0] > ordered[-1, 0]:
         ordered = ordered[::-1].copy()
 
+    ordered, _, plane_params = align_arch_to_sagittal_plane(ordered)
+
     # 4. Resample uniformly along arc length via cubic spline
     diffs = np.diff(ordered, axis=0)
     seg_d = np.linalg.norm(diffs, axis=1)
@@ -758,6 +765,8 @@ def fit_dental_arch_from_points(
     except ImportError:
         target_s = np.linspace(0.0, total_s, num_control_points)
         ctrl = np.column_stack([np.interp(target_s, cum_s, ordered[:, d]) for d in range(3)])
+
+    ctrl, _, _ = align_arch_to_sagittal_plane(ctrl, plane_params=plane_params)
 
     if ras_convention and ctrl[0, 0] < ctrl[-1, 0]:
         ctrl = ctrl[::-1].copy()
@@ -883,6 +892,58 @@ def compute_fdi_arc_positions_mm(
     return results
 
 
+def align_arch_to_sagittal_plane(
+    points_ras: np.ndarray,
+    *,
+    max_pitch_deg: float = 15.0,
+    plane_params: Optional[Tuple[float, float, float]] = None,
+) -> Tuple[np.ndarray, float, Tuple[float, float, float]]:
+    """Project points onto a roll-free sagittal-pitched plane z(y) = z0 + tan(pitch) * (y - y0)."""
+    pts = np.asarray(points_ras, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) == 0:
+        out_plane = plane_params if plane_params is not None else (0.0, 0.0, 0.0)
+        return (
+            pts.copy(),
+            float(out_plane[2]),
+            (float(out_plane[0]), float(out_plane[1]), float(out_plane[2])),
+        )
+
+    out = pts.copy()
+    if plane_params is not None:
+        y0, z0, pitch_deg = (
+            float(plane_params[0]),
+            float(plane_params[1]),
+            float(plane_params[2]),
+        )
+        slope = math.tan(math.radians(pitch_deg))
+        out[:, 2] = z0 + slope * (out[:, 1] - y0)
+        return out, pitch_deg, (y0, z0, pitch_deg)
+
+    y = pts[:, 1]
+    z = pts[:, 2]
+    y0 = float(np.median(y))
+    y_span = float(np.max(y) - np.min(y))
+    pitch_cap = max(0.0, float(max_pitch_deg))
+
+    slope = 0.0
+    if len(pts) >= 4 and y_span >= 8.0:
+        min_dy = max(4.0, 0.25 * y_span)
+        dy = y[None, :] - y[:, None]
+        dz = z[None, :] - z[:, None]
+        i_idx, j_idx = np.triu_indices(len(pts), k=1)
+        pair_dy = dy[i_idx, j_idx]
+        valid = np.abs(pair_dy) >= min_dy
+        if np.any(valid):
+            slopes = dz[i_idx, j_idx][valid] / pair_dy[valid]
+            slope = float(np.median(slopes))
+
+    pitch_deg = float(np.clip(math.degrees(math.atan(slope)), -pitch_cap, pitch_cap))
+    clamped_slope = math.tan(math.radians(pitch_deg))
+    z0 = float(np.median(z - clamped_slope * (y - y0)))
+    out[:, 2] = z0 + clamped_slope * (y - y0)
+    return out, pitch_deg, (y0, z0, pitch_deg)
+
+
 @dataclass
 class ArchFitResult:
     """Result of fitting a dental arch directly from a label mask."""
@@ -900,6 +961,7 @@ class ArchFitResult:
     raw_points_ras: Optional[np.ndarray] = None
     smoothing_mm: float = 0.0
     is_smoothed: bool = True
+    pitch_deg: float = 0.0
 
 
 def _polyline_arc_length(points: np.ndarray) -> float:
@@ -1331,7 +1393,10 @@ def fit_arch_from_label_mask(
             low_ctrl, _ = _spline_through_ordered(low_pts, n_sh, smoothing=0.05)
             up_ctrl, _ = _spline_through_ordered(up_pts, n_sh, smoothing=0.05)
             shared_raw = 0.5 * (low_ctrl + up_ctrl)
-            sh_ctrl, sh_dense = _spline_through_ordered(shared_raw, n_sh, smoothing=0.05)
+            shared_raw, sh_pitch_deg, sh_plane = align_arch_to_sagittal_plane(shared_raw)
+            sh_ctrl, sh_dense = _spline_through_ordered(shared_raw, n_sh, smoothing=0.25)
+            sh_ctrl, _, _ = align_arch_to_sagittal_plane(sh_ctrl, plane_params=sh_plane)
+            sh_dense, _, _ = align_arch_to_sagittal_plane(sh_dense, plane_params=sh_plane)
             if sh_ctrl[0, 0] < sh_ctrl[-1, 0]:
                 sh_ctrl = sh_ctrl[::-1].copy()
             return ArchFitResult(
@@ -1345,6 +1410,7 @@ def fit_arch_from_label_mask(
                 tooth_bearing_arc_mm=0.5 * (float(low_fit.tooth_bearing_arc_mm) + float(up_fit.tooth_bearing_arc_mm)),
                 end_extension_mm=float(end_extension_mm),
                 applied_extension_mm=min(float(low_fit.applied_extension_mm), float(up_fit.applied_extension_mm)),
+                pitch_deg=float(sh_pitch_deg),
             )
         if low_fit is not None and (up_fit is None or low_fit.accepted):
             return low_fit
@@ -1363,7 +1429,10 @@ def fit_arch_from_label_mask(
         )
         if b_binned is None or len(b_binned) < 4:
             return None
-        b_ctrl, b_dense = _spline_through_ordered(b_binned, num_control_points, smoothing=0.20)
+        b_binned, b_pitch_deg, b_plane = align_arch_to_sagittal_plane(b_binned)
+        b_ctrl, b_dense = _spline_through_ordered(b_binned, num_control_points, smoothing=0.30)
+        b_ctrl, _, _ = align_arch_to_sagittal_plane(b_ctrl, plane_params=b_plane)
+        b_dense, _, _ = align_arch_to_sagittal_plane(b_dense, plane_params=b_plane)
         b_arc = _polyline_arc_length(b_dense)
         b_res = _rms_to_polyline(b_binned, b_dense)
         inv_aff = np.linalg.inv(matrix)
@@ -1374,6 +1443,8 @@ def fit_arch_from_label_mask(
         b_dense = _extend_arch_endpoints(
             b_dense, float(end_extension_mm), inverse_affine=inv_aff, shape_zyx=mask.shape
         )
+        b_ctrl, _, _ = align_arch_to_sagittal_plane(b_ctrl, plane_params=b_plane)
+        b_dense, _, _ = align_arch_to_sagittal_plane(b_dense, plane_params=b_plane)
         b_ext = min(
             float(np.linalg.norm(b_ctrl[0] - b_base[0])),
             float(np.linalg.norm(b_ctrl[-1] - b_base[-1])),
@@ -1393,6 +1464,7 @@ def fit_arch_from_label_mask(
             tooth_bearing_arc_mm=float(b_arc),
             end_extension_mm=float(end_extension_mm),
             applied_extension_mm=float(b_ext),
+            pitch_deg=float(b_pitch_deg),
         )
 
     z_idx, y_idx, x_idx = np.where(np.isin(mask, labels))
@@ -1423,7 +1495,14 @@ def fit_arch_from_label_mask(
         method = "fdi_centroids"
         if ordered[0, 0] < ordered[-1, 0]:
             ordered = ordered[::-1].copy()
-        ctrl, dense = _spline_through_ordered(ordered, num_control_points, smoothing=0.15)
+        ordered, pitch_deg, plane_params = align_arch_to_sagittal_plane(ordered)
+        pruned_xy = _prune_pathological_points(ordered, max_deviation_mm=8.0)
+        if len(pruned_xy) >= 4:
+            ordered = pruned_xy
+        ordered, _, _ = align_arch_to_sagittal_plane(ordered, plane_params=plane_params)
+        ctrl, dense = _spline_through_ordered(ordered, num_control_points, smoothing=0.45)
+        ctrl, _, _ = align_arch_to_sagittal_plane(ctrl, plane_params=plane_params)
+        dense, _, _ = align_arch_to_sagittal_plane(dense, plane_params=plane_params)
         residual = _rms_to_polyline(ordered, dense)
         n_used = len(ordered)
     else:
@@ -1455,8 +1534,12 @@ def fit_arch_from_label_mask(
             return None
         if ordered[0, 0] < ordered[-1, 0]:
             ordered = ordered[::-1].copy()
-        ctrl, dense = _spline_through_ordered(ordered, num_control_points, smoothing=0.12)
-        residual = _rms_to_polyline(crown, dense)
+        ordered, pitch_deg, plane_params = align_arch_to_sagittal_plane(ordered)
+        ctrl, dense = _spline_through_ordered(ordered, num_control_points, smoothing=0.25)
+        ctrl, _, _ = align_arch_to_sagittal_plane(ctrl, plane_params=plane_params)
+        dense, _, _ = align_arch_to_sagittal_plane(dense, plane_params=plane_params)
+        crown_planar, _, _ = align_arch_to_sagittal_plane(crown, plane_params=plane_params)
+        residual = _rms_to_polyline(crown_planar, dense)
         n_used = len(crown)
 
     tooth_bearing_arc = _polyline_arc_length(dense)
@@ -1475,6 +1558,8 @@ def fit_arch_from_label_mask(
         num_control_points=num_control_points,
         is_5class=is_5class,
     )
+    ctrl, _, _ = align_arch_to_sagittal_plane(ctrl, plane_params=plane_params)
+    dense, _, _ = align_arch_to_sagittal_plane(dense, plane_params=plane_params)
     arc_length = _polyline_arc_length(dense)
 
     reason = ""
@@ -1509,5 +1594,6 @@ def fit_arch_from_label_mask(
         tooth_bearing_arc_mm=float(tooth_bearing_arc),
         end_extension_mm=float(end_extension_mm),
         applied_extension_mm=float(applied_extension),
+        pitch_deg=float(pitch_deg),
     )
     return result
