@@ -46,12 +46,10 @@ class PanoramicCurveLogic:
     """Handles dental arch curve visualization, bounded frame caching, and in-process panoramic CPR."""
 
     MAX_CPR_FRAME_SPACING_MM: float = 1.5
-    _SLAB_BASIS_CACHE: BoundedLRUCache[
-        Tuple[Any, ...], Tuple[np.ndarray, np.ndarray, np.ndarray, int]
-    ] = BoundedLRUCache(max_entries=16)
-    _SLAB_PROJECTION_CACHE: BoundedLRUCache[Tuple[Any, ...], np.ndarray] = BoundedLRUCache(
-        max_entries=8
+    _SLAB_BASIS_CACHE: BoundedLRUCache[Tuple[Any, ...], Tuple[np.ndarray, np.ndarray, np.ndarray, int]] = (
+        BoundedLRUCache(max_entries=16)
     )
+    _SLAB_PROJECTION_CACHE: BoundedLRUCache[Tuple[Any, ...], np.ndarray] = BoundedLRUCache(max_entries=8)
 
     @classmethod
     def clear_panoramic_caches(cls) -> None:

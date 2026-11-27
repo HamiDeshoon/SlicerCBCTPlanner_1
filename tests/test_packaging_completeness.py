@@ -75,9 +75,7 @@ class PackagingCompletenessTests(unittest.TestCase):
         self.assertEqual(extra_scripts, [], f"Missing files listed in CMake: {extra_scripts}")
 
         disk_resources = sorted(
-            p.relative_to(MODULE_DIR).as_posix()
-            for p in (MODULE_DIR / "Resources").rglob("*")
-            if p.is_file()
+            p.relative_to(MODULE_DIR).as_posix() for p in (MODULE_DIR / "Resources").rglob("*") if p.is_file()
         )
         missing_res = sorted(set(disk_resources) - set(resources))
         extra_res = sorted(set(resources) - set(disk_resources))
@@ -104,9 +102,7 @@ class PackagingCompletenessTests(unittest.TestCase):
                 f"expected_stage = os.path.normcase(os.path.realpath(r'{stage}')); "
                 "import CBCTPlannerLib, CBCTPlanner, cli_batch; "
                 "assert os.path.normcase(os.path.realpath(CBCTPlannerLib.__file__)).startswith(expected_stage), CBCTPlannerLib.__file__; "
-                "assert CBCTPlannerLib.SOFTWARE_VERSION == "
-                + repr(expected_version)
-                + "; "
+                "assert CBCTPlannerLib.SOFTWARE_VERSION == " + repr(expected_version) + "; "
                 "from CBCTPlannerLib.ImplantPlanner import ImplantPlannerLogic; "
                 "from CBCTPlannerLib.Phase7Tools import SurgicalGuideGenerator, ProstheticPlanner; "
                 "from CBCTPlannerLib.Utils import iconPath; "
@@ -152,11 +148,7 @@ class PackagingCompletenessTests(unittest.TestCase):
                 "[importlib.import_module(m) for m in modules]; "
                 "print('INSTALLED_OK', len(modules))"
             )
-            env = {
-                k: v
-                for k, v in os.environ.items()
-                if k not in ("PYTHONPATH", "PYTHONHOME")
-            }
+            env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
             if (Path(sys.base_prefix) / "Lib" / "encodings").exists():
                 env["PYTHONHOME"] = str(Path(sys.base_prefix))
             env["PYTHONPATH"] = str(stage)

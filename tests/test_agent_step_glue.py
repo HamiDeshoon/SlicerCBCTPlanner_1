@@ -384,12 +384,13 @@ class TestAgentContextCollection(unittest.TestCase):
         def _boom(*_args, **_kwargs):
             raise RuntimeError("engine exploded")
 
-        widget.logic = types.SimpleNamespace(analyze_selected_teeth=_boom, get_occlusal_normal=lambda: [0, 0, 1])
+        widget.logic = types.SimpleNamespace(
+            analyze_selected_teeth=_boom, get_occlusal_normal=lambda: [0, 0, 1]
+        )
         widget.selectedTeeth = {46}
         context = widget._collectAgentContext()
         self.assertEqual(context["sites"], [])
         self.assertEqual(context["selected_teeth"], [46])
-
 
     def test_apply_agent_measurement_edit_updates_plan_and_overrides(self) -> None:
         w = _widget()
@@ -404,12 +405,13 @@ class TestAgentContextCollection(unittest.TestCase):
         self.assertEqual(w.treatmentPlanByFDI[46]["w_crest_mm"], "7.4")
         self.assertAlmostEqual(w._measurementOverridesByFDI[46]["h_mm"], 12.5)
 
-
     def test_build_pre_print_review_rows_collects_discrepancies_and_flags(self) -> None:
         w = _widget()
         w._measurementOverridesByFDI = {}
         w.annotationStore = AnnotationStore()
-        w.annotationStore.add("Abnormal finding - manual clinician review required", fdi=46, kind="flag", severity="warning")
+        w.annotationStore.add(
+            "Abnormal finding - manual clinician review required", fdi=46, kind="flag", severity="warning"
+        )
         w.treatmentPlanByFDI = {
             45: {"bone_height_mm": "15.0", "w_crest_mm": "7.5"},
             46: {"bone_height_mm": "10.0", "w_crest_mm": "4.0"},

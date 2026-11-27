@@ -76,17 +76,23 @@ REAL_IMAGE = Path("C:/Users/hamid/Downloads/inspect_ToothFairy3S_0021/ToothFairy
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _nifti_header(path: Path) -> tuple[tuple[int, ...], np.ndarray, int]:
-    """Read just the NIfTI-1 header: shape (x, y, z), RAS affine, datatype code."""
-    with gzip.open(str(path), "rb") as fh:
-        header = fh.read(352)
+def _parse_nifti_header(header: bytes) -> tuple[tuple[int, ...], np.ndarray, int, int]:
     dim = struct.unpack("<8h", header[40:56])
     ndim = int(dim[0])
     shape = tuple(int(v) for v in dim[1 : 1 + ndim])
     datatype = int(struct.unpack("<h", header[70:72])[0])
+    vox_offset = int(round(struct.unpack("<f", header[108:112])[0]))
     srow = [struct.unpack("<4f", header[offset : offset + 16]) for offset in (280, 296, 312)]
     affine = np.eye(4, dtype=np.float64)
     affine[:3, :] = np.asarray(srow, dtype=np.float64)
+    return shape, affine, datatype, vox_offset
+
+
+def _nifti_header(path: Path) -> tuple[tuple[int, ...], np.ndarray, int]:
+    """Read just the NIfTI-1 header: shape (x, y, z), RAS affine, datatype code."""
+    with gzip.open(str(path), "rb") as fh:
+        header = fh.read(352)
+    shape, affine, datatype, _ = _parse_nifti_header(header)
     return shape, affine, datatype
 
 
@@ -94,15 +100,7 @@ def _read_nifti_gz(path: Path) -> tuple[np.ndarray, np.ndarray]:
     """Minimal dependency-free NIfTI-1 reader for the labels fixture -> (Z, Y, X), affine."""
     with gzip.open(str(path), "rb") as fh:
         blob = fh.read()
-    header = blob[:352]
-    dim = struct.unpack("<8h", header[40:56])
-    ndim = int(dim[0])
-    shape_xyz = tuple(int(v) for v in dim[1 : 1 + ndim])
-    datatype = int(struct.unpack("<h", header[70:72])[0])
-    vox_offset = int(round(struct.unpack("<f", header[108:112])[0]))
-    srow = [struct.unpack("<4f", header[offset : offset + 16]) for offset in (280, 296, 312)]
-    affine = np.eye(4, dtype=np.float64)
-    affine[:3, :] = np.asarray(srow, dtype=np.float64)
+    shape_xyz, affine, datatype, vox_offset = _parse_nifti_header(blob[:352])
     dtypes = {2: np.uint8, 4: np.int16, 8: np.int32, 16: np.float32, 64: np.float64, 512: np.uint16}
     data = np.frombuffer(blob[vox_offset:], dtype=dtypes[datatype], count=int(np.prod(shape_xyz))).reshape(
         shape_xyz, order="F"

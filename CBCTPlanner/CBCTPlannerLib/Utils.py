@@ -18,6 +18,7 @@ except ImportError:
 K = TypeVar("K")
 V = TypeVar("V")
 
+
 def _load_software_version() -> str:
     version_path = Path(__file__).resolve().parent.parent / "Resources" / "VERSION"
     if not version_path.is_file():

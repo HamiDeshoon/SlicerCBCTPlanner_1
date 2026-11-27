@@ -20,13 +20,12 @@ Provides:
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
-from .core.labels import is_mandibular_fdi
 
 try:
     import slicer  # type: ignore
@@ -37,6 +36,7 @@ from .AdvancedTools import (
     compute_angle_between_three_points_deg,
     detect_automated_dental_tools_modules,
 )
+from .adt.geometry import extract_isosurface_from_label, mesh_volume_and_area
 from .CanalTracer import CanalTracerLogic
 from .CheckpointInference import CheckpointInferenceEngine, CheckpointSpec
 from .ImplantPlanner import ImplantPlannerLogic, PlacedImplant
@@ -44,7 +44,18 @@ from .PanoramicCurveLogic import PanoramicCurveLogic
 from .Utils import CLINICAL_DISCLAIMER_TEXT, SOFTWARE_VERSION
 from .core import ensure_optional_package
 from .core.arch_detector import DentalArch, fit_dental_arch_from_points
-from .core.labels import MANDIBULAR_TEETH_IDS, MAXILLARY_TEETH_IDS
+from .core.insertion import compute_blocked_surface
+from .core.labels import (
+    DENTALSEGMENTATOR_LOWER_TEETH_ID,
+    DENTALSEGMENTATOR_MANDIBLE_ID,
+    DENTALSEGMENTATOR_MAXILLA_ID,
+    DENTALSEGMENTATOR_UPPER_TEETH_ID,
+    LOWER_JAW_ID,
+    MANDIBULAR_TEETH_IDS,
+    MAXILLARY_TEETH_IDS,
+    UPPER_JAW_ID,
+    is_mandibular_fdi,
+)
 from .core.measurements import MeasurementEngine
 from .core.volume_loader import CBCTVolume
 
@@ -74,6 +85,59 @@ class GuideSleeveSpec:
     outer_diameter_mm: float
     height_mm: float
     offset_above_crest_mm: float
+    pocket_diameter_mm: Optional[float] = None
+    pocket_height_mm: Optional[float] = None
+    sleeve_kind: str = "integral_tube"
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class GuideBuildReport:
+    body_mode: str  # "analytic" | "intaglio"
+    is_edge_manifold: bool
+    volume_mm3: float
+    island_count: int
+    sleeve_channels_open: bool
+    # One shared draw axis for the whole guide: all sleeves must seat together, so the
+    # undercut verdict is a guide-level property, not a per-implant one.
+    seating_axis_ras: List[float] = field(default_factory=list)
+    undercut_blocked_fraction: Optional[float] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+def check_edge_manifold(faces: np.ndarray) -> bool:
+    """True when every undirected triangle edge is shared by exactly 2 faces (closed 2-manifold)."""
+    f = np.asarray(faces, dtype=np.int64)
+    if f.ndim != 2 or f.shape[1] != 3 or len(f) < 4:
+        return False
+    e0 = np.sort(f[:, [0, 1]], axis=1)
+    e1 = np.sort(f[:, [1, 2]], axis=1)
+    e2 = np.sort(f[:, [2, 0]], axis=1)
+    edges = np.vstack([e0, e1, e2])
+    _uniq, counts = np.unique(edges, axis=0, return_counts=True)
+    return bool(counts.size > 0 and np.all(counts == 2))
+
+
+def _smooth_mesh_vertices(
+    verts: np.ndarray, faces: np.ndarray, *, n_iters: int = 2, lam: float = 0.25
+) -> np.ndarray:
+    """Pure-NumPy vectorized Laplacian vertex smoothing preserving mesh topology."""
+    v = np.asarray(verts, dtype=np.float64).copy()
+    f = np.asarray(faces, dtype=np.int64)
+    n_v = len(v)
+    if n_v < 4 or len(f) == 0 or n_iters <= 0:
+        return v
+    src = np.concatenate([f[:, 0], f[:, 1], f[:, 2], f[:, 1], f[:, 2], f[:, 0]])
+    dst = np.concatenate([f[:, 1], f[:, 2], f[:, 0], f[:, 0], f[:, 1], f[:, 2]])
+    deg = np.bincount(src, minlength=n_v).astype(np.float64)
+    valid = deg > 0
+    for _ in range(int(n_iters)):
+        acc = np.zeros_like(v)
+        np.add.at(acc, src, v[dst])
+        avg = np.zeros_like(v)
+        avg[valid] = acc[valid] / deg[valid][:, None]
+        v[valid] = (1.0 - float(lam)) * v[valid] + float(lam) * avg[valid]
+    return v
 
 
 class SurgicalGuideGenerator:
@@ -81,6 +145,7 @@ class SurgicalGuideGenerator:
 
     def __init__(self, presets_path: Optional[Path] = None) -> None:
         self.presets: Dict[str, PrinterPreset] = {}
+        self.last_build_report: Optional[GuideBuildReport] = None
         default_path = (
             Path(presets_path)
             if presets_path is not None
@@ -108,6 +173,64 @@ class SurgicalGuideGenerator:
             self.presets[p.id] = p
             out.append(p)
         return out
+
+    @staticmethod
+    def resolve_sleeve_dimensions(preset: PrinterPreset, implant: PlacedImplant) -> Dict[str, Any]:
+        """Resolve metal-ring pocket vs integral-tube sleeve geometry without inventing missing ring specs."""
+        ring_od = getattr(implant, "ring_outer_diameter_mm", None)
+        ring_id = getattr(implant, "ring_inner_diameter_mm", None)
+        ring_h = getattr(implant, "ring_height_mm", None)
+        slv_off = getattr(implant, "sleeve_offset_mm", None)
+        sleeved = bool(getattr(implant, "sleeved", True))
+
+        offset_mm = (
+            float(slv_off) if slv_off is not None else float(preset.default_sleeve_offset_above_crest_mm)
+        )
+        warnings: List[str] = []
+
+        has_ring = (
+            sleeved
+            and ring_od is not None
+            and ring_id is not None
+            and ring_h is not None
+            and float(ring_od) > 0.0
+            and float(ring_id) > 0.0
+            and float(ring_h) > 0.0
+        )
+        if has_ring:
+            rod = float(ring_od)
+            rid = float(ring_id)
+            rh = float(ring_h)
+            pocket_d = round(rod + 2.0 * float(preset.sleeve_clearance_mm), 3)
+            pocket_h = round(rh, 3)
+            inner_d = round(rid, 3)
+            outer_d = round(pocket_d + 2.0 * float(preset.sleeve_wall_thickness_mm), 3)
+            height_mm = pocket_h
+            sleeve_kind = "metal_ring"
+            if rod <= float(getattr(implant, "platform_diameter_mm", implant.diameter_mm)):
+                warnings.append("ring_outer_diameter_mm <= platform_diameter_mm")
+            if rid >= rod:
+                warnings.append("ring_inner_diameter_mm >= ring_outer_diameter_mm")
+            if float(preset.default_sleeve_height_mm) > rh:
+                warnings.append("preset sleeve_height exceeds ring_height_mm")
+        else:
+            pocket_d = None
+            pocket_h = None
+            inner_d = round(float(implant.diameter_mm + 2.0 * float(preset.sleeve_clearance_mm)), 3)
+            outer_d = round(float(inner_d + 2.0 * float(preset.sleeve_wall_thickness_mm)), 3)
+            height_mm = float(preset.default_sleeve_height_mm)
+            sleeve_kind = "integral_tube" if sleeved else "sleeveless"
+
+        return {
+            "inner_bore_diameter_mm": inner_d,
+            "outer_diameter_mm": outer_d,
+            "height_mm": height_mm,
+            "offset_above_crest_mm": offset_mm,
+            "pocket_diameter_mm": pocket_d,
+            "pocket_height_mm": pocket_h,
+            "sleeve_kind": sleeve_kind,
+            "warnings": warnings,
+        }
 
     @staticmethod
     def build_hollow_tube_mesh(
@@ -166,12 +289,265 @@ class SurgicalGuideGenerator:
 
         return np.array(verts, dtype=np.float64), np.array(faces, dtype=np.int64)
 
+    @staticmethod
+    def _supporting_mask(mask_zyx: np.ndarray, support_type: str) -> np.ndarray:
+        """Select supporting tooth/mucosa-jawbone voxels cleanly across 77-class, 5-class, or phantom masks."""
+        mask = np.asarray(mask_zyx)
+        uniq = {int(v) for v in np.unique(mask) if int(v) > 0}
+        if not uniq:
+            return np.zeros(mask.shape, dtype=bool)
+        is_5class = max(uniq) <= 5 and bool(
+            uniq
+            & {
+                DENTALSEGMENTATOR_MAXILLA_ID,
+                DENTALSEGMENTATOR_MANDIBLE_ID,
+                DENTALSEGMENTATOR_UPPER_TEETH_ID,
+                DENTALSEGMENTATOR_LOWER_TEETH_ID,
+            }
+        )
+        if support_type == "mucosa_supported":
+            cand_ids = (
+                [DENTALSEGMENTATOR_MAXILLA_ID, DENTALSEGMENTATOR_MANDIBLE_ID]
+                if is_5class
+                else [LOWER_JAW_ID, UPPER_JAW_ID]
+            )
+            sel = np.isin(mask, cand_ids)
+            return sel if np.any(sel) else (mask > 0)
+        if is_5class:
+            cand_ids = [
+                DENTALSEGMENTATOR_UPPER_TEETH_ID,
+                DENTALSEGMENTATOR_LOWER_TEETH_ID,
+                DENTALSEGMENTATOR_MAXILLA_ID,
+                DENTALSEGMENTATOR_MANDIBLE_ID,
+            ]
+        else:
+            cand_ids = list(MANDIBULAR_TEETH_IDS) + list(MAXILLARY_TEETH_IDS) + [LOWER_JAW_ID, UPPER_JAW_ID]
+        sel = np.isin(mask, cand_ids)
+        return sel if np.any(sel) else (mask > 0)
+
+    def _build_intaglio_body_and_sleeves(
+        self,
+        arch_pts: np.ndarray,
+        sleeve_specs: List[GuideSleeveSpec],
+        *,
+        support_type: str,
+        preset: PrinterPreset,
+        mask_zyx: np.ndarray,
+        affine: np.ndarray,
+        seating_axis_ras: Sequence[float],
+        smooth: bool,
+        arch_band_mm: float,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, GuideBuildReport]]:
+        """Build voxel-EDT anatomy-conforming guide shell with undercut blockout & fused open sleeve collars."""
+        mask = np.asarray(mask_zyx)
+        aff = np.asarray(affine, dtype=np.float64)
+        if mask.ndim != 3 or mask.size == 0:
+            return None
+        supp = self._supporting_mask(mask, support_type)
+        if not np.any(supp):
+            return None
+
+        ndimage = ensure_optional_package("scipy.ndimage", "scipy", "Intaglio surgical guide generation")
+        spatial = ensure_optional_package("scipy.spatial", "scipy", "Intaglio arch band crop")
+
+        u_seat = np.asarray(seating_axis_ras, dtype=np.float64).reshape(3)
+        u_seat /= max(1e-8, float(np.linalg.norm(u_seat)))
+
+        # Bounding box covering both arch trajectory and sleeve top/bottom endpoints
+        world_pts = [arch_pts]
+        for s in sleeve_specs:
+            world_pts.append(
+                np.asarray([s.sleeve_center_top_ras, s.sleeve_center_bottom_ras], dtype=np.float64)
+            )
+        all_w = np.vstack(world_pts)
+        pad_mm = float(arch_band_mm) + float(preset.guide_thickness_mm) + float(preset.tissue_offset_mm) + 6.0
+        w_min = all_w.min(axis=0) - pad_mm
+        w_max = all_w.max(axis=0) + pad_mm
+        corners_w = np.array(
+            [
+                [
+                    w_min[0] if (i & 1) == 0 else w_max[0],
+                    w_min[1] if (i & 2) == 0 else w_max[1],
+                    w_min[2] if (i & 4) == 0 else w_max[2],
+                    1.0,
+                ]
+                for i in range(8)
+            ],
+            dtype=np.float64,
+        )
+        inv_aff = np.linalg.inv(aff)
+        corners_ijk = (inv_aff @ corners_w.T).T[:, :3]
+
+        nz, ny, nx = mask.shape
+        x0 = max(0, int(math.floor(float(corners_ijk[:, 0].min()))))
+        x1 = min(nx, int(math.ceil(float(corners_ijk[:, 0].max()))) + 1)
+        y0 = max(0, int(math.floor(float(corners_ijk[:, 1].min()))))
+        y1 = min(ny, int(math.ceil(float(corners_ijk[:, 1].max()))) + 1)
+        z0 = max(0, int(math.floor(float(corners_ijk[:, 2].min()))))
+        z1 = min(nz, int(math.ceil(float(corners_ijk[:, 2].max()))) + 1)
+        if x1 - x0 < 3 or y1 - y0 < 3 or z1 - z0 < 3:
+            return None
+
+        sub_supp = supp[z0:z1, y0:y1, x0:x1]
+        if not np.any(sub_supp):
+            return None
+
+        crop_aff = aff.copy()
+        crop_aff[:3, 3] = (aff @ np.array([float(x0), float(y0), float(z0), 1.0], dtype=np.float64))[:3]
+
+        max_dim = max(sub_supp.shape)
+        stride = max(1, int(math.ceil(max_dim / 128.0)))
+        if stride > 1:
+            sub_supp = sub_supp[::stride, ::stride, ::stride]
+            crop_aff[:3, :3] = crop_aff[:3, :3] * float(stride)
+
+        snz, sny, snx = sub_supp.shape
+        # Voxel world coordinates in crop
+        zz, yy, xx = np.meshgrid(
+            np.arange(snz, dtype=np.float64),
+            np.arange(sny, dtype=np.float64),
+            np.arange(snx, dtype=np.float64),
+            indexing="ij",
+        )
+        vox_h = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel(), np.ones(xx.size, dtype=np.float64)])
+        pts_world = (crop_aff @ vox_h.T).T[:, :3]
+
+        # Restrict region within arch_band_mm of arch_pts + clip deep apical anatomy outside seating skirt
+        tree = spatial.cKDTree(arch_pts)
+        occ_idx = np.flatnonzero(sub_supp.ravel())
+        dists, _ = tree.query(pts_world[occ_idx])
+        in_band = occ_idx[dists <= float(arch_band_mm)]
+        if in_band.size < 4:
+            return None
+        region = np.zeros(xx.size, dtype=bool)
+        region[in_band] = True
+        region = region.reshape(sub_supp.shape)
+
+        # Undercut blockout along seating direction (-u_seat -> +u_seat) so shell seats from coronal side
+        # and does not wrap underneath a flat slab or deep mandibular base.
+        draw_ijk = np.linalg.inv(crop_aff[:3, :3]) @ (-u_seat)
+        draw_zyx = np.array([draw_ijk[2], draw_ijk[1], draw_ijk[0]], dtype=np.float64)
+        dom_ax = int(np.argmax(np.abs(draw_zyx)))
+        dom_sign = 1 if draw_zyx[dom_ax] >= 0.0 else -1
+        # Accumulate along coronal-to-apical axis (reverse of draw direction)
+        reg_work = np.flip(region, axis=dom_ax) if dom_sign > 0 else region
+        reg_blocked = np.maximum.accumulate(reg_work, axis=dom_ax)
+        reg_blocked = np.flip(reg_blocked, axis=dom_ax) if dom_sign > 0 else reg_blocked
+
+        sp_zyx = (
+            float(np.linalg.norm(crop_aff[:3, 2])),
+            float(np.linalg.norm(crop_aff[:3, 1])),
+            float(np.linalg.norm(crop_aff[:3, 0])),
+        )
+        min_sp = min(sp_zyx)
+        d_in = ndimage.distance_transform_edt(~reg_blocked, sampling=sp_zyx)
+        t_off = float(preset.tissue_offset_mm)
+        eff_lo = t_off if t_off >= min_sp - 1e-6 else (0.5 * min_sp if t_off > 0.0 else 0.0)
+        eff_hi = t_off + float(preset.guide_thickness_mm)
+        shell = (d_in > eff_lo - 1e-6) & (d_in <= eff_hi + 1e-6)
+
+        # Union solid outer sleeve collars and carve open drill pocket/bore through-holes
+        for s in sleeve_specs:
+            p_top = np.asarray(s.sleeve_center_top_ras, dtype=np.float64)
+            p_bot = np.asarray(s.sleeve_center_bottom_ras, dtype=np.float64)
+            u_ap = np.asarray(s.axis_apical_ras, dtype=np.float64)
+            u_ap /= max(1e-8, float(np.linalg.norm(u_ap)))
+            h_col = float(np.linalg.norm(p_bot - p_top))
+            # Extend solid collar downward toward crest to ensure fusion with intaglio shell
+            ext_bot = p_bot + u_ap * max(float(s.offset_above_crest_mm) + 1.0, 4.0)
+            rel_top = pts_world - p_top[None, :]
+            along = rel_top @ u_ap
+            rad_sq = np.sum((rel_top - along[:, None] * u_ap[None, :]) ** 2, axis=1)
+            r_out = 0.5 * float(s.outer_diameter_mm)
+            in_collar = (
+                (along >= 0.0) & (along <= float(np.linalg.norm(ext_bot - p_top))) & (rad_sq <= r_out**2)
+            ).reshape(shell.shape)
+            shell |= in_collar
+
+        channels_open = True
+        for s in sleeve_specs:
+            p_top = np.asarray(s.sleeve_center_top_ras, dtype=np.float64)
+            p_bot = np.asarray(s.sleeve_center_bottom_ras, dtype=np.float64)
+            u_ap = np.asarray(s.axis_apical_ras, dtype=np.float64)
+            u_ap /= max(1e-8, float(np.linalg.norm(u_ap)))
+            h_col = float(np.linalg.norm(p_bot - p_top))
+            bore_d = float(s.pocket_diameter_mm or s.inner_bore_diameter_mm)
+            r_bore = 0.5 * bore_d
+            rel_top = pts_world - p_top[None, :]
+            along = rel_top @ u_ap
+            rad_sq = np.sum((rel_top - along[:, None] * u_ap[None, :]) ** 2, axis=1)
+            bore_cyl = (
+                (along >= -2.0)
+                & (along <= h_col + float(s.offset_above_crest_mm) + float(preset.guide_thickness_mm) + 4.0)
+                & (rad_sq <= r_bore**2)
+            ).reshape(shell.shape)
+            shell &= ~bore_cyl
+            # Verify channel interior core is strictly empty along the full cropped shell
+            core_check = (
+                (along >= 0.0)
+                & (along <= h_col + float(s.offset_above_crest_mm) + float(preset.guide_thickness_mm))
+                & (rad_sq <= (0.45 * bore_d) ** 2)
+            ).reshape(shell.shape)
+            if np.any(shell & core_check):
+                channels_open = False
+
+        # Drop isolated islands < 50 mm^3 while preserving single main component on small test phantoms
+        labeled, n_comp = ndimage.label(shell)
+        if n_comp == 0:
+            return None
+        vox_vol_mm3 = float(sp_zyx[0] * sp_zyx[1] * sp_zyx[2])
+        counts = np.bincount(labeled.ravel())[1:]
+        vols = counts.astype(np.float64) * vox_vol_mm3
+        keep_ids = [idx + 1 for idx, vol in enumerate(vols) if vol >= 50.0]
+        if not keep_ids:
+            keep_ids = [int(np.argmax(counts)) + 1]
+        shell_clean = np.isin(labeled, keep_ids).astype(np.uint8)
+        island_count = len(keep_ids)
+
+        verts, faces = extract_isosurface_from_label(shell_clean, crop_aff, [1], max_target_faces=45000)
+        if len(verts) < 4 or len(faces) == 0:
+            return None
+        if smooth:
+            verts = _smooth_mesh_vertices(verts, faces, n_iters=2, lam=0.25)
+
+        is_mf = check_edge_manifold(faces)
+        vol_mm3, _area = mesh_volume_and_area(verts, faces)
+
+        warnings: List[str] = ["base derived from segmentation; verify fit"]
+        if t_off > 0.0 and t_off < min_sp:
+            warnings.append(
+                f"tissue_offset_mm ({t_off:.2f} mm) < voxel spacing ({min_sp:.2f} mm); quantized to 1 voxel step"
+            )
+        if not channels_open:
+            warnings.append("one or more sleeve channels were not completely open through guide body")
+        if not is_mf:
+            warnings.append("guide surface failed 2-manifold edge check")
+
+        report = GuideBuildReport(
+            body_mode="intaglio",
+            is_edge_manifold=is_mf,
+            volume_mm3=round(float(vol_mm3), 2),
+            island_count=island_count,
+            sleeve_channels_open=channels_open,
+            seating_axis_ras=[round(float(c), 6) for c in u_seat],
+            warnings=warnings,
+        )
+        return verts, faces, report
+
     def generate_surgical_guide(
         self,
         arch_points_ras: np.ndarray,
         implants: Sequence[PlacedImplant],
         support_type: str = "tooth_supported",  # "tooth_supported" or "mucosa_supported"
         preset_id: str = "sla_dlp_standard_50um",
+        *,
+        volume: Optional[CBCTVolume] = None,
+        mask_zyx: Optional[np.ndarray] = None,
+        affine: Optional[np.ndarray] = None,
+        seating_axis_ras: Optional[Sequence[float]] = None,
+        smooth: bool = True,
+        body_mode: str = "auto",
+        arch_band_mm: float = 10.0,
     ) -> Tuple[np.ndarray, np.ndarray, List[GuideSleeveSpec]]:
         """F14: Build combined surgical guide mesh `(vertices, faces)` + sleeve specifications."""
         preset = self.presets.get(preset_id) or PrinterPreset(
@@ -181,6 +557,83 @@ class SurgicalGuideGenerator:
         if len(arch_pts) < 4:
             raise ValueError("At least 4 arch curve points are required to generate a surgical guide.")
 
+        # Resolve sleeves upfront for both intaglio & analytic paths
+        sleeves: List[GuideSleeveSpec] = []
+        for imp in implants:
+            p_crest = np.asarray(imp.crest_point_ras, dtype=np.float64)
+            u_apical = np.asarray(imp.axis_apical_ras, dtype=np.float64)
+            u_apical /= max(1e-8, float(np.linalg.norm(u_apical)))
+
+            slv_dims = self.resolve_sleeve_dimensions(preset, imp)
+            offset_mm = float(slv_dims["offset_above_crest_mm"])
+            height_mm = float(slv_dims["height_mm"])
+            p_bottom = p_crest - u_apical * (offset_mm - 0.5 * height_mm)
+            p_top = p_bottom - u_apical * height_mm
+
+            inner_d = float(slv_dims["inner_bore_diameter_mm"])
+            outer_d = float(slv_dims["outer_diameter_mm"])
+            sleeves.append(
+                GuideSleeveSpec(
+                    fdi=imp.fdi,
+                    sleeve_center_top_ras=[round(float(c), 3) for c in p_top],
+                    sleeve_center_bottom_ras=[round(float(c), 3) for c in p_bottom],
+                    axis_apical_ras=[round(float(c), 6) for c in u_apical],
+                    inner_bore_diameter_mm=inner_d,
+                    outer_diameter_mm=outer_d,
+                    height_mm=height_mm,
+                    offset_above_crest_mm=offset_mm,
+                    pocket_diameter_mm=slv_dims["pocket_diameter_mm"],
+                    pocket_height_mm=slv_dims["pocket_height_mm"],
+                    sleeve_kind=str(slv_dims["sleeve_kind"]),
+                    warnings=list(slv_dims["warnings"]),
+                )
+            )
+
+        eff_affine = affine if affine is not None else getattr(volume, "affine", None)
+        mode_req = str(body_mode or "auto").lower()
+        fallback_warnings: List[str] = []
+
+        # Single shared draw direction for the whole guide (one seating motion for all sleeves).
+        if seating_axis_ras is not None:
+            seat_vec = np.asarray(seating_axis_ras, dtype=np.float64)
+        elif implants:
+            seat_vec = np.mean(np.asarray([p.axis_apical_ras for p in implants], dtype=np.float64), axis=0)
+        else:
+            seat_vec = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+
+        if mode_req in ("auto", "intaglio"):
+            if mask_zyx is not None and eff_affine is not None:
+                built = self._build_intaglio_body_and_sleeves(
+                    arch_pts,
+                    sleeves,
+                    support_type=support_type,
+                    preset=preset,
+                    mask_zyx=mask_zyx,
+                    affine=eff_affine,
+                    seating_axis_ras=seat_vec,
+                    smooth=smooth,
+                    arch_band_mm=arch_band_mm,
+                )
+                if built is not None:
+                    verts_i, faces_i, rep_i = built
+                    undercut_rep = compute_blocked_surface(
+                        mask_zyx,
+                        eff_affine,
+                        seat_vec,
+                        label_ids=None,
+                        roi_mm=40.0,
+                        coronal_band_mm=max(8.0, float(preset.guide_thickness_mm) + 6.0),
+                    )
+                    rep_i.undercut_blocked_fraction = float(undercut_rep.blocked_fraction)
+                    if not undercut_rep.is_insertable:
+                        rep_i.warnings.extend(undercut_rep.warnings)
+                    self.last_build_report = rep_i
+                    return verts_i, faces_i, sleeves
+                fallback_warnings.append("empty supporting anatomy mask; fell back to analytic arch tube")
+            elif mode_req == "intaglio":
+                fallback_warnings.append("mask_zyx or affine unavailable; fell back to analytic arch tube")
+
+        # Analytic tube body fallback
         all_verts: List[np.ndarray] = []
         all_faces: List[np.ndarray] = []
         vertex_offset = 0
@@ -191,7 +644,6 @@ class SurgicalGuideGenerator:
             all_faces.append(f + vertex_offset)
             vertex_offset += len(v)
 
-        # 1. Build arch-conforming guide body segments along the arch curve
         width_factor = 1.35 if support_type == "mucosa_supported" else 1.0
         arch_radius = (0.5 * 9.0 * width_factor) + preset.guide_thickness_mm + preset.tissue_offset_mm
         for k in range(len(arch_pts) - 1):
@@ -204,46 +656,29 @@ class SurgicalGuideGenerator:
             )
             _append_mesh(v_seg, f_seg)
 
-        # 2. Build hollow cylindrical guide sleeves at each placed implant site
-        sleeves: List[GuideSleeveSpec] = []
-        for imp in implants:
-            p_crest = np.asarray(imp.crest_point_ras, dtype=np.float64)
-            u_apical = np.asarray(imp.axis_apical_ras, dtype=np.float64)
-            u_apical /= max(1e-8, float(np.linalg.norm(u_apical)))
-
-            # Sleeve sits coronal to the crest (along -u_apical)
-            offset_mm = preset.default_sleeve_offset_above_crest_mm
-            height_mm = preset.default_sleeve_height_mm
-            p_bottom = p_crest - u_apical * (offset_mm - 0.5 * height_mm)
-            p_top = p_bottom - u_apical * height_mm
-
-            inner_d = round(float(imp.diameter_mm + 2.0 * preset.sleeve_clearance_mm), 3)
-            outer_d = round(float(inner_d + 2.0 * preset.sleeve_wall_thickness_mm), 3)
-
+        for s in sleeves:
+            tube_bore_d = float(s.pocket_diameter_mm or s.inner_bore_diameter_mm)
             v_slv, f_slv = self.build_hollow_tube_mesh(
-                p_top,
-                p_bottom,
-                inner_radius_mm=0.5 * inner_d,
-                outer_radius_mm=0.5 * outer_d,
+                s.sleeve_center_top_ras,
+                s.sleeve_center_bottom_ras,
+                inner_radius_mm=0.5 * tube_bore_d,
+                outer_radius_mm=0.5 * float(s.outer_diameter_mm),
                 n_sides=24,
             )
             _append_mesh(v_slv, f_slv)
 
-            sleeves.append(
-                GuideSleeveSpec(
-                    fdi=imp.fdi,
-                    sleeve_center_top_ras=[round(float(c), 3) for c in p_top],
-                    sleeve_center_bottom_ras=[round(float(c), 3) for c in p_bottom],
-                    axis_apical_ras=[round(float(c), 6) for c in u_apical],
-                    inner_bore_diameter_mm=inner_d,
-                    outer_diameter_mm=outer_d,
-                    height_mm=height_mm,
-                    offset_above_crest_mm=offset_mm,
-                )
-            )
-
         merged_v = np.vstack(all_verts) if all_verts else np.zeros((0, 3))
         merged_f = np.vstack(all_faces) if all_faces else np.zeros((0, 3), dtype=np.int64)
+        vol_a, _ = mesh_volume_and_area(merged_v, merged_f)
+        self.last_build_report = GuideBuildReport(
+            body_mode="analytic",
+            is_edge_manifold=check_edge_manifold(merged_f),
+            volume_mm3=round(float(vol_a), 2),
+            island_count=1 + len(sleeves),
+            sleeve_channels_open=True,
+            seating_axis_ras=[round(float(c), 6) for c in seat_vec],
+            warnings=fallback_warnings,
+        )
         return merged_v, merged_f, sleeves
 
     def export_surgical_guide_stl_and_json(
@@ -253,23 +688,41 @@ class SurgicalGuideGenerator:
         out_dir: Path,
         support_type: str = "tooth_supported",
         preset_id: str = "sla_dlp_standard_50um",
+        *,
+        volume: Optional[CBCTVolume] = None,
+        mask_zyx: Optional[np.ndarray] = None,
+        affine: Optional[np.ndarray] = None,
+        seating_axis_ras: Optional[Sequence[float]] = None,
+        smooth: bool = True,
+        body_mode: str = "auto",
     ) -> Tuple[Path, Path, List[GuideSleeveSpec]]:
         """F14: Export surgical guide `.stl` mesh and sleeve specification `.json`."""
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
         verts, faces, sleeves = self.generate_surgical_guide(
-            arch_points_ras, implants, support_type=support_type, preset_id=preset_id
+            arch_points_ras,
+            implants,
+            support_type=support_type,
+            preset_id=preset_id,
+            volume=volume,
+            mask_zyx=mask_zyx,
+            affine=affine,
+            seating_axis_ras=seating_axis_ras,
+            smooth=smooth,
+            body_mode=body_mode,
         )
         stl_path = out_path / f"Surgical_Guide_{support_type}_{preset_id}.stl"
         ImplantPlannerLogic.write_ascii_stl(verts, faces, stl_path, solid_name="SurgicalGuide")
 
         json_path = out_path / "surgical_guide_sleeves.json"
-        payload = {
+        payload: Dict[str, Any] = {
             "disclaimer": CLINICAL_DISCLAIMER_TEXT,
             "support_type": support_type,
             "printer_preset_id": preset_id,
             "sleeves": [asdict(s) for s in sleeves],
         }
+        if self.last_build_report is not None:
+            payload["guide_build"] = asdict(self.last_build_report)
         json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return stl_path, json_path, sleeves
 

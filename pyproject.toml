@@ -22,6 +22,9 @@ include = ["CBCTPlannerLib*"]
 version = {file = "CBCTPlanner/Resources/VERSION"}
 
 [tool.ruff]
+# Pinned so `ruff format --check` is deterministic across local runs and CI.
+# Must match the version installed in .github/workflows/ci.yml.
+required-version = "==0.17.6"
 target-version = "py39"
 line-length = 110
 include = ["CBCTPlanner/**/*.py", "tests/**/*.py"]

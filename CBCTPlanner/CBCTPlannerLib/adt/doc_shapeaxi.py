@@ -370,7 +370,11 @@ def run_doc_shapeaxi(
             ].astype(np.uint8)
             verts, faces = extract_isosurface_from_label(roi, volume.affine, [1], step_size=2)
     elif volume is not None:
-        thresh_mask = (volume.image >= 400.0).astype(np.uint8) if ("condyle" in dtype_l or "cleft" in dtype_l) else (volume.image <= -450.0).astype(np.uint8)
+        thresh_mask = (
+            (volume.image >= 400.0).astype(np.uint8)
+            if ("condyle" in dtype_l or "cleft" in dtype_l)
+            else (volume.image <= -450.0).astype(np.uint8)
+        )
         verts, faces = extract_isosurface_from_label(thresh_mask, volume.affine, [1], step_size=2)
 
     if len(verts) < 12 or len(faces) == 0:

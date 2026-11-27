@@ -103,9 +103,7 @@ class RootCanalBranch:
             "mean_radius_mm": round(float(self.mean_radius_mm), 3),
             "max_radius_mm": round(float(self.max_radius_mm), 3),
             "min_wall_distance_mm": (
-                None
-                if self.min_wall_distance_mm is None
-                else round(float(self.min_wall_distance_mm), 3)
+                None if self.min_wall_distance_mm is None else round(float(self.min_wall_distance_mm), 3)
             ),
             "orifice_ras_mm": [round(float(v), 3) for v in self.orifice_ras_mm],
             "apex_ras_mm": [round(float(v), 3) for v in self.apex_ras_mm],
@@ -210,9 +208,7 @@ class EndoToothAnalysis:
                     mean_radius_mm=float(cd.get("mean_radius_mm", 0.0)),
                     max_radius_mm=float(cd.get("max_radius_mm", 0.0)),
                     min_wall_distance_mm=(
-                        None
-                        if cd.get("min_wall_distance_mm") is None
-                        else float(cd["min_wall_distance_mm"])
+                        None if cd.get("min_wall_distance_mm") is None else float(cd["min_wall_distance_mm"])
                     ),
                     orifice_ras_mm=[float(v) for v in cd.get("orifice_ras_mm", [0.0, 0.0, 0.0])],
                     apex_ras_mm=[float(v) for v in cd.get("apex_ras_mm", [0.0, 0.0, 0.0])],
@@ -376,9 +372,7 @@ class EndodonticEngine:
 
         roi_mask = mask_zyx[z0:z1, y0:y1, x0:x1]
         roi_img = (
-            np.asarray(image_zyx[z0:z1, y0:y1, x0:x1], dtype=np.float32)
-            if image_zyx is not None
-            else None
+            np.asarray(image_zyx[z0:z1, y0:y1, x0:x1], dtype=np.float32) if image_zyx is not None else None
         )
         pulp_mask = (roi_mask == pulp_id) if has_pulp else np.zeros(roi_mask.shape, dtype=bool)
         tooth_only = (roi_mask == tooth_id) if has_tooth else np.zeros(roi_mask.shape, dtype=bool)
@@ -516,8 +510,7 @@ class EndodonticEngine:
                 is_mandible=roi.is_mandible,
                 available=False,
                 withheld_reason=(
-                    ckpt_status
-                    or f"Insufficient segmented pulp volume for #{roi.fdi} ({pulp_vox} voxels)"
+                    ckpt_status or f"Insufficient segmented pulp volume for #{roi.fdi} ({pulp_vox} voxels)"
                 ),
                 pulp_source_type=SOURCE_NOT_AVAILABLE,
                 pulp_method=roi.pulp_method,
@@ -657,9 +650,7 @@ class EndodonticEngine:
             path = self._trace_path(root_idx, end_idx, pred)
             if len(path) < 2:
                 return [], [], chamber_ras
-            pts_b, r_b, w_b, b_len = _resample_branch_smooth(
-                pts_ras[path], radii_all[path], walls_all[path]
-            )
+            pts_b, r_b, w_b, b_len = _resample_branch_smooth(pts_ras[path], radii_all[path], walls_all[path])
             return (
                 [
                     RootCanalBranch(
@@ -712,9 +703,7 @@ class EndodonticEngine:
             if float(g_euclid[cand]) < max(2.0, 0.35 * max_len):
                 break
             p_cand = pts_ras[int(cand)]
-            if any(
-                float(np.linalg.norm(p_cand - pts_ras[t])) < min_root_sep_mm for t in selected_tips
-            ):
+            if any(float(np.linalg.norm(p_cand - pts_ras[t])) < min_root_sep_mm for t in selected_tips):
                 continue
             path_c = self._trace_path(root_idx, int(cand), pred)
             if selected_tips:
@@ -772,9 +761,7 @@ class EndodonticEngine:
         for idx, (_tip, path) in enumerate(paired):
             cid = f"{roi.fdi}_C{idx + 1}"
             root_lbl = f"Canal {idx + 1}" if len(paired) > 1 else "Main Canal"
-            pts_b, r_b, w_b, b_len = _resample_branch_smooth(
-                pts_ras[path], radii_all[path], walls_all[path]
-            )
+            pts_b, r_b, w_b, b_len = _resample_branch_smooth(pts_ras[path], radii_all[path], walls_all[path])
             curv = _compute_polyline_curvature_deg(pts_b)
             conf = float(roi.pulp_confidence or 0.9)
             if b_len < 3.0:
@@ -833,9 +820,7 @@ class EndodonticEngine:
             vec = t - e
             norm = float(np.linalg.norm(vec))
             u_dir = vec / max(1e-8, norm)
-            wall_clr = EndodonticEngine._sample_corridor_wall_clearance(
-                e, t, roi, edt_wall_mm
-            )
+            wall_clr = EndodonticEngine._sample_corridor_wall_clearance(e, t, roi, edt_wall_mm)
             align_deg = EndodonticEngine._mean_orifice_alignment_deg(u_dir, canals)
             return AccessCavityPlan(
                 entry_ras_mm=[float(v) for v in e],
@@ -857,11 +842,7 @@ class EndodonticEngine:
         tooth_zyx = np.argwhere(roi.tooth_mask)
         tooth_ras = _ijk_zyx_to_ras(tooth_zyx, roi.affine_ras)
         z_t = tooth_ras[:, 2]
-        crown_mask = (
-            z_t >= np.percentile(z_t, 82.0)
-            if roi.is_mandible
-            else z_t <= np.percentile(z_t, 18.0)
-        )
+        crown_mask = z_t >= np.percentile(z_t, 82.0) if roi.is_mandible else z_t <= np.percentile(z_t, 18.0)
         crown_pts = tooth_ras[crown_mask]
         if len(crown_pts) == 0:
             return None
@@ -884,9 +865,7 @@ class EndodonticEngine:
         best_score = -1e9
         best_entry = nominal_entry
         best_dir = u_nom
-        best_wall = EndodonticEngine._sample_corridor_wall_clearance(
-            nominal_entry, target, roi, edt_wall_mm
-        )
+        best_wall = EndodonticEngine._sample_corridor_wall_clearance(nominal_entry, target, roi, edt_wall_mm)
         best_align = EndodonticEngine._mean_orifice_alignment_deg(u_nom, canals)
 
         for ax_deg in (-10.0, -5.0, 0.0, 5.0, 10.0):
@@ -896,9 +875,7 @@ class EndodonticEngine:
                 u_cand = u_nom + rx * b1 + ry * b2
                 u_cand /= max(1e-8, float(np.linalg.norm(u_cand)))
                 cand_entry = target - u_cand * corridor_len
-                w_clr = EndodonticEngine._sample_corridor_wall_clearance(
-                    cand_entry, target, roi, edt_wall_mm
-                )
+                w_clr = EndodonticEngine._sample_corridor_wall_clearance(cand_entry, target, roi, edt_wall_mm)
                 if w_clr is None:
                     continue
                 align = EndodonticEngine._mean_orifice_alignment_deg(u_cand, canals)
@@ -951,9 +928,7 @@ class EndodonticEngine:
         return float(np.min(vals))
 
     @staticmethod
-    def _mean_orifice_alignment_deg(
-        access_dir: np.ndarray, canals: Sequence[RootCanalBranch]
-    ) -> float:
+    def _mean_orifice_alignment_deg(access_dir: np.ndarray, canals: Sequence[RootCanalBranch]) -> float:
         if not canals:
             return 0.0
         angles = []

@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "disclaimer": "Generic geometric cylinder library for research/planning simulation only. Contains no proprietary manufacturer data.",
   "implants": [
     {

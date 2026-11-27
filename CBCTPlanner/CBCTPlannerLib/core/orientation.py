@@ -389,19 +389,6 @@ def _world_centroid(voxel_indices_zyx: np.ndarray, affine: np.ndarray) -> Option
     return (np.asarray(affine, dtype=np.float64) @ mean)[:3]
 
 
-def _mask_centroid(mask: np.ndarray, affine: np.ndarray, labels: Tuple[int, ...]) -> Optional[np.ndarray]:
-    indices = np.where(np.isin(mask, labels))
-    return _world_centroid(indices, affine)
-
-
-def _tooth_cloud(mask: np.ndarray, affine: np.ndarray, labels: Tuple[int, ...]) -> np.ndarray:
-    z_idx, y_idx, x_idx = np.where(np.isin(mask, labels))
-    if len(x_idx) == 0:
-        return np.empty((0, 3), dtype=np.float64)
-    voxels = np.column_stack([x_idx, y_idx, z_idx, np.ones(len(x_idx))]).astype(np.float64)
-    return (np.asarray(affine, dtype=np.float64) @ voxels.T).T[:, :3]
-
-
 def _ap_orientation(points_xy: np.ndarray) -> Optional[bool]:
     """True when the arch is convex toward +Y (anterior at +Y)."""
     if len(points_xy) < 20:
@@ -499,8 +486,12 @@ def verify_orientation(
         m_low = np.isin(vals, lower_teeth + lower_jaw)
         m_up = np.isin(vals, upper_teeth + upper_jaw)
         m_teeth = np.isin(vals, upper_teeth + lower_teeth)
-        m_right = np.isin(vals, tuple(RIGHT_SIDE_TEETH_IDS)) if not is_5class else np.zeros(vals.shape, dtype=bool)
-        m_left = np.isin(vals, tuple(LEFT_SIDE_TEETH_IDS)) if not is_5class else np.zeros(vals.shape, dtype=bool)
+        m_right = (
+            np.isin(vals, tuple(RIGHT_SIDE_TEETH_IDS)) if not is_5class else np.zeros(vals.shape, dtype=bool)
+        )
+        m_left = (
+            np.isin(vals, tuple(LEFT_SIDE_TEETH_IDS)) if not is_5class else np.zeros(vals.shape, dtype=bool)
+        )
 
     def _subset_centroid(sel: np.ndarray) -> Optional[np.ndarray]:
         if not np.any(sel):
@@ -581,7 +572,12 @@ def landmark_guided_aso_frame(
     from ..adt.ali import identify_ali_landmarks
     from ..adt.aso import compute_aso_standardized_orientation
 
-    jaw_pts_exist = np.any(np.isin(mask_zyx, [get_jaw_label_id(True, is_5class=is_5class), get_jaw_label_id(False, is_5class=is_5class)]))
+    jaw_pts_exist = np.any(
+        np.isin(
+            mask_zyx,
+            [get_jaw_label_id(True, is_5class=is_5class), get_jaw_label_id(False, is_5class=is_5class)],
+        )
+    )
     if not jaw_pts_exist and not np.any(mask_zyx > 0):
         return None
     lms = identify_ali_landmarks(vol, mask=mask_zyx, is_5class=is_5class, include_per_tooth_landmarks=False)
@@ -592,4 +588,3 @@ def landmark_guided_aso_frame(
     center = np.asarray(aso.reference_center_ras, dtype=np.float64)
     tilt = float(np.degrees(np.arccos(np.clip(abs(float(z_vec[2])), 0.0, 1.0))))
     return z_vec, center, round(tilt, 2)
-

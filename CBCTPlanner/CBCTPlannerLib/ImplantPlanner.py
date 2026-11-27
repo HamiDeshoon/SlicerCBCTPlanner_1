@@ -41,6 +41,7 @@ from .core.contracts import (
     SOURCE_NOT_AVAILABLE,
     UncertaintyClearance,
 )
+from .core.insertion import UndercutReport, compute_blocked_surface, suggest_insertion_axis
 from .core.labels import (
     DENTALSEGMENTATOR_CANAL_ID,
     LEFT_IAN_ID,
@@ -71,6 +72,11 @@ class ImplantLibraryEntry:
     apical_diameter_mm: float = 3.4
     safety_radial_mm: float = 1.5
     safety_apical_mm: float = 2.0
+    ring_outer_diameter_mm: Optional[float] = None
+    ring_inner_diameter_mm: Optional[float] = None
+    ring_height_mm: Optional[float] = None
+    sleeve_offset_mm: Optional[float] = None
+    sleeved: bool = True
 
 
 @dataclass
@@ -93,6 +99,13 @@ class PlacedImplant:
     safety_apical_mm: float = 2.0
     is_ai_suggestion: bool = False
     clinician_confirmed: bool = True
+    ring_outer_diameter_mm: Optional[float] = None
+    ring_inner_diameter_mm: Optional[float] = None
+    ring_height_mm: Optional[float] = None
+    sleeve_offset_mm: Optional[float] = None
+    sleeved: bool = True
+    undercut_blocked_fraction: Optional[float] = None
+    insertion_axis_suggested_ras: Optional[List[float]] = None
     # Live computed verification fields:
     canal_clearance_mm: Optional[float] = None
     sinus_clearance_mm: Optional[float] = None
@@ -131,6 +144,10 @@ class ImplantPlannerLogic:
         for raw in data.get("implants", []):
             diam = float(raw["diameter_mm"])
             length = float(raw["length_mm"])
+            ring_od = raw.get("ring_outer_diameter_mm")
+            ring_id = raw.get("ring_inner_diameter_mm")
+            ring_h = raw.get("ring_height_mm")
+            slv_off = raw.get("sleeve_offset_mm")
             entry = ImplantLibraryEntry(
                 id=str(raw.get("id") or f"generic_{diam:.1f}x{length:.1f}"),
                 label=str(raw.get("label") or f"Generic Ø{diam:.1f} × {length:.1f} mm"),
@@ -140,6 +157,11 @@ class ImplantPlannerLogic:
                 apical_diameter_mm=float(raw.get("apical_diameter_mm", diam * 0.85)),
                 safety_radial_mm=float(raw.get("safety_radial_mm", 1.5)),
                 safety_apical_mm=float(raw.get("safety_apical_mm", 2.0)),
+                ring_outer_diameter_mm=float(ring_od) if ring_od is not None else None,
+                ring_inner_diameter_mm=float(ring_id) if ring_id is not None else None,
+                ring_height_mm=float(ring_h) if ring_h is not None else None,
+                sleeve_offset_mm=float(slv_off) if slv_off is not None else None,
+                sleeved=bool(raw.get("sleeved", True)),
             )
             self.library[entry.id] = entry
             entries.append(entry)
@@ -282,10 +304,70 @@ class ImplantPlannerLogic:
             safety_apical_mm=float(safety_apical_mm),
             is_ai_suggestion=bool(is_ai_suggestion),
             clinician_confirmed=confirmed,
+            ring_outer_diameter_mm=entry.ring_outer_diameter_mm,
+            ring_inner_diameter_mm=entry.ring_inner_diameter_mm,
+            ring_height_mm=entry.ring_height_mm,
+            sleeve_offset_mm=entry.sleeve_offset_mm,
+            sleeved=bool(entry.sleeved),
         )
         self.placed_implants[int(fdi)] = implant
         self.recompute_all_verifications(volume=volume, mask=mask, is_5class=is_5class, canals=canals)
         return self.placed_implants[int(fdi)]
+
+    def evaluate_insertion(
+        self,
+        mask_zyx: np.ndarray,
+        affine: np.ndarray,
+        fdi: Optional[int] = None,
+        *,
+        axis_apical_ras: Optional[Sequence[float]] = None,
+        label_ids: Optional[Sequence[int]] = None,
+        roi_mm: float = 25.0,
+        coronal_band_mm: Optional[float] = None,
+    ) -> UndercutReport:
+        """Evaluate draw-direction undercuts for a placed implant or shared arch axis.
+
+        `coronal_band_mm` restricts the evaluated surface to the coronal seating collar (the band the
+        guide actually touches). Without it, deep root apices and the inferior mandibular border are
+        included and every coronal shadow above them is reported as blocked. Callers should pass the
+        collar depth (`guide_thickness_mm + margin`); `None` evaluates the whole ROI.
+        """
+        imp = self.placed_implants.get(int(fdi)) if fdi is not None else None
+        center_ras = imp.crest_point_ras if imp is not None else None
+        if axis_apical_ras is not None:
+            eval_axis = np.asarray(axis_apical_ras, dtype=np.float64)
+        elif imp is not None:
+            eval_axis = np.asarray(imp.axis_apical_ras, dtype=np.float64)
+        elif self.placed_implants:
+            axes = np.asarray([p.axis_apical_ras for p in self.placed_implants.values()], dtype=np.float64)
+            eval_axis = axes.mean(axis=0)
+        else:
+            eval_axis = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+
+        report = compute_blocked_surface(
+            mask_zyx,
+            affine,
+            eval_axis,
+            label_ids=label_ids,
+            center_ras=center_ras,
+            roi_mm=roi_mm,
+            coronal_band_mm=coronal_band_mm,
+        )
+        suggested_vec: Optional[List[float]] = None
+        if not report.is_insertable:
+            best_ax, _best_rep, _ = suggest_insertion_axis(
+                mask_zyx,
+                affine,
+                label_ids,
+                seed_axis_ras=eval_axis,
+                center_ras=center_ras,
+                roi_mm=roi_mm,
+            )
+            suggested_vec = [round(float(x), 6) for x in best_ax]
+        if imp is not None:
+            imp.undercut_blocked_fraction = float(report.blocked_fraction)
+            imp.insertion_axis_suggested_ras = suggested_vec
+        return report
 
     def confirm_ai_suggestion(self, fdi: int) -> Optional[PlacedImplant]:
         """F19: Explicitly confirm an AI-suggested implant so it is eligible to enter clinical reports."""
@@ -405,7 +487,9 @@ class ImplantPlannerLogic:
             vecs = pts - p0[None, :]
             norms = np.linalg.norm(vecs, axis=1)
             r_mid = 0.5 * (float(radius_top_mm) + float(radius_bottom_mm))
-            safe_dir = np.where(norms[:, None] > 1e-8, vecs / np.maximum(norms[:, None], 1e-8), np.array([[0.0, 0.0, 1.0]]))
+            safe_dir = np.where(
+                norms[:, None] > 1e-8, vecs / np.maximum(norms[:, None], 1e-8), np.array([[0.0, 0.0, 1.0]])
+            )
             return norms - r_mid, p0[None, :] + r_mid * safe_dir
 
         u = axis / seg_len
@@ -586,7 +670,9 @@ class ImplantPlannerLogic:
                         method="capsule_sdf",
                     )
                     imp.clearances["inferior_alveolar_canal"] = clr.to_dict()
-                    eff_chk = clr.effective_clearance_mm if clr.effective_clearance_mm is not None else min_c_dist
+                    eff_chk = (
+                        clr.effective_clearance_mm if clr.effective_clearance_mm is not None else min_c_dist
+                    )
                     if eff_chk < imp.safety_apical_mm:
                         imp.verification_warnings.append(
                             f"Mandibular canal clearance is {min_c_dist:.2f} mm (< {imp.safety_apical_mm:.1f} mm safety)."
@@ -631,12 +717,23 @@ class ImplantPlannerLogic:
                     )
                     ijk = volume.world_to_voxel(corners_xyz)
                     nz_m, ny_m, nx_m = mask.shape
-                    x0, x1 = max(0, int(np.floor(np.min(ijk[:, 0])))), min(nx_m, int(np.ceil(np.max(ijk[:, 0]))) + 1)
-                    y0, y1 = max(0, int(np.floor(np.min(ijk[:, 1])))), min(ny_m, int(np.ceil(np.max(ijk[:, 1]))) + 1)
-                    z0, z1 = max(0, int(np.floor(np.min(ijk[:, 2])))), min(nz_m, int(np.ceil(np.max(ijk[:, 2]))) + 1)
+                    x0, x1 = (
+                        max(0, int(np.floor(np.min(ijk[:, 0])))),
+                        min(nx_m, int(np.ceil(np.max(ijk[:, 0]))) + 1),
+                    )
+                    y0, y1 = (
+                        max(0, int(np.floor(np.min(ijk[:, 1])))),
+                        min(ny_m, int(np.ceil(np.max(ijk[:, 1]))) + 1),
+                    )
+                    z0, z1 = (
+                        max(0, int(np.floor(np.min(ijk[:, 2])))),
+                        min(nz_m, int(np.ceil(np.max(ijk[:, 2]))) + 1),
+                    )
                     sub_mask = mask[z0:z1, y0:y1, x0:x1]
 
-                    def _closest_structure_to_capsule(target_ids: Sequence[int]) -> Tuple[Optional[float], Optional[np.ndarray], Optional[np.ndarray], Optional[int]]:
+                    def _closest_structure_to_capsule(
+                        target_ids: Sequence[int],
+                    ) -> Tuple[Optional[float], Optional[np.ndarray], Optional[np.ndarray], Optional[int]]:
                         hit = np.isin(sub_mask, list(target_ids))
                         if not np.any(hit):
                             return None, None, None, None
@@ -645,9 +742,7 @@ class ImplantPlannerLogic:
                             step = max(1, len(lz) // 4000)
                             lz, ly, lx = lz[::step], ly[::step], lx[::step]
                         lbl_vals = sub_mask[lz, ly, lx]
-                        w_pts = volume.voxel_to_world(
-                            np.column_stack([lx + x0, ly + y0, lz + z0])
-                        )
+                        w_pts = volume.voxel_to_world(np.column_stack([lx + x0, ly + y0, lz + z0]))
                         dists, dev_pts = self.distance_points_to_capsule_surface(
                             w_pts, p_crest, p_apex, r_top, r_bot
                         )
@@ -681,7 +776,11 @@ class ImplantPlannerLogic:
                             method="capsule_sdf",
                         )
                         imp.clearances["adjacent_tooth"] = t_clr.to_dict()
-                        eff_t = t_clr.effective_clearance_mm if t_clr.effective_clearance_mm is not None else t_dist
+                        eff_t = (
+                            t_clr.effective_clearance_mm
+                            if t_clr.effective_clearance_mm is not None
+                            else t_dist
+                        )
                         if eff_t < imp.safety_radial_mm:
                             imp.verification_warnings.append(
                                 f"Adjacent tooth #{imp.nearest_tooth_fdi} clearance is {t_dist:.2f} mm (< {imp.safety_radial_mm:.1f} mm radial safety)."
@@ -702,7 +801,11 @@ class ImplantPlannerLogic:
                                 method="capsule_sdf",
                             )
                             imp.clearances["maxillary_sinus"] = s_clr.to_dict()
-                            eff_s = s_clr.effective_clearance_mm if s_clr.effective_clearance_mm is not None else s_dist
+                            eff_s = (
+                                s_clr.effective_clearance_mm
+                                if s_clr.effective_clearance_mm is not None
+                                else s_dist
+                            )
                             if eff_s < imp.safety_apical_mm:
                                 imp.verification_warnings.append(
                                     f"Maxillary sinus clearance is {s_dist:.2f} mm (< {imp.safety_apical_mm:.1f} mm)."
@@ -734,7 +837,11 @@ class ImplantPlannerLogic:
                                 method="capsule_sdf",
                             )
                             imp.clearances["inferior_alveolar_canal"] = c_clr.to_dict()
-                            eff_c = c_clr.effective_clearance_mm if c_clr.effective_clearance_mm is not None else c_dist
+                            eff_c = (
+                                c_clr.effective_clearance_mm
+                                if c_clr.effective_clearance_mm is not None
+                                else c_dist
+                            )
                             if eff_c < imp.safety_apical_mm:
                                 imp.verification_warnings.append(
                                     f"Mandibular canal clearance is {c_dist:.2f} mm (< {imp.safety_apical_mm:.1f} mm)."

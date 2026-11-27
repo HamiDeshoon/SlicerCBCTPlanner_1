@@ -79,7 +79,9 @@ class StructuredReportAndTransformTests(unittest.TestCase):
         fit = fit_arch_from_label_mask(mask, aff, jaw="Mandible", is_5class=False)
         self.assertTrue(fit.accepted, fit.reason)
         arch = DentalArch(fit.points_ras, jaw_type="lower", ras_convention=True)
-        eng = MeasurementEngine(vol, mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=False)
+        eng = MeasurementEngine(
+            vol, mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=False
+        )
 
         imp_logic = ImplantPlannerLogic()
         fr = arch.get_frame(0.3)
@@ -128,7 +130,9 @@ class StructuredReportAndTransformTests(unittest.TestCase):
             rep_data = json.loads(pl.last_json_file.read_text(encoding="utf-8"))
             self.assertEqual(rep_data["software_version"], SOFTWARE_VERSION)
             self.assertTrue(len(rep_data["measurements"]) > 0)
-            self.assertTrue(any(m["source_type"] == SOURCE_MANUALLY_CORRECTED for m in rep_data["measurements"]))
+            self.assertTrue(
+                any(m["source_type"] == SOURCE_MANUALLY_CORRECTED for m in rep_data["measurements"])
+            )
             for m in rep_data["measurements"]:
                 self.assertIn(m["source_type"], VALID_SOURCE_TYPES)
                 self.assertIn(m["unit"], ("mm", "HU"))

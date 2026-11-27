@@ -88,7 +88,10 @@ def _jawbone_cortical_signed_distances(
     """Measure crown-center distances (mm) to outer buccal & outer palatal/lingual bone borders along `buccal_normal`."""
     try:
         steps = np.arange(-16.0, 16.25, 0.25, dtype=np.float64)
-        pts_ras = np.asarray(crown_ras, dtype=np.float64)[None, :] + steps[:, None] * np.asarray(buccal_normal, dtype=np.float64)[None, :]
+        pts_ras = (
+            np.asarray(crown_ras, dtype=np.float64)[None, :]
+            + steps[:, None] * np.asarray(buccal_normal, dtype=np.float64)[None, :]
+        )
         vox = volume.world_to_voxel(pts_ras)
         rx = np.rint(vox[:, 0]).astype(int)
         ry = np.rint(vox[:, 1]).astype(int)
@@ -105,7 +108,11 @@ def _jawbone_cortical_signed_distances(
             return None, None
         in_bone = np.zeros(len(steps), dtype=bool)
         # Treat jawbone OR tooth voxels in the alveolus as bone corridor; find outer edges of bone.
-        sampled = mask[np.clip(rz, 0, mask.shape[0] - 1), np.clip(ry, 0, mask.shape[1] - 1), np.clip(rx, 0, mask.shape[2] - 1)]
+        sampled = mask[
+            np.clip(rz, 0, mask.shape[0] - 1),
+            np.clip(ry, 0, mask.shape[1] - 1),
+            np.clip(rx, 0, mask.shape[2] - 1),
+        ]
         in_bone[valid] = (sampled[valid] == int(jaw_id)) | (sampled[valid] >= 11)
         hits = np.flatnonzero(in_bone)
         if hits.size < 2:

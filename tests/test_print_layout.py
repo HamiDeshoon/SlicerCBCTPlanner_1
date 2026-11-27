@@ -228,7 +228,6 @@ class TestPrintLayoutRules(unittest.TestCase):
                 doc,
             )
 
-
     def test_grayscale_layout_includes_vr_and_omits_redundant_card_footer(self) -> None:
         from CBCTPlannerLib.PrintLayoutEngine import CrossSectionSliceSpec
 
@@ -258,7 +257,6 @@ class TestPrintLayoutRules(unittest.TestCase):
         self.assertIn("data:image/png;base64,BB==", html_doc)
         self.assertNotIn("<div class='cs-ftr'>", html_doc)
 
-
     def test_generate_8x10_layout_applies_measurement_overrides(self) -> None:
         from types import SimpleNamespace
         from CBCTPlannerLib.core.measurements import CrossSectionData
@@ -267,7 +265,10 @@ class TestPrintLayoutRules(unittest.TestCase):
         mask_arr = np.zeros((40, 40, 40), dtype=np.int16)
         img_arr = np.full((40, 40, 40), -500.0, dtype=np.float32)
         arch = DentalArch(
-            control_points=np.array([[5.0, 20.0, 20.0], [15.0, 20.0, 20.0], [25.0, 20.0, 20.0], [35.0, 20.0, 20.0]], dtype=np.float64),
+            control_points=np.array(
+                [[5.0, 20.0, 20.0], [15.0, 20.0, 20.0], [25.0, 20.0, 20.0], [35.0, 20.0, 20.0]],
+                dtype=np.float64,
+            ),
             jaw_type="lower",
             ras_convention=True,
         )
@@ -405,7 +406,10 @@ class TestPrintLayoutRules(unittest.TestCase):
         mask_arr = np.zeros((40, 40, 40), dtype=np.int16)
         img_arr = np.full((40, 40, 40), -500.0, dtype=np.float32)
         arch = DentalArch(
-            control_points=np.array([[5.0, 20.0, 20.0], [15.0, 20.0, 20.0], [25.0, 20.0, 20.0], [35.0, 20.0, 20.0]], dtype=np.float64),
+            control_points=np.array(
+                [[5.0, 20.0, 20.0], [15.0, 20.0, 20.0], [25.0, 20.0, 20.0], [35.0, 20.0, 20.0]],
+                dtype=np.float64,
+            ),
             jaw_type="lower",
             ras_convention=True,
         )

@@ -106,9 +106,7 @@ class StructuredMeasurementEntry:
                 if self.location_ras_mm is not None
                 else None
             ),
-            "uncertainty_mm": (
-                None if self.uncertainty_mm is None else round(float(self.uncertainty_mm), 3)
-            ),
+            "uncertainty_mm": (None if self.uncertainty_mm is None else round(float(self.uncertainty_mm), 3)),
             "confidence": None if self.confidence is None else round(float(self.confidence), 3),
             "withheld_reason": self.withheld_reason,
             "caveats": list(self.caveats),
@@ -145,9 +143,7 @@ class UncertaintyClearance:
                 else round(float(self.estimated_uncertainty_mm), 3)
             ),
             "effective_clearance_mm": (
-                None
-                if self.effective_clearance_mm is None
-                else round(float(self.effective_clearance_mm), 3)
+                None if self.effective_clearance_mm is None else round(float(self.effective_clearance_mm), 3)
             ),
             "closest_anatomical_point_ras": (
                 [round(float(v), 3) for v in self.closest_anatomical_point_ras]

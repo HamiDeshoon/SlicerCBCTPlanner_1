@@ -137,10 +137,26 @@ class TestPayloadAndParsing(unittest.TestCase):
             "arch": {"jaw": "lower", "length_mm": 110.0, "occlusal_normal": [0, 0, 1]},
             "selected_teeth": [46],
             "sites": [
-                {"fdi": 46, "h_mm": 12.3, "w0_mm": 7.1, "w3_mm": 8.0, "ian_mm": 1.4, "provenance": "measured"},
+                {
+                    "fdi": 46,
+                    "h_mm": 12.3,
+                    "w0_mm": 7.1,
+                    "w3_mm": 8.0,
+                    "ian_mm": 1.4,
+                    "provenance": "measured",
+                },
                 {"fdi": 47, "withheld": "no canal"},
             ],
-            "annotations": [{"id": "abc", "fdi": 46, "kind": "comment", "severity": "info", "author": "clinician", "text": "review"}],
+            "annotations": [
+                {
+                    "id": "abc",
+                    "fdi": 46,
+                    "kind": "comment",
+                    "severity": "info",
+                    "author": "clinician",
+                    "text": "review",
+                }
+            ],
             "question": "Is 46 wide enough for a 4.1 mm implant?",
         }
 
@@ -169,7 +185,9 @@ class TestPayloadAndParsing(unittest.TestCase):
         self.assertEqual(extract_agent_json(fenced)["summary"], "ok")
         prose = 'Assessment: {"summary": "a", "comments": [{"text": "b"}]} end'
         self.assertEqual(extract_agent_json(prose)["comments"][0]["text"], "b")
-        self.assertEqual(extract_agent_json('[{"text": "only comments"}]')["comments"][0]["text"], "only comments")
+        self.assertEqual(
+            extract_agent_json('[{"text": "only comments"}]')["comments"][0]["text"], "only comments"
+        )
         nested = '{"summary": "brace } inside", "comments": [{"text": "ok"}]}'
         self.assertEqual(extract_agent_json(nested)["summary"], "brace } inside")
         with self.assertRaises(AgentError):
@@ -201,7 +219,9 @@ class TestPayloadAndParsing(unittest.TestCase):
         self.assertEqual([a.op for a in result.actions], ["add_annotation", "add_tooth"])
         self.assertEqual(result.actions[1].fdi, 47)
         self.assertEqual(len(result.skipped_actions), 2)
-        self.assertTrue(all(op not in ALLOWED_ACTION_OPS or "text" in reason for op, reason in result.skipped_actions))
+        self.assertTrue(
+            all(op not in ALLOWED_ACTION_OPS or "text" in reason for op, reason in result.skipped_actions)
+        )
 
     def test_action_validation(self) -> None:
         self.assertIsNotNone(AgentAction.from_dict({"op": "add_annotation", "text": "t"})[0])
@@ -301,7 +321,10 @@ class TestAgentClient(unittest.TestCase):
         return AgentClient(cfg, transport=transport), transport
 
     def test_review_sends_key_only_in_header(self) -> None:
-        body = {"choices": [{"message": {"content": '{"summary": "looks fine", "comments": []}'}}], "usage": {"total_tokens": 12}}
+        body = {
+            "choices": [{"message": {"content": '{"summary": "looks fine", "comments": []}'}}],
+            "usage": {"total_tokens": 12},
+        }
         client, transport = self._client([body])
         result = client.review({"selected_teeth": [46]})
         self.assertEqual(result.summary, "looks fine")
@@ -342,7 +365,9 @@ class TestAgentClient(unittest.TestCase):
         self.assertEqual(ctx.exception.kind, "config")
 
     def test_test_connection_success_and_failure(self) -> None:
-        client, transport = self._client([{"choices": [{"message": {"content": "OK"}}], "usage": {"total_tokens": 3}}])
+        client, transport = self._client(
+            [{"choices": [{"message": {"content": "OK"}}], "usage": {"total_tokens": 3}}]
+        )
         ok, message = client.test_connection()
         self.assertTrue(ok)
         self.assertIn("OK", message)
@@ -374,8 +399,9 @@ class TestContextWarnings(unittest.TestCase):
         self.assertIn("FDI 37", text)
 
     def test_clean_case_has_no_warnings(self) -> None:
-        self.assertEqual(context_warnings({"sites": [{"fdi": 46, "w0_mm": 9.0, "h_mm": 14.0, "ian_mm": 5.0}]}), [])
-
+        self.assertEqual(
+            context_warnings({"sites": [{"fdi": 46, "w0_mm": 9.0, "h_mm": 14.0, "ian_mm": 5.0}]}), []
+        )
 
 
 class TestAgentUrlFixesAndMeasurementEdit(unittest.TestCase):
@@ -403,7 +429,9 @@ class TestAgentUrlFixesAndMeasurementEdit(unittest.TestCase):
         self.assertNotIn("Authorization", local.headers())
         self.assertEqual(local.headers().get("User-Agent"), "SlicerCBCTPlanner/3.1")
         self.assertFalse(AgentEndpointConfig(url="http://", api_key="sk-123456").is_configured())
-        self.assertTrue(AgentEndpointConfig(url="HTTPS://api.openai.com/v1", api_key="sk-123456").is_configured())
+        self.assertTrue(
+            AgentEndpointConfig(url="HTTPS://api.openai.com/v1", api_key="sk-123456").is_configured()
+        )
         bare = AgentEndpointConfig(url="api.openai.com/v1", api_key="sk-123456")
         self.assertTrue(bare.is_configured())
         self.assertEqual(bare.resolved_url(), "https://api.openai.com/v1/chat/completions")
@@ -458,12 +486,13 @@ class TestAgentUrlFixesAndMeasurementEdit(unittest.TestCase):
                 return True
 
         store = AnnotationStore()
-        out = apply_agent_actions(AgentReviewResult(actions=[action]), store, plan=_Plan(), add_comments=False)
+        out = apply_agent_actions(
+            AgentReviewResult(actions=[action]), store, plan=_Plan(), add_comments=False
+        )
         self.assertEqual(len(out.applied), 1)
         self.assertEqual(recorded[0][0], 46)
         self.assertAlmostEqual(recorded[0][1]["h_mm"], 12.4)
         self.assertEqual(recorded[0][1]["w0_start_uv"], (-3.6, 5.0))
-
 
     def test_system_prompt_has_role_tools_and_pathology_flag_rule(self) -> None:
         from CBCTPlannerLib.core.agent_review import DEFAULT_REVIEW_QUESTION, SYSTEM_PROMPT

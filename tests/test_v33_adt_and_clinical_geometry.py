@@ -44,11 +44,16 @@ class TestClinicalGeometryV33(unittest.TestCase):
         mask[14:17, 24:26, 10:40] = RIGHT_IAN_ID
         img[mask > 0] = 900.0
         arch = DentalArch(
-            np.array([[36.0, 25.0, 28.0], [28.0, 25.0, 28.0], [20.0, 25.0, 28.0], [14.0, 25.0, 28.0]], dtype=np.float64),
+            np.array(
+                [[36.0, 25.0, 28.0], [28.0, 25.0, 28.0], [20.0, 25.0, 28.0], [14.0, 25.0, 28.0]],
+                dtype=np.float64,
+            ),
             jaw_type="lower",
             ras_convention=True,
         )
-        eng = MeasurementEngine(self._vol(img), mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=False)
+        eng = MeasurementEngine(
+            self._vol(img), mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=False
+        )
         meas, cs = eng.measure_at_arc_mm("lower", 11.0, fdi_hint="46")
         self.assertIsNotNone(meas)
         assert cs is not None and cs.crest_uv is not None and cs.basal_uv is not None
@@ -71,11 +76,16 @@ class TestClinicalGeometryV33(unittest.TestCase):
         img[mask == LOWER_JAW_ID] = 1250.0
         img[13:44, 38:43, 22:58] = 320.0
         arch = DentalArch(
-            np.array([[56.0, 40.0, 48.0], [45.0, 40.0, 48.0], [35.0, 40.0, 48.0], [24.0, 40.0, 48.0]], dtype=np.float64),
+            np.array(
+                [[56.0, 40.0, 48.0], [45.0, 40.0, 48.0], [35.0, 40.0, 48.0], [24.0, 40.0, 48.0]],
+                dtype=np.float64,
+            ),
             jaw_type="lower",
             ras_convention=True,
         )
-        eng = MeasurementEngine(self._vol(img), mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=False)
+        eng = MeasurementEngine(
+            self._vol(img), mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=False
+        )
         meas, cs = eng.measure_at_arc_mm("lower", 16.0, fdi_hint="46")
         self.assertIsNotNone(meas)
         assert cs is not None and cs.basal_uv is not None
@@ -95,11 +105,16 @@ class TestClinicalGeometryV33(unittest.TestCase):
         mask[32:69, 36:45, 20:60] = UPPER_JAW_ID
         img[mask == UPPER_JAW_ID] = 850.0
         arch = DentalArch(
-            np.array([[56.0, 40.0, 30.0], [45.0, 40.0, 30.0], [35.0, 40.0, 30.0], [24.0, 40.0, 30.0]], dtype=np.float64),
+            np.array(
+                [[56.0, 40.0, 30.0], [45.0, 40.0, 30.0], [35.0, 40.0, 30.0], [24.0, 40.0, 30.0]],
+                dtype=np.float64,
+            ),
             jaw_type="upper",
             ras_convention=True,
         )
-        eng = MeasurementEngine(self._vol(img), mask, arch=arch, arches={"upper": arch}, is_dental_segmentator_5class=False)
+        eng = MeasurementEngine(
+            self._vol(img), mask, arch=arch, arches={"upper": arch}, is_dental_segmentator_5class=False
+        )
         meas, cs = eng.measure_at_arc_mm("upper", 16.0, fdi_hint="16")
         self.assertIsNotNone(meas)
         assert cs is not None
@@ -260,7 +275,9 @@ class TestADTCompletePackageV33(unittest.TestCase):
         mask[24:38, 14:46, 12:48] = UPPER_JAW_ID
         mask[20:26, 16:22, 26:30] = 11
         mask[20:26, 16:22, 31:35] = 21
-        mask[28:35, 34:41, 20:25] = 13  # buccal / high impacted right canine (Buccal shifted anterior/outward)
+        mask[28:35, 34:41, 20:25] = (
+            13  # buccal / high impacted right canine (Buccal shifted anterior/outward)
+        )
         mask[20:26, 18:24, 36:40] = 23
 
         aff = np.diag([0.5, 0.5, 0.5, 1.0])
@@ -292,7 +309,12 @@ class TestADTCompletePackageV33(unittest.TestCase):
                 ref_lms[key] = rp.tolist()
 
         aso = eng.compute_aso_standardized_orientation(
-            vol, mask=mask, is_5class=False, landmarks=lms, reference_landmarks_ras=ref_lms, use_icp_refinement=False
+            vol,
+            mask=mask,
+            is_5class=False,
+            landmarks=lms,
+            reference_landmarks_ras=ref_lms,
+            use_icp_refinement=False,
         )
         self.assertIn("Co_L", aso.rejected_landmarks)
         self.assertEqual(aso.matrix_4x4_ras.shape, (4, 4))

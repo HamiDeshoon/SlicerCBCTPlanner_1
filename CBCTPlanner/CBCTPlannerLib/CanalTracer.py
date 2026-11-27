@@ -206,7 +206,9 @@ class CanalTracerLogic:
                 control_points_ras=np.asarray(primary.points_ras_mm, dtype=np.float64),
                 radii_mm=np.asarray(primary.radii_mm, dtype=np.float64),
                 mean_radius_mm=float(primary.mean_radius_mm),
-                source="segmentation" if analysis.pulp_source_type == "measured" else analysis.pulp_source_type,
+                source="segmentation"
+                if analysis.pulp_source_type == "measured"
+                else analysis.pulp_source_type,
             )
 
         # Fallback for tiny 4-5 voxel sparse tests below graph threshold

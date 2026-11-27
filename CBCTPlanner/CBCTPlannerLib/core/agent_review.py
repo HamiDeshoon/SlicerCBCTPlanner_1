@@ -142,7 +142,9 @@ def redact_secrets(text: Any, secrets: Iterable[Any] = ()) -> str:
             out = out.replace(value, KEY_PLACEHOLDER)
     # Common header/body patterns even when the exact value is unknown.
     out = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}", r"\1" + KEY_PLACEHOLDER, out)
-    out = re.sub(r'(?i)("?(?:api[_-]?key|authorization|token)"?\s*[:=]\s*"?)[^"\s,}]{8,}', r"\1" + KEY_PLACEHOLDER, out)
+    out = re.sub(
+        r'(?i)("?(?:api[_-]?key|authorization|token)"?\s*[:=]\s*"?)[^"\s,}]{8,}', r"\1" + KEY_PLACEHOLDER, out
+    )
     return out
 
 
@@ -191,7 +193,12 @@ class AgentEndpointConfig:
         if query:
             pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
             masked = [
-                (k, KEY_PLACEHOLDER if k.lower() in ("key", "api_key", "api-key", "token", "access_token") else v)
+                (
+                    k,
+                    KEY_PLACEHOLDER
+                    if k.lower() in ("key", "api_key", "api-key", "token", "access_token")
+                    else v,
+                )
                 for k, v in pairs
             ]
             query = urllib.parse.urlencode(masked)
@@ -201,11 +208,7 @@ class AgentEndpointConfig:
         raw = self.url.strip()
         if not raw:
             return False
-        candidate = (
-            raw
-            if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", raw)
-            else ("https://" + raw.lstrip("/"))
-        )
+        candidate = raw if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", raw) else ("https://" + raw.lstrip("/"))
         parts = urllib.parse.urlsplit(candidate)
         if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
             return False
@@ -309,9 +312,7 @@ def context_to_prompt_text(context: Dict[str, Any]) -> str:
     lines: List[str] = []
     patient = context.get("patient") or {}
     lines.append("## Case")
-    lines.append(
-        f"patient: {patient.get('name') or 'Anonymous'} (ID {patient.get('id') or 'Anonymous'})"
-    )
+    lines.append(f"patient: {patient.get('name') or 'Anonymous'} (ID {patient.get('id') or 'Anonymous'})")
     if patient.get("study_date"):
         lines.append(f"study date: {patient.get('study_date')}")
     if context.get("modality"):
@@ -440,18 +441,18 @@ class AgentAction:
         params = {k: v for k, v in data.items() if k not in ("op", "action", "type")}
         if op in ("add_annotation", "flag_site") and not str(params.get("text") or "").strip():
             return None, "missing text"
-        if op in ("update_annotation", "remove_annotation") and not str(
-            params.get("id") or params.get("annotation_id") or ""
-        ).strip():
+        if (
+            op in ("update_annotation", "remove_annotation")
+            and not str(params.get("id") or params.get("annotation_id") or "").strip()
+        ):
             return None, "missing annotation id"
-        if op in ("add_tooth", "remove_tooth", "set_implant_diameter", "edit_measurement") and normalize_fdi(
-            params.get("fdi")
-        ) is None:
+        if (
+            op in ("add_tooth", "remove_tooth", "set_implant_diameter", "edit_measurement")
+            and normalize_fdi(params.get("fdi")) is None
+        ):
             return None, "missing/invalid fdi"
         if op == "edit_measurement":
-            has_scalar = any(
-                params.get(k) is not None for k in ("h_mm", "w0_mm")
-            )
+            has_scalar = any(params.get(k) is not None for k in ("h_mm", "w0_mm"))
             has_uv = any(
                 isinstance(params.get(k), (list, tuple)) and len(params.get(k)) == 2
                 for k in ("h_start_uv", "h_end_uv", "w0_start_uv", "w0_end_uv")
@@ -549,8 +550,7 @@ def extract_agent_json(text: Any) -> Dict[str, Any]:
         if isinstance(parsed, list):
             return {"comments": parsed}
     raise AgentError(
-        "agent reply did not contain a JSON object; first 200 chars: "
-        + redact_secrets(raw[:200]),
+        "agent reply did not contain a JSON object; first 200 chars: " + redact_secrets(raw[:200]),
         kind=_ERROR_KIND_PARSE,
     )
 
@@ -597,7 +597,9 @@ def parse_agent_response(raw_text: str, *, model: str = "") -> AgentReviewResult
     for entry in actions if isinstance(actions, list) else []:
         action, reason = AgentAction.from_dict(entry)
         if action is None:
-            result.skipped_actions.append((str(entry.get("op") if isinstance(entry, dict) else entry), reason))
+            result.skipped_actions.append(
+                (str(entry.get("op") if isinstance(entry, dict) else entry), reason)
+            )
         else:
             result.actions.append(action)
 
@@ -724,9 +726,13 @@ class AgentClient:
     ) -> None:
         self.config = config
         self._transport: Transport = transport or urllib_transport
-        self._max_retries = max(0, int((2 if transport is None else 0) if max_retries is None else max_retries))
-        self._retry_delay_s = 0.0 if (retry_delay_s is None and transport is not None) else float(
-            0.5 if retry_delay_s is None else max(0.0, retry_delay_s)
+        self._max_retries = max(
+            0, int((2 if transport is None else 0) if max_retries is None else max_retries)
+        )
+        self._retry_delay_s = (
+            0.0
+            if (retry_delay_s is None and transport is not None)
+            else float(0.5 if retry_delay_s is None else max(0.0, retry_delay_s))
         )
 
     # -- helpers ----------------------------------------------------------
@@ -751,9 +757,7 @@ class AgentClient:
                 if not exc.is_retryable or attempt >= self._max_retries:
                     raise
                 delay = (
-                    exc.retry_after_s
-                    if exc.retry_after_s is not None
-                    else self._retry_delay_s * (2**attempt)
+                    exc.retry_after_s if exc.retry_after_s is not None else self._retry_delay_s * (2**attempt)
                 )
                 if delay > 0.0:
                     time.sleep(delay)
@@ -765,9 +769,7 @@ class AgentClient:
             message = response.get("error")
             if isinstance(message, dict):
                 message = message.get("message") or message.get("code") or message
-            raise AgentError(
-                redact_secrets(f"agent error: {message}"), kind=_ERROR_KIND_SERVER
-            )
+            raise AgentError(redact_secrets(f"agent error: {message}"), kind=_ERROR_KIND_SERVER)
         return response
 
     # -- public API -------------------------------------------------------
@@ -783,7 +785,10 @@ class AgentClient:
             return False, redact_secrets(f"unexpected error: {exc}", [self.config.api_key])
         usage = response.get("usage") or {}
         detail = ", ".join(f"{k}={v}" for k, v in usage.items() if isinstance(v, (int, float))) or "no usage"
-        return True, f"connected in {getattr(self, 'last_latency_s', 0.0):.2f}s - replied {text[:60]!r} ({detail})"
+        return (
+            True,
+            f"connected in {getattr(self, 'last_latency_s', 0.0):.2f}s - replied {text[:60]!r} ({detail})",
+        )
 
     def review(self, context: Dict[str, Any], images: Sequence[AgentImage] = ()) -> AgentReviewResult:
         """Send the context (+ images) and parse the structured answer."""
@@ -871,11 +876,7 @@ def apply_agent_actions(
             outcome.applied.append({"op": op, "id": ann.id, "fdi": ann.fdi})
         elif op == "update_annotation":
             ann_id = str(params.get("id") or params.get("annotation_id") or "")
-            patch = {
-                k: params[k]
-                for k in ("text", "severity", "kind", "fdi", "arc_mm")
-                if k in params
-            }
+            patch = {k: params[k] for k in ("text", "severity", "kind", "fdi", "arc_mm") if k in params}
             if not store.update(ann_id, **patch):
                 outcome.skipped.append((op, f"annotation {ann_id} not found or nothing to update"))
                 continue

@@ -19,7 +19,6 @@ import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
-from . import ensure_optional_package
 from .arch_detector import (
     DentalArch,
     compute_fdi_arc_positions_mm,
@@ -520,19 +519,6 @@ class CrossSectionData:
     withheld_reason: Optional[str] = None
 
 
-@dataclass
-class NerveProximityMetric:
-    """Distance from a tooth's root apex to critical neurological and anatomical canals."""
-
-    tooth_fdi: str
-    structure_id: int
-    structure_name: str
-    shortest_distance_mm: float
-    apex_coord_mm: np.ndarray
-    closest_canal_point_mm: np.ndarray
-    is_safe: bool
-
-
 class MeasurementEngine:
     """Master engine for calculating dental CBCT clinical metrics in the arch-frame cross-section."""
 
@@ -556,8 +542,6 @@ class MeasurementEngine:
             if (is_dental_segmentator_5class or not extract_teeth_eagerly)
             else self.localizer.extract_all_teeth()
         )
-        # ROI-cropped distance transforms keyed by structure_id -> (dt_sub, z_slice, y_slice, x_slice)
-        self._cropped_dt_cache: Dict[int, Tuple[np.ndarray, slice, slice, slice]] = {}
         self._tooth_span_cache: Dict[Tuple[str, int], Optional[Tuple[float, float]]] = {}
         self._site_cache: Dict[Tuple[str, float], Optional[ImplantSiteMeasurement]] = {}
         self._arc_cache: Dict[
@@ -576,9 +560,6 @@ class MeasurementEngine:
             if c is not None:
                 c.clear()
         if mask_changed:
-            dt_c = getattr(self, "_cropped_dt_cache", None)
-            if dt_c is not None:
-                dt_c.clear()
             self._present_labels_cache = None
             if getattr(self, "localizer", None) is not None:
                 self.localizer._label_slices = None
@@ -673,39 +654,6 @@ class MeasurementEngine:
             if extracted is not None:
                 self.teeth[fdi_str] = extracted
             return extracted
-        return None
-
-    def get_distance_at_world_point(self, structure_id: int, world_pt_ras: np.ndarray) -> Optional[float]:
-        """Evaluate 3D Euclidean distance transform (in mm) to `structure_id` using an ROI-cropped EDT."""
-        if structure_id not in self._cropped_dt_cache:
-            slc = self.localizer._get_label_slices().get(int(structure_id))
-            if slc is None:
-                return None
-            scipy_nd = ensure_optional_package("scipy.ndimage", "scipy", "3D distance transform")
-            sz, sy, sx = self.volume.spacing
-            margin_z = int(max(4, round(25.0 / max(1e-3, sz))))
-            margin_y = int(max(4, round(25.0 / max(1e-3, sy))))
-            margin_x = int(max(4, round(25.0 / max(1e-3, sx))))
-
-            z0 = max(0, int(slc[0].start or 0) - margin_z)
-            z1 = min(self.mask.shape[0], int(slc[0].stop or self.mask.shape[0]) + margin_z)
-            y0 = max(0, int(slc[1].start or 0) - margin_y)
-            y1 = min(self.mask.shape[1], int(slc[1].stop or self.mask.shape[1]) + margin_y)
-            x0 = max(0, int(slc[2].start or 0) - margin_x)
-            x1 = min(self.mask.shape[2], int(slc[2].stop or self.mask.shape[2]) + margin_x)
-
-            zs, ys, xs = slice(z0, z1), slice(y0, y1), slice(x0, x1)
-            sub_bin = self.mask[zs, ys, xs] == int(structure_id)
-            if not sub_bin.any():
-                return None
-            dt_sub = scipy_nd.distance_transform_edt(~sub_bin, sampling=(sz, sy, sx))
-            self._cropped_dt_cache[structure_id] = (dt_sub, zs, ys, xs)
-
-        dt_sub, zs, ys, xs = self._cropped_dt_cache[structure_id]
-        vox = self.volume.world_to_voxel(world_pt_ras)
-        vx, vy, vz = int(round(vox[0])), int(round(vox[1])), int(round(vox[2]))
-        if zs.start <= vz < zs.stop and ys.start <= vy < ys.stop and xs.start <= vx < xs.stop:
-            return float(dt_sub[vz - zs.start, vy - ys.start, vx - xs.start])
         return None
 
     def _get_cross_section_frame(
@@ -1401,7 +1349,9 @@ class MeasurementEngine:
                         if s_abs_max <= 2.5 * max(0.08, s_abs_min):
                             slope = slope_mid
                         else:
-                            slope = math.copysign(min(abs(slope_mid), s_abs_min + 0.35 * (s_abs_max - s_abs_min)), slope_mid)
+                            slope = math.copysign(
+                                min(abs(slope_mid), s_abs_min + 0.35 * (s_abs_max - s_abs_min)), slope_mid
+                            )
                     else:
                         slope = 0.35 * slope_mid
                     raw_deg = math.degrees(math.atan2(slope, 1.0))
@@ -1431,7 +1381,10 @@ class MeasurementEngine:
                 try:
                     eigvals, eigvecs = np.linalg.eigh(cov)
                     v_major = np.asarray(eigvecs[:, 1], dtype=np.float64)
-                    if float(eigvals[1]) >= 1.4 * max(1e-6, float(eigvals[0])) and abs(float(v_major[1])) >= 0.57:
+                    if (
+                        float(eigvals[1]) >= 1.4 * max(1e-6, float(eigvals[0]))
+                        and abs(float(v_major[1])) >= 0.57
+                    ):
                         axis = v_major
                     else:
                         axis = max(
@@ -1483,8 +1436,16 @@ class MeasurementEngine:
             s_sub = s_vals[: last_idx + 1]
             if s_sub.size < 10:
                 return JAW_END_CORTEX_INSET_MM
-            cf = np.clip((ray_u[: last_idx + 1] - u_min) / max(1e-6, u_max - u_min) * (len(u_coords) - 1), 0.0, len(u_coords) - 1.0)
-            rf = np.clip((ray_v[: last_idx + 1] - v_min) / max(1e-6, v_max - v_min) * (len(v_coords) - 1), 0.0, len(v_coords) - 1.0)
+            cf = np.clip(
+                (ray_u[: last_idx + 1] - u_min) / max(1e-6, u_max - u_min) * (len(u_coords) - 1),
+                0.0,
+                len(u_coords) - 1.0,
+            )
+            rf = np.clip(
+                (ray_v[: last_idx + 1] - v_min) / max(1e-6, v_max - v_min) * (len(v_coords) - 1),
+                0.0,
+                len(v_coords) - 1.0,
+            )
             from scipy import ndimage  # type: ignore
 
             hu_prof = ndimage.map_coordinates(
@@ -1507,7 +1468,9 @@ class MeasurementEngine:
             # Walk inward (apical -> coronal) from peak rim to find the inner endosteal border.
             peak_rel = int(np.argmax(hu_prof[rim_indices]))
             peak_idx = int(rim_indices[peak_rel])
-            for k in range(peak_idx, max(-1, peak_idx - int(round(2.6 / max(0.1, float(s_sub[1] - s_sub[0]))))), -1):
+            for k in range(
+                peak_idx, max(-1, peak_idx - int(round(2.6 / max(0.1, float(s_sub[1] - s_sub[0]))))), -1
+            ):
                 if float(hu_prof[k]) <= thresh:
                     inset = float(full_h) - float(s_sub[k])
                     return float(np.clip(inset, JAW_END_CORTEX_INSET_MM, 2.4))
@@ -1644,7 +1607,9 @@ class MeasurementEngine:
 
         # Stop at the internal (endosteal) border of the basal/maxillary cortex, never flush with periosteum.
         eff_inset = (
-            self._endosteal_cortex_inset_mm(img_cs, ray_u, ray_v, s_vals, last_idx, u_coords, v_coords, full_h)
+            self._endosteal_cortex_inset_mm(
+                img_cs, ray_u, ray_v, s_vals, last_idx, u_coords, v_coords, full_h
+            )
             if in_bone.any()
             else JAW_END_CORTEX_INSET_MM
         )
@@ -1842,7 +1807,9 @@ class MeasurementEngine:
 
             cf = (su - u_min) / max(1e-6, u_max - u_min) * (len(u_coords) - 1)
             rf = (sv - v_min) / max(1e-6, v_max - v_min) * (len(v_coords) - 1)
-            hu = ndimage.map_coordinates(np.asarray(img_cs, dtype=np.float32), np.vstack([rf, cf]), order=1, mode="nearest")
+            hu = ndimage.map_coordinates(
+                np.asarray(img_cs, dtype=np.float32), np.vstack([rf, cf]), order=1, mode="nearest"
+            )
         except Exception:
             return pt_l, pt_r
 
@@ -1855,7 +1822,9 @@ class MeasurementEngine:
         if float(np.std(in_band)) < 15.0:
             return pt_l, pt_r
 
-        def _shift_edge(anchor_s: float, outward_sign: float, ext_vals: np.ndarray, near_vals_mask: np.ndarray) -> float:
+        def _shift_edge(
+            anchor_s: float, outward_sign: float, ext_vals: np.ndarray, near_vals_mask: np.ndarray
+        ) -> float:
             peak_vals = hu[near_vals_mask]
             if peak_vals.size < 2:
                 return anchor_s
@@ -1883,7 +1852,12 @@ class MeasurementEngine:
             return anchor_s
 
         new_s_l = _shift_edge(0.0, -1.0, ext_l, (s_arr >= -0.25) & (s_arr <= min(2.0, 0.4 * seg_len)))
-        new_s_r = _shift_edge(seg_len, 1.0, ext_r, (s_arr >= max(0.0, seg_len - min(2.0, 0.4 * seg_len))) & (s_arr <= seg_len + 0.25))
+        new_s_r = _shift_edge(
+            seg_len,
+            1.0,
+            ext_r,
+            (s_arr >= max(0.0, seg_len - min(2.0, 0.4 * seg_len))) & (s_arr <= seg_len + 0.25),
+        )
         if new_s_r - new_s_l < max(2.5, seg_len - 1.5):
             return pt_l, pt_r
         return (float(pt_l[0]) + new_s_l * ux, float(pt_l[1]) + new_s_l * uy), (
@@ -2016,8 +1990,20 @@ class MeasurementEngine:
                 for d_p in (0.5, 1.0, 1.5, 2.0, 2.5):
                     px_t = end_x + sign * d_p * du_seg
                     py_t = end_y + sign * d_p * dv_seg
-                    ci_t = int(np.clip(np.round((px_t - u_min) / max(1e-6, u_max - u_min) * (len(u_coords) - 1)), 0, len(u_coords) - 1))
-                    ri_t = int(np.clip(np.round((py_t - v_min) / max(1e-6, v_max - v_min) * (len(v_coords) - 1)), 0, len(v_coords) - 1))
+                    ci_t = int(
+                        np.clip(
+                            np.round((px_t - u_min) / max(1e-6, u_max - u_min) * (len(u_coords) - 1)),
+                            0,
+                            len(u_coords) - 1,
+                        )
+                    )
+                    ri_t = int(
+                        np.clip(
+                            np.round((py_t - v_min) / max(1e-6, v_max - v_min) * (len(v_coords) - 1)),
+                            0,
+                            len(v_coords) - 1,
+                        )
+                    )
                     if float(tooth_f32[ri_t, ci_t]) >= 0.5:
                         t_hits += 1
                 if t_hits >= 2 and abs(mid_y - v0) <= 12.0:
@@ -2048,9 +2034,7 @@ class MeasurementEngine:
             w0_got: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None
             deeper_solid_w = 0.0
             if tooth_f32 is None:
-                d3_cand = _measure_caliper(
-                    u0 + 3.0 * au, v0 + 3.0 * av, au, av, bu, bv, allow_bridge=False
-                )
+                d3_cand = _measure_caliper(u0 + 3.0 * au, v0 + 3.0 * av, au, av, bu, bv, allow_bridge=False)
                 if d3_cand is not None and _span_bone_runs(d3_cand) == 1:
                     deeper_solid_w = math.hypot(d3_cand[1][0] - d3_cand[0][0], d3_cand[1][1] - d3_cand[0][1])
 
@@ -2073,7 +2057,11 @@ class MeasurementEngine:
                     saw_single_wall = True
                 if lvl_best is not None and not _is_single_socket_wall(lvl_best) and lvl_w > best_w:
                     best, best_w = lvl_best, lvl_w
-                if lvl_best is not None and not _is_single_socket_wall(lvl_best) and lvl_w >= (6.0 if abs(bv) >= 0.25 else 4.6):
+                if (
+                    lvl_best is not None
+                    and not _is_single_socket_wall(lvl_best)
+                    and lvl_w >= (6.0 if abs(bv) >= 0.25 else 4.6)
+                ):
                     best, best_w = lvl_best, lvl_w
                     break
                 if (
@@ -2091,7 +2079,9 @@ class MeasurementEngine:
 
             # Uneven-height dentate socket rims rescue when orthogonal `d_bl` could not bridge both walls
             # or on extreme >=40 deg slants (`|d_bl_y| >= 0.65`) where perpendicular shaft width < 6 mm.
-            if (w0_got is None or best_w < 3.0 or (best_w < 6.0 and abs(bv) >= 0.65)) and socket_rims is not None:
+            if (
+                w0_got is None or best_w < 3.0 or (best_w < 6.0 and abs(bv) >= 0.65)
+            ) and socket_rims is not None:
                 l_rim, r_rim = socket_rims
                 rim_dx = float(r_rim[0]) - float(l_rim[0])
                 rim_dy = float(r_rim[1]) - float(l_rim[1])
@@ -2160,7 +2150,12 @@ class MeasurementEngine:
                         continue
                     interp = ((float(cand[0][0]), v_l), (float(cand[1][0]), v_r))
                     i_len = math.hypot(interp[1][0] - interp[0][0], interp[1][1] - interp[0][1])
-                    if i_len >= 3.0 and interp[0][0] > u_min + _CS_BORDER_TOL_MM and interp[1][0] < u_max - _CS_BORDER_TOL_MM and _span_bone_runs(interp) >= 2:
+                    if (
+                        i_len >= 3.0
+                        and interp[0][0] > u_min + _CS_BORDER_TOL_MM
+                        and interp[1][0] < u_max - _CS_BORDER_TOL_MM
+                        and _span_bone_runs(interp) >= 2
+                    ):
                         w0_got = interp
                         break
 
@@ -2194,9 +2189,7 @@ class MeasurementEngine:
                         else -math.degrees(math.atan2(w_dy, max(1e-6, w_dx)))
                     )
                     init_axis_deg = (
-                        math.degrees(math.atan2(au, -av))
-                        if is_mandible
-                        else math.degrees(math.atan2(au, av))
+                        math.degrees(math.atan2(au, -av)) if is_mandible else math.degrees(math.atan2(au, av))
                     )
                     u0 = 0.5 * (float(w0_got[0][0]) + float(w0_got[1][0]))
                     v0 = 0.5 * (float(w0_got[0][1]) + float(w0_got[1][1]))
@@ -2211,9 +2204,17 @@ class MeasurementEngine:
                         if out_ortho_frame is not None:
                             out_ortho_frame["d_apical"] = (au, av)
                             out_ortho_frame["d_bl"] = (bu, bv)
-                            ang_val = math.degrees(math.atan2(au, -av)) if is_mandible else math.degrees(math.atan2(au, av))
-                            out_ortho_frame["ridge_angle_deg"] = round(float(np.clip(ang_val, -45.0, 45.0)), 1)
-                    elif abs(w_deg_signed - init_axis_deg) > 10.0 and not (abs(init_axis_deg) > 22.0 and w_deg_abs <= 12.0):
+                            ang_val = (
+                                math.degrees(math.atan2(au, -av))
+                                if is_mandible
+                                else math.degrees(math.atan2(au, av))
+                            )
+                            out_ortho_frame["ridge_angle_deg"] = round(
+                                float(np.clip(ang_val, -45.0, 45.0)), 1
+                            )
+                    elif abs(w_deg_signed - init_axis_deg) > 10.0 and not (
+                        abs(init_axis_deg) > 22.0 and w_deg_abs <= 12.0
+                    ):
                         # Enforce strict orthogonality W0 ⟂ H unless keeping a flat crest on a >22 deg slanted shaft.
                         snapped = None
                         for step_d in (0.0, 0.5, 1.0):
@@ -2945,15 +2946,37 @@ class MeasurementEngine:
                         if t_lbl is not None:
                             t_id = int(t_lbl.id)
                     same_t = _same_jaw_tooth_mask(mask_cs, is_mand, use_5, tooth_id=t_id)
-                    raw_env = _ridge_envelope_mask(mask_cs, u_coords, v_coords, jaw_id, t_id, is_mand, tooth_mask=same_t)
+                    raw_env = _ridge_envelope_mask(
+                        mask_cs, u_coords, v_coords, jaw_id, t_id, is_mand, tooth_mask=same_t
+                    )
                     b_comp = jaw_mask & _extract_primary_ridge_component(raw_env, u_coords, v_coords)
                     if b_comp.any():
                         prof = self._sample_band_profile(
-                            b_comp.astype(np.float32), u_coords, v_coords, mid_u, mid_v, s_grid, 0.0, -1.0 if is_mand else 1.0, c_bu, c_bv, step
+                            b_comp.astype(np.float32),
+                            u_coords,
+                            v_coords,
+                            mid_u,
+                            mid_v,
+                            s_grid,
+                            0.0,
+                            -1.0 if is_mand else 1.0,
+                            c_bu,
+                            c_bv,
+                            step,
                         )
                         t_prof = (
                             self._sample_band_profile(
-                                same_t.astype(np.float32), u_coords, v_coords, mid_u, mid_v, s_grid, 0.0, -1.0 if is_mand else 1.0, c_bu, c_bv, step
+                                same_t.astype(np.float32),
+                                u_coords,
+                                v_coords,
+                                mid_u,
+                                mid_v,
+                                s_grid,
+                                0.0,
+                                -1.0 if is_mand else 1.0,
+                                c_bu,
+                                c_bv,
+                                step,
                             )
                             if same_t.any()
                             else None
@@ -3016,7 +3039,9 @@ class MeasurementEngine:
                         if t_lbl_h is not None:
                             t_id_h = int(t_lbl_h.id)
                     same_t_h = _same_jaw_tooth_mask(mask_cs, is_mand, use_5_h, tooth_id=t_id_h)
-                    raw_env_h = _ridge_envelope_mask(mask_cs, u_coords, v_coords, jaw_id_h, t_id_h, is_mand, tooth_mask=same_t_h)
+                    raw_env_h = _ridge_envelope_mask(
+                        mask_cs, u_coords, v_coords, jaw_id_h, t_id_h, is_mand, tooth_mask=same_t_h
+                    )
                     r_mask_h = _extract_primary_ridge_component(raw_env_h, u_coords, v_coords)
                     if r_mask_h.any():
                         d_ap_sm = (c_bv, -c_bu) if is_mand else (-c_bv, c_bu)
@@ -3045,9 +3070,20 @@ class MeasurementEngine:
                                 if s_loc.any():
                                     canal_2d_h = s_loc
                         sm_h, _, sm_basal, _, _ = self._compute_bone_height_in_cs(
-                            u_coords, v_coords, mask_cs, P, N, B, is_mand, jaw_id_h, None,
-                            ridge_mask=r_mask_h, crest_uv=w_mid, d_apical=d_ap_sm,
-                            local_vital_mask_2d=canal_2d_h, img_cs=getattr(cs, "img_cs", None),
+                            u_coords,
+                            v_coords,
+                            mask_cs,
+                            P,
+                            N,
+                            B,
+                            is_mand,
+                            jaw_id_h,
+                            None,
+                            ridge_mask=r_mask_h,
+                            crest_uv=w_mid,
+                            d_apical=d_ap_sm,
+                            local_vital_mask_2d=canal_2d_h,
+                            img_cs=getattr(cs, "img_cs", None),
                         )
                         if sm_h is not None and sm_basal is not None:
                             new_end_uv = sm_basal
@@ -3057,7 +3093,9 @@ class MeasurementEngine:
                     cs.basal_v = new_end_uv[1]
                     h_rec.end_uv_mm = new_end_uv
                     h_rec.end_world_mm = h_end_w
-                h_val = round(float(np.linalg.norm(np.asarray(h_rec.end_world_mm) - np.asarray(h_start_w))), 2)
+                h_val = round(
+                    float(np.linalg.norm(np.asarray(h_rec.end_world_mm) - np.asarray(h_start_w))), 2
+                )
                 h_rec.value_mm = h_val
                 if meas is not None:
                     meas.bone_height_mm = h_val
@@ -3260,7 +3298,9 @@ class MeasurementEngine:
                             new_widths[depth] = None
                             records.pop(f"width_{depth:g}", None)
                     if w0_move_notes:
-                        cs.withheld_reason = _join_reasons(getattr(cs, "withheld_reason", None), *w0_move_notes)
+                        cs.withheld_reason = _join_reasons(
+                            getattr(cs, "withheld_reason", None), *w0_move_notes
+                        )
                     if meas is not None:
                         meas.bone_width_at_depths_mm = new_widths
                         meas.crest_width_mm = new_widths.get(0.0)
@@ -3398,16 +3438,6 @@ class MeasurementEngine:
         if not misch_str:
             return None
         return str(misch_str).split()[0].strip()
-
-    @staticmethod
-    def _suggest_implant(
-        crest_w: Optional[float],
-        mid_w: Optional[float],
-        bone_height: Optional[float],
-        mesiodistal: Optional[float],
-    ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-        """Delegate to the canonical `suggest_implant_dimensions` single source of truth."""
-        return suggest_implant_dimensions(crest_w, mid_w, bone_height, mesiodistal)
 
     def _estimate_missing_tooth_site_with_provenance(self, fdi: str) -> Tuple[np.ndarray, str, bool]:
         """Estimate missing tooth site using segmented neighbors or mesiodistal width table."""

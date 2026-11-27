@@ -25,18 +25,6 @@ def vtk_matrix_to_numpy(matrix: Any) -> np.ndarray:
     return out
 
 
-def numpy_to_vtk_matrix(arr: np.ndarray) -> Any:
-    """Create a `vtkMatrix4x4` from a `(4, 4)` NumPy array (requires `vtk`)."""
-    import vtk  # type: ignore
-
-    m = vtk.vtkMatrix4x4()
-    mat = np.asarray(arr, dtype=np.float64)
-    for r in range(4):
-        for c in range(4):
-            m.SetElement(r, c, float(mat[r, c]))
-    return m
-
-
 def read_surface(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[Any]]:
     """Read `.vtk`, `.vtp`, `.stl`, `.ply`, or `.obj` surface into `(verts, faces, polydata)`."""
     src = Path(path)
@@ -72,7 +60,11 @@ def read_surface(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[Any]]:
     polys = tri_poly.GetPolys()
     raw = vtk_to_numpy(polys.GetData()) if polys is not None else np.empty(0, dtype=np.int64)
     n_cells = int(tri_poly.GetNumberOfCells())
-    faces = raw.reshape(n_cells, 4)[:, 1:4].astype(np.int64) if n_cells > 0 and raw.size == n_cells * 4 else np.empty((0, 3), dtype=np.int64)
+    faces = (
+        raw.reshape(n_cells, 4)[:, 1:4].astype(np.int64)
+        if n_cells > 0 and raw.size == n_cells * 4
+        else np.empty((0, 3), dtype=np.int64)
+    )
     return verts, faces, tri_poly
 
 
@@ -197,9 +189,7 @@ def extract_isosurface_from_label(
     try:
         from skimage.measure import marching_cubes  # type: ignore
 
-        verts_zyx, faces, _normals, _vals = marching_cubes(
-            sub, level=0.5, step_size=max(1, int(step_size))
-        )
+        verts_zyx, faces, _normals, _vals = marching_cubes(sub, level=0.5, step_size=max(1, int(step_size)))
         verts_zyx = verts_zyx - 1.0
         verts_ijk = np.column_stack(
             [
@@ -212,7 +202,9 @@ def extract_isosurface_from_label(
         verts_ras = (np.asarray(affine, dtype=np.float64) @ verts_ijk.T).T[:, :3]
         faces = np.asarray(faces, dtype=np.int64)
     except Exception:
-        logger.debug("skimage marching_cubes unavailable; using VTK/NumPy surface extraction fallback", exc_info=True)
+        logger.debug(
+            "skimage marching_cubes unavailable; using VTK/NumPy surface extraction fallback", exc_info=True
+        )
         try:
             import vtk  # type: ignore
             from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy  # type: ignore
@@ -245,11 +237,14 @@ def extract_isosurface_from_label(
                 if raw_cells.size == nc * 4:
                     faces = raw_cells.reshape(nc, 4)[:, 1:4].astype(np.int64)
         except Exception:
-            logger.debug("VTK marching cubes fallback unavailable; using pure-NumPy voxel surface builder", exc_info=True)
+            logger.debug(
+                "VTK marching cubes fallback unavailable; using pure-NumPy voxel surface builder",
+                exc_info=True,
+            )
 
         if faces.size == 0:
-            ds = max(1, int(max(sub.shape) // 40))
-            sub_b = (sub[::ds, ::ds, ::ds] > 0.5)
+            ds = max(1, int(max(sub.shape) // 96))
+            sub_b = sub[::ds, ::ds, ::ds] > 0.5
             pad = np.pad(sub_b, 1, mode="constant", constant_values=False)
             occ_z, occ_y, occ_x = np.where(sub_b)
             quad_list: List[np.ndarray] = []
@@ -292,7 +287,12 @@ def extract_isosurface_from_label(
             else:
                 step = max(1, len(zyx[0]) // 3000)
                 vox = np.column_stack(
-                    [zyx[2][::step], zyx[1][::step], zyx[0][::step], np.ones(len(zyx[0][::step]), dtype=np.float64)]
+                    [
+                        zyx[2][::step],
+                        zyx[1][::step],
+                        zyx[0][::step],
+                        np.ones(len(zyx[0][::step]), dtype=np.float64),
+                    ]
                 )
                 verts_ras = (np.asarray(affine, dtype=np.float64) @ vox.T).T[:, :3]
                 return verts_ras, faces

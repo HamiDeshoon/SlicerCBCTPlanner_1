@@ -787,7 +787,6 @@ class TestAnatomyAwareMeasurements(unittest.TestCase):
         self.assertEqual(mid_cs.measurements["width_0"].provenance, "interpolated_boundary")
         _verify_rendered_measurement_sync(self, mid_cs, mid_meas)
 
-
     def test_23_height_origin_centered_on_w0_midline(self) -> None:
         mask, img, arch = _make_mandible_ring_phantom()
         eng = self._build_engine(mask, img, affine=np.diag([0.5, 0.5, 0.5, 1.0]), arch=arch)
@@ -1057,7 +1056,9 @@ class TestBL12SingleCortexWithhold(unittest.TestCase):
         affine = np.eye(4, dtype=np.float64)
         vol = CBCTVolume(img, (1.0, 1.0, 1.0), (0.0, 0.0, 0.0), np.eye(3, dtype=np.float64), affine)
         arch = _make_straight_arch(y_mm=25.0, z_mm=25.0, jaw="lower")
-        return MeasurementEngine(vol, mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=False)
+        return MeasurementEngine(
+            vol, mask, arch=arch, arches={"lower": arch}, is_dental_segmentator_5class=False
+        )
 
     def test_single_cortical_plate_withholds_w0_keeps_height_and_badge(self) -> None:
         img = np.full((50, 50, 50), -500.0, dtype=np.float32)

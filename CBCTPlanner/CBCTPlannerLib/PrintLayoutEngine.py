@@ -307,7 +307,9 @@ class PrintLayoutEngine:
             overrides = measurement_overrides or {}
             for s_idx, (meas, cs, target_fdi, arc_mm) in enumerate(measured):
                 ov = overrides.get(int(target_fdi))
-                if ov and abs(float(arc_mm) - float(arcs.get(target_fdi, arc_mm))) <= max(0.75, step_mm * 0.55):
+                if ov and abs(float(arc_mm) - float(arcs.get(target_fdi, arc_mm))) <= max(
+                    0.75, step_mm * 0.55
+                ):
                     if cs is not None:
                         if "w0_start_uv" in ov and "w0_end_uv" in ov:
                             w0_l, w0_r = ov["w0_start_uv"], ov["w0_end_uv"]

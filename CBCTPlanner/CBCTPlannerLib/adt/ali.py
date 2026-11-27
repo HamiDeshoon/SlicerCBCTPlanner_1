@@ -82,9 +82,7 @@ def identify_ali_landmarks(
     mand_ids = [DENTALSEGMENTATOR_MANDIBLE_ID] if is_5class else [LOWER_JAW_ID, DENTALSEGMENTATOR_MANDIBLE_ID]
     max_ids = [DENTALSEGMENTATOR_MAXILLA_ID] if is_5class else [UPPER_JAW_ID, DENTALSEGMENTATOR_MAXILLA_ID]
     canal_ids = (
-        [DENTALSEGMENTATOR_CANAL_ID]
-        if is_5class
-        else [LEFT_IAN_ID, RIGHT_IAN_ID, DENTALSEGMENTATOR_CANAL_ID]
+        [DENTALSEGMENTATOR_CANAL_ID] if is_5class else [LEFT_IAN_ID, RIGHT_IAN_ID, DENTALSEGMENTATOR_CANAL_ID]
     )
 
     mand_pts = _sample_mask_world_pts(volume, mask, mand_ids) if mask is not None else np.empty((0, 3))
@@ -98,7 +96,11 @@ def identify_ali_landmarks(
 
     # Estimate anatomical midline X even when FOV is shifted away from world X=0
     anchor_cloud = mand_pts if len(mand_pts) >= 10 else max_pts
-    x_mid_est = float(0.5 * (np.percentile(anchor_cloud[:, 0], 10) + np.percentile(anchor_cloud[:, 0], 90))) if len(anchor_cloud) >= 10 else 0.0
+    x_mid_est = (
+        float(0.5 * (np.percentile(anchor_cloud[:, 0], 10) + np.percentile(anchor_cloud[:, 0], 90)))
+        if len(anchor_cloud) >= 10
+        else 0.0
+    )
 
     # Mandibular landmarks: Me, Pg, Gn, B, Co_R/L, Go_R/L
     if len(mand_pts) >= 10:
@@ -125,8 +127,14 @@ def identify_ali_landmarks(
             b_front = upper_symph[upper_symph[:, 1] >= float(np.percentile(upper_symph[:, 1], 75))]
             if len(b_front) >= 2:
                 # Take the minimal Y among top anterior cortex profile before alveolar crest flare
-                z_band = b_front[(b_front[:, 2] >= float(pg_pt[2]) + 4.0) & (b_front[:, 2] <= float(pg_pt[2]) + 13.0)]
-                b_pt = z_band[int(np.argmin(z_band[:, 1]))] if len(z_band) > 0 else (pg_pt + np.array([0.0, -1.5, 7.5]))
+                z_band = b_front[
+                    (b_front[:, 2] >= float(pg_pt[2]) + 4.0) & (b_front[:, 2] <= float(pg_pt[2]) + 13.0)
+                ]
+                b_pt = (
+                    z_band[int(np.argmin(z_band[:, 1]))]
+                    if len(z_band) > 0
+                    else (pg_pt + np.array([0.0, -1.5, 7.5]))
+                )
             else:
                 b_pt = pg_pt + np.array([0.0, -1.5, 7.5])
         else:
@@ -162,7 +170,11 @@ def identify_ali_landmarks(
         sub_ans = midline_max[midline_max[:, 2] <= float(ans_pt[2]) - 1.5]
         if len(sub_ans) >= 3:
             a_cand = sub_ans[sub_ans[:, 1] >= float(ans_pt[1]) - 10.0]
-            a_pt = a_cand[int(np.argmax(a_cand[:, 1]))] if len(a_cand) > 0 else (ans_pt + np.array([0.0, -2.0, -4.5]))
+            a_pt = (
+                a_cand[int(np.argmax(a_cand[:, 1]))]
+                if len(a_cand) > 0
+                else (ans_pt + np.array([0.0, -2.0, -4.5]))
+            )
         else:
             a_pt = ans_pt + np.array([0.0, -2.0, -4.5], dtype=np.float64)
         _add("A", "skeletal", a_pt, "A-Point (Subspinale)", base_conf)
@@ -181,9 +193,17 @@ def identify_ali_landmarks(
             hemi_u = max_pts[side_mask]
             if len(hemi_u) >= 8:
                 ant_u = hemi_u[hemi_u[:, 2] >= float(np.percentile(hemi_u[:, 2], 70))]
-                or_pt = ant_u[int(np.argmax(ant_u[:, 1]))] if len(ant_u) > 0 else np.array([x_mid_est + sign * 32.0, float(ans_pt[1]) - 6.0, float(ans_pt[2]) + 22.0])
+                or_pt = (
+                    ant_u[int(np.argmax(ant_u[:, 1]))]
+                    if len(ant_u) > 0
+                    else np.array([x_mid_est + sign * 32.0, float(ans_pt[1]) - 6.0, float(ans_pt[2]) + 22.0])
+                )
                 post_u = hemi_u[hemi_u[:, 2] >= float(np.percentile(hemi_u[:, 2], 65))]
-                po_pt = post_u[int(np.argmin(post_u[:, 1]))] if len(post_u) > 0 else np.array([x_mid_est + sign * 52.0, float(pns_pt[1]) - 15.0, float(ans_pt[2]) + 22.0])
+                po_pt = (
+                    post_u[int(np.argmin(post_u[:, 1]))]
+                    if len(post_u) > 0
+                    else np.array([x_mid_est + sign * 52.0, float(pns_pt[1]) - 15.0, float(ans_pt[2]) + 22.0])
+                )
             else:
                 or_pt = np.array([x_mid_est + sign * 32.0, float(ans_pt[1]) - 6.0, float(ans_pt[2]) + 22.0])
                 po_pt = np.array([x_mid_est + sign * 52.0, float(pns_pt[1]) - 15.0, float(ans_pt[2]) + 22.0])
@@ -254,7 +274,9 @@ def extract_jaw_arch_anchor_bounds(
         b_z = landmarks["B"].position_ras[2] if "B" in landmarks else None
         return {
             "posterior_min_y": post_y,
-            "alveolar_z_max": (max(float(b_z) + 14.0, float(pg_z) + 20.0) if (b_z is not None and pg_z is not None) else None),
+            "alveolar_z_max": (
+                max(float(b_z) + 14.0, float(pg_z) + 20.0) if (b_z is not None and pg_z is not None) else None
+            ),
         }
     pns_y = landmarks["PNS"].position_ras[1] if "PNS" in landmarks else None
     ans_z = landmarks["ANS"].position_ras[2] if "ANS" in landmarks else None

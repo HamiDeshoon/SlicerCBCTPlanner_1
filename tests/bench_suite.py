@@ -78,7 +78,12 @@ def _measure_call(label: str, fn: Callable[[], Any]) -> Dict[str, Any]:
     dt = time.perf_counter() - t0
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    return {"step": label, "elapsed_ms": round(dt * 1000.0, 2), "peak_kib": round(peak / 1024.0, 1), "_res": res}
+    return {
+        "step": label,
+        "elapsed_ms": round(dt * 1000.0, 2),
+        "peak_kib": round(peak / 1024.0, 1),
+        "_res": res,
+    }
 
 
 def run_benchmark() -> Dict[str, Any]:

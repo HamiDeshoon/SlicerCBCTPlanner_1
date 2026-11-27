@@ -35,6 +35,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/core/case_state.py
   ${MODULE_NAME}Lib/core/contracts.py
   ${MODULE_NAME}Lib/core/diagnostics.py
+  ${MODULE_NAME}Lib/core/insertion.py
   ${MODULE_NAME}Lib/core/labels.py
   ${MODULE_NAME}Lib/core/mask_centerline.py
   ${MODULE_NAME}Lib/core/measurements.py

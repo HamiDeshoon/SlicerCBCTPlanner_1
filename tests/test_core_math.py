@@ -571,9 +571,7 @@ class TestSlicerCBCTPlanner(unittest.TestCase):
         # while the crest still sits on the lingual jaw bone (Z~27.5) rather than the in-socket root.
         self.assertIn("only one cortical plate", meas.withheld_reason or "")
         self.assertIsNone(meas.crest_width_mm)
-        self.assertAlmostEqual(
-            meas.bone_height_mm or 0.0, 18.5 - JAW_END_CORTEX_INSET_MM, delta=1.5
-        )
+        self.assertAlmostEqual(meas.bone_height_mm or 0.0, 18.5 - JAW_END_CORTEX_INSET_MM, delta=1.5)
 
     def test_ridge_envelope_hu_fallback_when_segmentation_covers_only_teeth(self) -> None:
         """Clinical safety: a teeth-only segmentation withholds bone metrics instead of using HU thresholds."""

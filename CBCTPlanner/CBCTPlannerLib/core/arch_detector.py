@@ -230,7 +230,11 @@ def compute_parallel_transport_frames(
         t0 = np.array([[-1.0, 0.0, 0.0]], dtype=np.float64)
         n0 = np.array([[0.0, 1.0, 0.0]], dtype=np.float64)
         b0 = np.array([[0.0, 0.0, 1.0]], dtype=np.float64)
-        return np.repeat(t0, max(1, m), axis=0), np.repeat(n0, max(1, m), axis=0), np.repeat(b0, max(1, m), axis=0)
+        return (
+            np.repeat(t0, max(1, m), axis=0),
+            np.repeat(n0, max(1, m), axis=0),
+            np.repeat(b0, max(1, m), axis=0),
+        )
 
     up = np.asarray(occlusal_normal, dtype=np.float64).reshape(3)
     up_norm = float(np.linalg.norm(up))
@@ -386,12 +390,10 @@ class DentalArch:
         self.u_dense = u_dense
         self.pts_dense = pts_dense
         self.t_dense = self.cum_arc_lengths / max(self.total_arc_length, 1e-9)
-        self._dense_tangents, self._dense_normals, self._dense_binormals = (
-            compute_parallel_transport_frames(
-                self.pts_dense,
-                occlusal_normal=self.occlusal_normal,
-                ras_convention=self.ras_convention,
-            )
+        self._dense_tangents, self._dense_normals, self._dense_binormals = compute_parallel_transport_frames(
+            self.pts_dense,
+            occlusal_normal=self.occlusal_normal,
+            ras_convention=self.ras_convention,
         )
 
     def _eval_raw(self, u_vals: np.ndarray) -> np.ndarray:
@@ -401,17 +403,6 @@ class DentalArch:
 
             return np.column_stack(interpolate.splev(u_arr, self.tck))
         return np.column_stack([np.interp(u_arr, self._u_ctrl, self.control_points[:, d]) for d in range(3)])
-
-    def _eval_deriv_raw(self, u_val: float) -> np.ndarray:
-        if self._use_scipy and self.tck is not None:
-            from scipy import interpolate  # type: ignore
-
-            return np.array(interpolate.splev(u_val, self.tck, der=1), dtype=np.float64)
-        eps = 1e-3
-        u0 = max(0.0, u_val - eps)
-        u1 = min(1.0, u_val + eps)
-        pts = self._eval_raw(np.array([u0, u1]))
-        return (pts[1] - pts[0]) / max(1e-6, u1 - u0)
 
     def _arc_to_u(self, arc_mm: float) -> float:
         arc_clamped = float(np.clip(arc_mm, 0.0, self.total_arc_length))
@@ -548,9 +539,7 @@ class DentalArch:
         ordered_pts = [fdi_dict[fdi] for fdi in desired_order if fdi in fdi_dict]
         if len(ordered_pts) < 4:
             raise ValueError(f"Found only {len(ordered_pts)} teeth for {jaw_type} jaw; need at least 4.")
-        ordered_arr, _, plane_params = align_arch_to_sagittal_plane(
-            np.array(ordered_pts, dtype=np.float64)
-        )
+        ordered_arr, _, plane_params = align_arch_to_sagittal_plane(np.array(ordered_pts, dtype=np.float64))
         pruned = _prune_pathological_points(ordered_arr)
         if len(pruned) < 4:
             raise ValueError(
@@ -1118,18 +1107,6 @@ def _rms_to_polyline(points: np.ndarray, polyline: np.ndarray, max_points: int =
     return float(np.sqrt(np.mean(min_dists**2)))
 
 
-def _order_cloud_as_horseshoe(points_xy: np.ndarray) -> np.ndarray:
-    """Order a dense XY cloud from Patient Right (+X), around anterior (+Y), to Patient Left (-X)."""
-    pts = np.asarray(points_xy, dtype=np.float64)
-    if len(pts) < 3:
-        return np.arange(len(pts))
-    y_min = float(np.min(pts[:, 1]))
-    x_mid = float(0.5 * (np.percentile(pts[:, 0], 5) + np.percentile(pts[:, 0], 95)))
-    ref_xy = np.array([x_mid, y_min - 25.0], dtype=np.float64)
-    angles = np.arctan2(pts[:, 1] - ref_xy[1], pts[:, 0] - ref_xy[0])
-    return np.argsort(angles)
-
-
 def _bin_horseshoe_cloud(
     points_3d: np.ndarray,
     num_bins: int,
@@ -1151,7 +1128,9 @@ def _bin_horseshoe_cloud(
     edges = np.linspace(a_min, a_max, max(8, int(num_bins)) + 1)
     centers: List[np.ndarray] = []
     for i in range(len(edges) - 1):
-        in_bin = (angles >= edges[i]) & (angles <= edges[i + 1] if i == len(edges) - 2 else angles < edges[i + 1])
+        in_bin = (angles >= edges[i]) & (
+            angles <= edges[i + 1] if i == len(edges) - 2 else angles < edges[i + 1]
+        )
         if not np.any(in_bin):
             continue
         sub = pts[in_bin]
@@ -1272,7 +1251,9 @@ def _extend_arch_with_jawbone_or_tangent(
         right_ext = bone_pts[right_mask]
         if len(right_ext) > 0:
             right_ext = right_ext[np.linalg.norm(right_ext - base_start, axis=1) <= max_reach]
-            right_ext = right_ext[np.argsort(np.arctan2(right_ext[:, 1] - ref_xy[1], right_ext[:, 0] - ref_xy[0]))]
+            right_ext = right_ext[
+                np.argsort(np.arctan2(right_ext[:, 1] - ref_xy[1], right_ext[:, 0] - ref_xy[0]))
+            ]
             if len(right_ext) > 0:
                 right_ext = right_ext.copy()
                 # Re-base bone crest Z smoothly onto the tooth-row endpoint Z to avoid vertical seam steps.
@@ -1281,7 +1262,9 @@ def _extend_arch_with_jawbone_or_tangent(
         left_ext = bone_pts[left_mask]
         if len(left_ext) > 0:
             left_ext = left_ext[np.linalg.norm(left_ext - base_end, axis=1) <= max_reach]
-            left_ext = left_ext[np.argsort(np.arctan2(left_ext[:, 1] - ref_xy[1], left_ext[:, 0] - ref_xy[0]))]
+            left_ext = left_ext[
+                np.argsort(np.arctan2(left_ext[:, 1] - ref_xy[1], left_ext[:, 0] - ref_xy[0]))
+            ]
             if len(left_ext) > 0:
                 left_ext = left_ext.copy()
                 z_shift = float(base_end[2] - left_ext[0, 2])
@@ -1337,13 +1320,6 @@ def _extend_arch_with_jawbone_or_tangent(
     return ext_ctrl, ext_dense, ext_dist
 
 
-def _monotonic_descending_x(points: np.ndarray) -> bool:
-    if len(points) < 4:
-        return False
-    dx = np.diff(points[:, 0])
-    return float(np.mean(dx <= 0.0)) >= 0.7
-
-
 def fit_arch_from_label_mask(
     mask_zyx: np.ndarray,
     affine: np.ndarray,
@@ -1386,8 +1362,16 @@ def fit_arch_from_label_mask(
             end_extension_mm=end_extension_mm,
         )
         if low_fit is not None and low_fit.accepted and up_fit is not None and up_fit.accepted:
-            low_pts = low_fit.points_ras if low_fit.points_ras[0, 0] >= low_fit.points_ras[-1, 0] else low_fit.points_ras[::-1]
-            up_pts = up_fit.points_ras if up_fit.points_ras[0, 0] >= up_fit.points_ras[-1, 0] else up_fit.points_ras[::-1]
+            low_pts = (
+                low_fit.points_ras
+                if low_fit.points_ras[0, 0] >= low_fit.points_ras[-1, 0]
+                else low_fit.points_ras[::-1]
+            )
+            up_pts = (
+                up_fit.points_ras
+                if up_fit.points_ras[0, 0] >= up_fit.points_ras[-1, 0]
+                else up_fit.points_ras[::-1]
+            )
             # Resample each jaw uniformly to matching control counts so blending never mixes unsorted Z heights.
             n_sh = max(len(low_pts), len(up_pts), int(num_control_points))
             low_ctrl, _ = _spline_through_ordered(low_pts, n_sh, smoothing=0.05)
@@ -1407,9 +1391,12 @@ def fit_arch_from_label_mask(
                 method=f"shared({low_fit.method}+{up_fit.method})",
                 accepted=True,
                 reason="",
-                tooth_bearing_arc_mm=0.5 * (float(low_fit.tooth_bearing_arc_mm) + float(up_fit.tooth_bearing_arc_mm)),
+                tooth_bearing_arc_mm=0.5
+                * (float(low_fit.tooth_bearing_arc_mm) + float(up_fit.tooth_bearing_arc_mm)),
                 end_extension_mm=float(end_extension_mm),
-                applied_extension_mm=min(float(low_fit.applied_extension_mm), float(up_fit.applied_extension_mm)),
+                applied_extension_mm=min(
+                    float(low_fit.applied_extension_mm), float(up_fit.applied_extension_mm)
+                ),
                 pitch_deg=float(sh_pitch_deg),
             )
         if low_fit is not None and (up_fit is None or low_fit.accepted):

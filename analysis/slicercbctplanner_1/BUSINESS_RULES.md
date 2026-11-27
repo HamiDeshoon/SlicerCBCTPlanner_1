@@ -2,7 +2,7 @@
 
 ## 1. Executive Assessment (`/modernize-assess`)
 - **System**: `SlicerCBCTPlanner_1` v3.3.0 (`CBCTPlanner/Resources/VERSION`, 3D Slicer Scripted Loadable Extension in Python 3.9+ / VTK / Qt / CTK / NumPy / SciPy).
-- **Codebase Inventory**: **40 module Python files** (`2` top-level `CBCTPlanner.py`, `cli_batch.py`; `16` in `CBCTPlannerLib/` including `EndodonticEngine.py`; `15` in `CBCTPlannerLib/core/` including `contracts.py`, `case_state.py`; `7` in `CBCTPlannerLib/adt/`) + **25 test modules** (**270 unit tests**, 8 wizard steps / 8 step chips, verified in both host Python 3.12 and Slicer 5.12.3 Python as of 2026-11-27).
+- **Codebase Inventory**: **41 module Python files** (`2` top-level `CBCTPlanner.py`, `cli_batch.py`; `16` in `CBCTPlannerLib/` including `EndodonticEngine.py`; `16` in `CBCTPlannerLib/core/` including `contracts.py`, `case_state.py`, `insertion.py`; `7` in `CBCTPlannerLib/adt/`) + **28 test modules** (**284 unit tests**, 8 wizard steps / 8 step chips, verified in both host Python 3.12 and Slicer 5.12.3 Python as of 2026-11-27).
 - **Modernization Method**: **Uplift + Feature Expansion** — preserve all behavioral guarantees (B1–B22, O1–O9, F1–F20) while enforcing CMake packaging completeness (`test_packaging_completeness.py`), shared units/provenance (`core/contracts.py`), parallel-transport arch frames & half-voxel pano boundary clamping, topology-aware multi-root `EndodonticEngine`, closed-form capsule `ImplantPlanner` with multi-structure SDF & uncertainty reporting, `OPT-01`/`OPT-03` caches, `adt` native suite, and structured JSON reports.
 
 ---
@@ -124,6 +124,9 @@
 | BL-16 | Vendored `mcp-slicer` copy with `SLICER_WEB_SERVER_URL` so Slicer's port is configurable | Low | Open |
 | BL-17 | Fix `AgentEndpointConfig.resolved_url()` via `urlsplit` (`?api-version=` preserved), align `is_configured()` (including bare hosts & keyless loopback), redact URL credentials/query keys, and send explicit `User-Agent` (`test_agent_review.py`) | Medium | **Closed (2026-11-25)** |
 | BL-18 | Anchor bone-height `H` at the `W0` midline midpoint (keeping fallback to `crest_uv` when `W0` is withheld) and preserve signed coronal crest offset via `coronal_offset_along_axis` / `reanchor_h_start_to_w0` during `W0` drag/overrides (`test_v32_preprint_and_arch.py`) | Medium | **Closed (2026-11-25)** |
+| BL-19 | Mask-space path-of-insertion undercut check (`core/insertion.py`: `UndercutReport`, `compute_blocked_surface`, `suggest_insertion_axis`; 6-neighbour surface, Bresenham sweep along the dominant voxel axis, ROI crop + auto-stride, `coronal_band_mm` seating collar, apical-face exclusion, one-voxel stair-step disclosure + geometric disclaimer) wired to `ImplantPlannerLogic.evaluate_insertion` and a Step 6 **Check Draw Direction** button; the guide seats as one rigid body, so the verdict is guide-level (`GuideBuildReport.seating_axis_ras` / `undercut_blocked_fraction` -> `guide_build` JSON) while per-implant fields stay informational (`test_insertion_undercut.py`) | High | **Closed (2026-11-27)** |
+| BL-20 | Implant library schema `1.1`: optional `ring_outer_diameter_mm` / `ring_inner_diameter_mm` / `ring_height_mm` / `sleeve_offset_mm` / `sleeved` on `ImplantLibraryEntry` + `PlacedImplant`; `resolve_sleeve_dimensions` resolves a metal-ring **pocket** (`ring_od + 2*clearance`, height `ring_height_mm`, bore `ring_inner_diameter_mm`) versus the unchanged integral-tube formula, with `pocket_diameter_mm` / `pocket_height_mm` / `sleeve_kind` on `GuideSleeveSpec` and consistency warnings only; the 12 bundled generic entries stay numerically unchanged and v1.0 files still load (`test_guide_sleeve_schema.py`) | Medium | **Closed (2026-11-27)** |
+| BL-21 | Anatomy-conforming intaglio guide body in `SurgicalGuideGenerator.generate_surgical_guide(..., mask_zyx, affine, seating_axis_ras, smooth, body_mode, arch_band_mm)`: arch-band `cKDTree` crop, seating-axis projection blockout, `scipy.ndimage.distance_transform_edt` shell band (`tissue_offset_mm .. offset + guide_thickness_mm`, sub-voxel clamps reported), solid sleeve collars voxel-unioned **before** bore subtraction, `< 50 mm^3` island removal, `GuideBuildReport` (`body_mode`, `is_edge_manifold`, `volume_mm3`, `island_count`, `sleeve_channels_open`, `seating_axis_ras`, `undercut_blocked_fraction`, warnings) persisted as `guide_build`; analytic fallback keeps the mask-less F14 path unchanged (`test_guide_intaglio.py`, `test_slicer_integration.py`) | High | **Closed (2026-11-27)** |
 
 ---
 
@@ -149,6 +152,9 @@
 | `tests/test_contracts_cache_opt.py` | 3 | Provenance contracts, `case_state` JSONL/override round-trips, `OPT-01` pano CRC32 cache invalidation |
 | `tests/test_endodontic_engine.py` | 2 | Multi-root 2-root/3-root topology graphs, bifurcations, EDT radii, curvature, conservative missing pulp, access corridor |
 | `tests/test_implant_uncertainty.py` | 2 | Closed-form capsule distances, adjacent tooth/IAN/sinus/cortical perforation, explicit uncertainty priors |
+| `tests/test_insertion_undercut.py` | 6 | Box/dome zero undercut, stem-under-shelf blocking, coronal seating band, 20° oblique axis recovery through voxel- and affine-rotated paths, empty/single-voxel safety |
+| `tests/test_guide_sleeve_schema.py` | 4 | Schema v1.1 null rings on bundled entries, metal-ring pocket resolution, legacy integral-tube formula, v1.0 backward compatibility |
+| `tests/test_guide_intaglio.py` | 4 | EDT intaglio shell offset/thickness on a slab, open through-hole + single island, empty-mask analytic fallback, NumPy surface fallback without `skimage`/`vtk` |
 | `tests/test_orientation_and_cross_sections.py` | 4 | Orientation + section geometry |
 | `tests/test_packaging_completeness.py` | 3 | Authoritative `VERSION`, 100% CMake script/resource enumeration, clean isolated staged install check |
 | `tests/test_planar_arch_alignment.py` | 4 | Roll-free sagittal-pitched plane alignment (`align_arch_to_sagittal_plane`), ectopic `#43` pruning, `fdi_centroids`/`principal_curve`/`jawbone_crest`/`shared` planarity, frame continuity |
@@ -156,7 +162,7 @@
 | `tests/test_transforms_and_reports.py` | 2 | Tilted LPS-to-RAS canonicalization, structured JSON report provenance & unit contracts |
 | `tests/test_v32_preprint_and_arch.py` | 4 | Inline labels, custom overlays, coronal-offset re-anchoring, Pre-Print JSONL, jaw-wise odontogram + 5/6/7 expansion |
 | `tests/test_v33_adt_and_clinical_geometry.py` | 7 | Strict T-junction, unclipped jaw bounds, smooth W0 continuity, periodic W3/W5 key, `adt` ALI/ASO/CLI-C/VFACE/DOCShapeAXI |
-| **Total** | **270** | Verified on 2026-11-27 in both host Python (`58.6s`) & Slicer 5.12.3 `PythonSlicer.exe` (`98.9s`) (`0` failures, `0` skipped; `ruff` clean) |
+| **Total** | **284** | Verified on 2026-11-27 in host Python (`27.2s`, `0` failures, `0` skipped; `ruff check` + `ruff format --check` clean on ruff `0.17.6`, pinned in `pyproject.toml` and CI). Slicer 5.12.3 `PythonSlicer.exe` was **not** re-run for the three guide/insertion modules |
 
 Run: `python -m unittest discover -s tests` (or `"D:/Program Files/3D Slicer 5.12.3/bin/PythonSlicer.exe" -m unittest discover -s tests`)
 

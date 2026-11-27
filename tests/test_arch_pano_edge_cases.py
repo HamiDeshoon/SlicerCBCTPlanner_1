@@ -110,7 +110,15 @@ class PanoramicEdgeClampAndPhantomTests(unittest.TestCase):
 
         # height_mm=15.4 reaches z in [-0.2, 15.2] (inside half-voxel boundary [-0.5, 15.5], outside [0, 15])
         mean_pano = PanoramicCurveLogic.sample_panoramic_slab_array(
-            vol, pts, t_arr, n_arr, b_arr, slab_thickness_mm=4.0, height_mm=15.4, spacing_mm=0.5, projection_mode="Mean"
+            vol,
+            pts,
+            t_arr,
+            n_arr,
+            b_arr,
+            slab_thickness_mm=4.0,
+            height_mm=15.4,
+            spacing_mm=0.5,
+            projection_mode="Mean",
         )
         # Border rows within half-voxel of slice 0 / 15 must stay at bone ~700 HU, NOT washed out toward -1000 air
         self.assertGreater(float(np.min(mean_pano)), 690.0)
@@ -118,7 +126,15 @@ class PanoramicEdgeClampAndPhantomTests(unittest.TestCase):
 
         # Samples genuinely far outside the FOV (height_mm=24 -> z up to +19.5) still return -1000 air
         wide_pano = PanoramicCurveLogic.sample_panoramic_slab_array(
-            vol, pts, t_arr, n_arr, b_arr, slab_thickness_mm=4.0, height_mm=24.0, spacing_mm=0.5, projection_mode="Mean"
+            vol,
+            pts,
+            t_arr,
+            n_arr,
+            b_arr,
+            slab_thickness_mm=4.0,
+            height_mm=24.0,
+            spacing_mm=0.5,
+            projection_mode="Mean",
         )
         self.assertLess(float(wide_pano[0, len(wide_pano[0]) // 2]), -900.0)
 

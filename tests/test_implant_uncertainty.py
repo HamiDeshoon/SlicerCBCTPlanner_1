@@ -33,10 +33,22 @@ class CapsuleImplantGeometryAndUncertaintyTests(unittest.TestCase):
         # Two vertical 4.0 x 10.0 mm implants placed 6.5 mm apart center-to-center:
         # exact surface-to-surface clearance = 6.5 - (2.0 + 2.0) = 2.5 mm (< 3.0 mm warning)
         i1 = logic.place_or_update_implant(
-            fdi=46, crest_point_ras=[10.0, 10.0, 20.0], T=t_dir, N=n_dir, B=b_dir, diameter_mm=4.0, length_mm=10.0
+            fdi=46,
+            crest_point_ras=[10.0, 10.0, 20.0],
+            T=t_dir,
+            N=n_dir,
+            B=b_dir,
+            diameter_mm=4.0,
+            length_mm=10.0,
         )
         i2 = logic.place_or_update_implant(
-            fdi=45, crest_point_ras=[16.5, 10.0, 20.0], T=t_dir, N=n_dir, B=b_dir, diameter_mm=4.0, length_mm=10.0
+            fdi=45,
+            crest_point_ras=[16.5, 10.0, 20.0],
+            T=t_dir,
+            N=n_dir,
+            B=b_dir,
+            diameter_mm=4.0,
+            length_mm=10.0,
         )
         self.assertIsNotNone(i1.min_neighbor_implant_distance_mm)
         self.assertAlmostEqual(i1.min_neighbor_implant_distance_mm, 2.5, places=1)
@@ -57,7 +69,9 @@ class CapsuleImplantGeometryAndUncertaintyTests(unittest.TestCase):
         # Mandibular bone block at x in [6..24], y in [10..22], z in [4..22] mm
         zz, yy, xx = np.ogrid[:64, :64, :64]
         x_mm, y_mm, z_mm = xx * sp, yy * sp, zz * sp
-        jaw_box = (x_mm >= 6.0) & (x_mm <= 24.0) & (y_mm >= 10.0) & (y_mm <= 22.0) & (z_mm >= 4.0) & (z_mm <= 22.0)
+        jaw_box = (
+            (x_mm >= 6.0) & (x_mm <= 24.0) & (y_mm >= 10.0) & (y_mm <= 22.0) & (z_mm >= 4.0) & (z_mm <= 22.0)
+        )
         mask[jaw_box] = LOWER_JAW_ID
         img[jaw_box] = 650.0
 
@@ -66,7 +80,9 @@ class CapsuleImplantGeometryAndUncertaintyTests(unittest.TestCase):
         mask[ian_box] = RIGHT_IAN_ID
 
         # Adjacent premolar tooth #45 near implant margin (x in [8..11], y in [13..19], z in [11..24] mm)
-        tooth_45 = (x_mm >= 8.0) & (x_mm <= 11.0) & (y_mm >= 13.0) & (y_mm <= 19.0) & (z_mm >= 11.0) & (z_mm <= 24.0)
+        tooth_45 = (
+            (x_mm >= 8.0) & (x_mm <= 11.0) & (y_mm >= 13.0) & (y_mm <= 19.0) & (z_mm >= 11.0) & (z_mm <= 24.0)
+        )
         mask[tooth_45] = FDI_TO_TOOTH_ID["45"]
 
         vol = CBCTVolume(img, (sp, sp, sp), (0.0, 0.0, 0.0), np.eye(3), aff)
@@ -129,7 +145,14 @@ class CapsuleImplantGeometryAndUncertaintyTests(unittest.TestCase):
         # Maxillary sinus test
         upper_mask = np.zeros(shape, dtype=np.int32)
         upper_mask[jaw_box] = UPPER_JAW_ID
-        sinus_box = (x_mm >= 12.0) & (x_mm <= 18.0) & (y_mm >= 13.0) & (y_mm <= 19.0) & (z_mm >= 18.0) & (z_mm <= 22.0)
+        sinus_box = (
+            (x_mm >= 12.0)
+            & (x_mm <= 18.0)
+            & (y_mm >= 13.0)
+            & (y_mm <= 19.0)
+            & (z_mm >= 18.0)
+            & (z_mm <= 22.0)
+        )
         upper_mask[sinus_box] = RIGHT_SINUS_ID
         imp_u = ImplantPlannerLogic().place_or_update_implant(
             fdi=16,

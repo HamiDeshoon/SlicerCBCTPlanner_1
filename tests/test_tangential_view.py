@@ -44,7 +44,13 @@ def _arch() -> DentalArch:
 class TestTangentialSampling(unittest.TestCase):
     def test_shape_and_pixel_size(self) -> None:
         section = sample_tangential_section(
-            _volume(lambda z: 800.0), _arch(), 20.0, width_mm=8.0, height_mm=6.0, pixel_mm=0.5, thickness_mm=1.0
+            _volume(lambda z: 800.0),
+            _arch(),
+            20.0,
+            width_mm=8.0,
+            height_mm=6.0,
+            pixel_mm=0.5,
+            thickness_mm=1.0,
         )
         self.assertTrue(section.available)
         self.assertEqual(section.shape, (13, 17))
@@ -80,7 +86,9 @@ class TestTangentialSampling(unittest.TestCase):
             return 1000.0 + 100.0 * z
 
         vol = CBCTVolume(
-            np.broadcast_to(np.linspace(-1000, 1000, SHAPE, dtype=np.float32)[None, :, None], (SHAPE, SHAPE, SHAPE)).copy(),
+            np.broadcast_to(
+                np.linspace(-1000, 1000, SHAPE, dtype=np.float32)[None, :, None], (SHAPE, SHAPE, SHAPE)
+            ).copy(),
             (SPACING,) * 3,
             (ORIGIN, ORIGIN, ORIGIN),
             np.eye(3),
@@ -138,7 +146,9 @@ class TestTangentialSampling(unittest.TestCase):
         self.assertIsNone(crest_drop_mm(empty))
 
     def test_arc_is_clamped_and_recorded(self) -> None:
-        section = sample_tangential_section(_volume(lambda z: 700.0), _arch(), 999.0, width_mm=6.0, height_mm=6.0)
+        section = sample_tangential_section(
+            _volume(lambda z: 700.0), _arch(), 999.0, width_mm=6.0, height_mm=6.0
+        )
         self.assertTrue(section.available)
         self.assertGreaterEqual(section.arc_mm, 0.0)
         meta = section.to_dict()
@@ -156,9 +166,10 @@ class TestTangentialRender(unittest.TestCase):
             width_mm=10.0,
             height_mm=8.0,
             pixel_mm=0.5,
-            mask=np.where(
-                (ORIGIN + np.arange(SHAPE) * SPACING)[:, None, None] < 0, 1, 0
-            ).repeat(SHAPE, axis=1).repeat(SHAPE, axis=2).astype(np.int32),
+            mask=np.where((ORIGIN + np.arange(SHAPE) * SPACING)[:, None, None] < 0, 1, 0)
+            .repeat(SHAPE, axis=1)
+            .repeat(SHAPE, axis=2)
+            .astype(np.int32),
             **kwargs,
         )
 

@@ -83,9 +83,7 @@ def deserialize_overrides_payload(raw_json: str) -> Dict[int, Dict[str, Any]]:
                 except (TypeError, ValueError):
                     continue
         if isinstance(ov.get("custom_overlays"), list):
-            entry["custom_overlays"] = [
-                dict(x) for x in ov["custom_overlays"] if isinstance(x, dict)
-            ]
+            entry["custom_overlays"] = [dict(x) for x in ov["custom_overlays"] if isinstance(x, dict)]
         if entry:
             restored[fdi_i] = entry
     return restored

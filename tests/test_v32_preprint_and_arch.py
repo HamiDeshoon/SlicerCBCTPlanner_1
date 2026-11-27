@@ -58,7 +58,9 @@ class TestInlineLabelsAndCustomOverlays(unittest.TestCase):
             {"kind": "line", "p1_uv": (-4.0, 0.0), "p2_uv": (4.0, 0.0), "text": "Check ridge"},
             {"kind": "circle", "center_uv": (2.0, -3.0), "radius_mm": 2.0, "text": "Abnormal?"},
         ]
-        rnd = render_cross_section(cs, meas, scale=3, show_footer=False, inline_line_labels=True, custom_overlays=custom)
+        rnd = render_cross_section(
+            cs, meas, scale=3, show_footer=False, inline_line_labels=True, custom_overlays=custom
+        )
         self.assertTrue(rnd.available)
         texts = [t for _x, _y, t in rnd.labels]
         self.assertTrue(any(t.startswith("H:") for t in texts))
@@ -77,14 +79,18 @@ class TestInlineLabelsAndCustomOverlays(unittest.TestCase):
 
         new_w0_start = (-1.5, 5.5)
         new_w0_end = (4.5, 5.5)
-        new_h_start = reanchor_h_start_to_w0(h_start, h_end, new_w0_start, new_w0_end, coronal_offset_mm=offset)
+        new_h_start = reanchor_h_start_to_w0(
+            h_start, h_end, new_w0_start, new_w0_end, coronal_offset_mm=offset
+        )
         new_mid = (1.5, 5.5)
         # H ray still passes through new_mid, and signed coronal distance matches `offset`.
         vec_mid_end = (new_mid[0] - h_end[0], new_mid[1] - h_end[1])
         vec_h_mid = (new_h_start[0] - new_mid[0], new_h_start[1] - new_mid[1])
         cross = vec_mid_end[0] * vec_h_mid[1] - vec_mid_end[1] * vec_h_mid[0]
         self.assertAlmostEqual(cross, 0.0, delta=0.1)
-        self.assertAlmostEqual(coronal_offset_along_axis(new_h_start, h_end, new_w0_start, new_w0_end), offset, delta=0.05)
+        self.assertAlmostEqual(
+            coronal_offset_along_axis(new_h_start, h_end, new_w0_start, new_w0_end), offset, delta=0.05
+        )
 
     def test_build_preprint_rows_autopopulates_and_persists_overrides(self) -> None:
         class _FakeParamNode:
@@ -123,7 +129,9 @@ class TestInlineLabelsAndCustomOverlays(unittest.TestCase):
             "h_end_uv": (0.2, -7.2),
             "w0_start_uv": (-3.5, 4.5),
             "w0_end_uv": (3.9, 4.5),
-            "custom_overlays": [{"kind": "circle", "center_uv": (1.0, -2.0), "radius_mm": 2.0, "text": "Defect"}],
+            "custom_overlays": [
+                {"kind": "circle", "center_uv": (1.0, -2.0), "radius_mm": 2.0, "text": "Defect"}
+            ],
         }
         widget._saveOverridesToParameterNode()
         widget._measurementOverridesByFDI = {}
@@ -200,8 +208,12 @@ class TestInlineLabelsAndCustomOverlays(unittest.TestCase):
         widget._parameterNode = None
         widget.toothButtons = {fdi: _Btn() for fdi in Q1_TEETH + Q2_TEETH + Q3_TEETH + Q4_TEETH}
         q_btns = [_Btn(), _Btn(), _Btn(), _Btn()]
-        widget._odontogramUpperWidgets = [q_btns[0], q_btns[1]] + [widget.toothButtons[f] for f in Q1_TEETH + Q2_TEETH]
-        widget._odontogramLowerWidgets = [q_btns[2], q_btns[3]] + [widget.toothButtons[f] for f in Q3_TEETH + Q4_TEETH]
+        widget._odontogramUpperWidgets = [q_btns[0], q_btns[1]] + [
+            widget.toothButtons[f] for f in Q1_TEETH + Q2_TEETH
+        ]
+        widget._odontogramLowerWidgets = [q_btns[2], q_btns[3]] + [
+            widget.toothButtons[f] for f in Q3_TEETH + Q4_TEETH
+        ]
         widget.archModeCombo = _Combo("Per-Jaw (Lower / Upper)")
         widget.activeJawCombo = _Combo("Upper")
         widget.arcMmSlider = SimpleNamespace(blockSignals=lambda _v: None, setValue=lambda _v: None)

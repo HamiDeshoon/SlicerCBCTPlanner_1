@@ -318,7 +318,6 @@ class TestFitArchFromLabelMask(unittest.TestCase):
             self.assertFalse(result.accepted)
             self.assertTrue(result.reason)
 
-
     def test_edentulous_jaw_falls_back_to_mandible_and_maxilla_bone_labels(self) -> None:
         from CBCTPlannerLib.core.arch_detector import fit_arch_from_label_mask
 

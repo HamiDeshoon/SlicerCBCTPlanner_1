@@ -134,7 +134,9 @@ def sample_tangential_section(
 
     if volume is None or arch is None:
         return TangentialSection(
-            available=False, reason="a CBCT volume and an arch curve are required", arc_mm=float(arc_mm or 0.0)
+            available=False,
+            reason="a CBCT volume and an arch curve are required",
+            arc_mm=float(arc_mm or 0.0),
         )
 
     try:
@@ -290,8 +292,14 @@ def render_tangential_section(
     bar_y = height_px - pad - 2
     bar_x0 = pad + 2
     if bar_x0 + bar_len < width_px - pad:
-        draw.line([(bar_x0, bar_y), (bar_x0 + bar_len, bar_y)], fill=(226, 232, 240, 235), width=max(1, scale // 2 + 1))
-        draw.text((bar_x0, bar_y - max(12, int(3.6 * scale))), "10 mm", fill=(226, 232, 240, 235), font=font_sm)
+        draw.line(
+            [(bar_x0, bar_y), (bar_x0 + bar_len, bar_y)],
+            fill=(226, 232, 240, 235),
+            width=max(1, scale // 2 + 1),
+        )
+        draw.text(
+            (bar_x0, bar_y - max(12, int(3.6 * scale))), "10 mm", fill=(226, 232, 240, 235), font=font_sm
+        )
 
     hud = f"Tangential | arc {section.arc_mm:.1f} mm | {section.thickness_mm:.1f} mm slab ({section.thickness_mode})"
     draw.text((pad, pad), hud, fill=(148, 163, 184, 235), font=font_sm)
@@ -313,9 +321,7 @@ def render_tangential_section(
         bar = max(14, int(4.6 * scale))
         canvas = Image.new("RGBA", (width_px, height_px + bar), (2, 4, 9, 255))
         canvas.paste(image, (0, 0))
-        ImageDraw.Draw(canvas).text(
-            (4, height_px + 2), footer_text, fill=(226, 232, 240, 255), font=font_sm
-        )
+        ImageDraw.Draw(canvas).text((4, height_px + 2), footer_text, fill=(226, 232, 240, 255), font=font_sm)
         image = canvas
     return CrossSectionRender(
         image=image,

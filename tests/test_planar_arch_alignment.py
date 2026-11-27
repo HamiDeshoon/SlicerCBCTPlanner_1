@@ -138,7 +138,9 @@ class TestPlanarSagittalArchAlignment(unittest.TestCase):
                 _stamp_world_sphere(
                     mask,
                     inv_aff,
-                    np.array([side_sign * (31.0 + 0.2 * step), -step, -4.0 + slope * (-step - y_med) + 0.9 * step]),
+                    np.array(
+                        [side_sign * (31.0 + 0.2 * step), -step, -4.0 + slope * (-step - y_med) + 0.9 * step]
+                    ),
                     3.2,
                     LOWER_JAW_ID,
                 )
@@ -182,7 +184,9 @@ class TestPlanarSagittalArchAlignment(unittest.TestCase):
             if y < 5.0:
                 z_base += 1.2 * (5.0 - y)
             _stamp_world_sphere(mask_ed, inv_aff, np.array([x, y, z_base]), 3.5, LOWER_JAW_ID)
-        res_ed = fit_arch_from_label_mask(mask_ed, affine, jaw="lower", is_5class=False, end_extension_mm=15.0)
+        res_ed = fit_arch_from_label_mask(
+            mask_ed, affine, jaw="lower", is_5class=False, end_extension_mm=15.0
+        )
         self.assertIsNotNone(res_ed)
         assert res_ed is not None
         self.assertTrue(res_ed.accepted, res_ed.reason)
@@ -201,7 +205,9 @@ class TestPlanarSagittalArchAlignment(unittest.TestCase):
             _stamp_world_sphere(mask_sh, inv_aff, np.array([x, y, z_up]), 2.6, f_up)
             _stamp_world_sphere(mask_sh, inv_aff, np.array([x, y, z_low - 5.0]), 2.8, LOWER_JAW_ID)
             _stamp_world_sphere(mask_sh, inv_aff, np.array([x, y, z_up + 5.0]), 2.8, UPPER_JAW_ID)
-        res_sh = fit_arch_from_label_mask(mask_sh, affine, jaw="shared", is_5class=False, end_extension_mm=10.0)
+        res_sh = fit_arch_from_label_mask(
+            mask_sh, affine, jaw="shared", is_5class=False, end_extension_mm=10.0
+        )
         self.assertIsNotNone(res_sh)
         assert res_sh is not None
         self.assertTrue(res_sh.accepted, res_sh.reason)

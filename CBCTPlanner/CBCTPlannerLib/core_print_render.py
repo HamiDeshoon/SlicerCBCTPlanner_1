@@ -196,20 +196,6 @@ def _draw_endcap(
     )
 
 
-def _draw_dashed_hline(
-    draw: Any,
-    x0: float,
-    x1: float,
-    y: float,
-    *,
-    fill: Tuple[int, int, int],
-    dash: int = 6,
-    gap: int = 4,
-    width: int = 1,
-) -> None:
-    _draw_dashed_segment(draw, (min(x0, x1), y), (max(x0, x1), y), fill=fill, dash=dash, gap=gap, width=width)
-
-
 def _draw_dashed_vline(
     draw: Any,
     x: float,
@@ -802,11 +788,7 @@ def render_cross_section(
     if not show_depth_key:
         deep_depths: List[float] = []
     elif depth_key_depths is not None:
-        deep_depths = [
-            float(d)
-            for d in depth_key_depths
-            if float(d) > 0.0 and float(d) in width_endpoints
-        ]
+        deep_depths = [float(d) for d in depth_key_depths if float(d) > 0.0 and float(d) in width_endpoints]
     else:
         deep_depths = [d for d in sorted(width_endpoints.keys()) if float(d) > 0.0]
     if deep_depths:
@@ -835,16 +817,22 @@ def render_cross_section(
         for seg_p0, seg_p1 in overlay:
             for t_i in range(9):
                 tf = t_i / 8.0
-                avoid_pts.append((seg_p0[0] + tf * (seg_p1[0] - seg_p0[0]), seg_p0[1] + tf * (seg_p1[1] - seg_p0[1])))
+                avoid_pts.append(
+                    (seg_p0[0] + tf * (seg_p1[0] - seg_p0[0]), seg_p0[1] + tf * (seg_p1[1] - seg_p0[1]))
+                )
         if is_mand:
             if geom["canal_centroid_uv"] is not None:
-                avoid_pts.append(_px(geom["canal_centroid_uv"][0], geom["canal_centroid_uv"][1], u_coords, v_coords, scale))
+                avoid_pts.append(
+                    _px(geom["canal_centroid_uv"][0], geom["canal_centroid_uv"][1], u_coords, v_coords, scale)
+                )
             for vu, vv in geom["vital_contour_uv"] or ():
                 avoid_pts.append(_px(float(vu), float(vv), u_coords, v_coords, scale))
         for su, sv in geom["sinus_floor_uv"] or ():
             avoid_pts.append(_px(float(su), float(sv), u_coords, v_coords, scale))
 
-        has_seg_mask = mask_arr is not None and getattr(mask_arr, "ndim", 0) == 2 and bool(np.any(mask_arr > 0))
+        has_seg_mask = (
+            mask_arr is not None and getattr(mask_arr, "ndim", 0) == 2 and bool(np.any(mask_arr > 0))
+        )
         src_arr = mask_arr if has_seg_mask else gray
 
         def _corner_score(cx: float, cy: float) -> Tuple[int, int, int, float]:
@@ -860,11 +848,39 @@ def render_cross_section(
                 if (cx - 4.0) <= px_v <= (cx + box_w + 4.0) and (cy - 4.0) <= py_v <= (cy + box_h + 4.0)
             )
             anat_frac = 0.0
-            if src_arr is not None and getattr(src_arr, "ndim", 0) == 2 and src_arr.shape[0] > 0 and src_arr.shape[1] > 0:
-                c0 = max(0, min(src_arr.shape[1] - 1, int(math.floor(cx / max(1e-6, float(width)) * src_arr.shape[1]))))
-                c1 = max(c0 + 1, min(src_arr.shape[1], int(math.ceil((cx + box_w) / max(1e-6, float(width)) * src_arr.shape[1]))))
-                r0 = max(0, min(src_arr.shape[0] - 1, int(math.floor(cy / max(1e-6, float(safe_h)) * src_arr.shape[0]))))
-                r1 = max(r0 + 1, min(src_arr.shape[0], int(math.ceil((cy + box_h) / max(1e-6, float(safe_h)) * src_arr.shape[0]))))
+            if (
+                src_arr is not None
+                and getattr(src_arr, "ndim", 0) == 2
+                and src_arr.shape[0] > 0
+                and src_arr.shape[1] > 0
+            ):
+                c0 = max(
+                    0,
+                    min(
+                        src_arr.shape[1] - 1, int(math.floor(cx / max(1e-6, float(width)) * src_arr.shape[1]))
+                    ),
+                )
+                c1 = max(
+                    c0 + 1,
+                    min(
+                        src_arr.shape[1],
+                        int(math.ceil((cx + box_w) / max(1e-6, float(width)) * src_arr.shape[1])),
+                    ),
+                )
+                r0 = max(
+                    0,
+                    min(
+                        src_arr.shape[0] - 1,
+                        int(math.floor(cy / max(1e-6, float(safe_h)) * src_arr.shape[0])),
+                    ),
+                )
+                r1 = max(
+                    r0 + 1,
+                    min(
+                        src_arr.shape[0],
+                        int(math.ceil((cy + box_h) / max(1e-6, float(safe_h)) * src_arr.shape[0])),
+                    ),
+                )
                 patch = src_arr[r0:r1, c0:c1]
                 if has_seg_mask:
                     anat_frac = float(np.mean(patch > 0))
@@ -872,7 +888,12 @@ def render_cross_section(
                     anat_frac = float(np.mean(patch < 160))
                 else:
                     anat_frac = float(np.mean(patch > 95))
-            return (1 if ov_area > 0.0 else 0, pt_hits, 1 if anat_frac > 0.03 else 0, ov_area + anat_frac * 100.0)
+            return (
+                1 if ov_area > 0.0 else 0,
+                pt_hits,
+                1 if anat_frac > 0.03 else 0,
+                ov_area + anat_frac * 100.0,
+            )
 
         bx, by = corner_candidates[0]
         best_score = _corner_score(bx, by)
